@@ -76,10 +76,10 @@
   (:results (result :scs (unsigned-reg)))
   (:result-types positive-fixnum)
   (:generator 6
-    (inst ldl temp (- fun-pointer-lowtag) function)
+    (inst ldq temp (- fun-pointer-lowtag) function)
     (inst and temp #xff temp)
     (inst bis type temp temp)
-    (inst stl temp (- fun-pointer-lowtag) function)
+    (inst stq temp (- fun-pointer-lowtag) function)
     (move type result)))
 
 
@@ -116,10 +116,12 @@
     (inst and t1 widetag-mask t1)
     (sc-case data
       (any-reg
-       (inst sll data (- n-widetag-bits 2) t2)
+       (inst sll data (- n-widetag-bits n-fixnum-tag-bits) t2)
        (inst bis t1 t2 t1))
       (immediate
        (let ((c (ash (tn-value data) n-widetag-bits)))
+         ;; Alpha instructions only accept 8-bit wide immediates; check
+         ;; to see whether the value will fit into the immediate field.
 	 (cond ((<= 0 c (1- (ash 1 8)))
 		(inst bis t1 c t1))
 	       (t
@@ -136,8 +138,8 @@
     ;;
     ;; Some code (the hash table code) depends on this returning a
     ;; positive number so make sure it does.
-    (inst sll ptr 35 res)
-    (inst srl res 33 res)))
+    (inst sll ptr 4 res)
+    (inst srl res 1 res)))
 
 (define-vop (make-other-immediate-type)
   (:args (val :scs (any-reg descriptor-reg))
@@ -241,6 +243,6 @@
     (let ((offset
 	   (- (* (+ index vector-data-offset) n-word-bytes)
 	      other-pointer-lowtag)))
-      (inst ldl count offset count-vector)
+      (inst ldq count offset count-vector)
       (inst addq count 1 count)
-      (inst stl count offset count-vector))))
+      (inst stq count offset count-vector))))

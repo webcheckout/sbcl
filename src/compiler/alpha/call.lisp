@@ -136,8 +136,8 @@
     (emit-label start-lab)
     ;; Allocate function header.
     (inst simple-fun-header-word)
-    (dotimes (i (1- simple-fun-code-offset))
-      (inst lword 0))
+    (dotimes (i (* n-word-bytes (1- simple-fun-code-offset)))
+      (inst byte 0))
     ;; The start of the actual code.
     ;; Compute CODE from the address of this entry point.
     (let ((entry-point (gen-label)))
@@ -306,8 +306,8 @@ default-value-8
 		    (tn (tn-ref-tn val)))
 		(defaults (cons default-lab tn))
 		
-		(inst ble temp default-lab)
-		(inst ldl move-temp (* i n-word-bytes) ocfp-tn)
+                (inst blt temp default-lab)
+                (inst ldq move-temp (* i n-word-bytes) ocfp-tn)
 		(inst subq temp (fixnumize 1) temp)
 		(store-stack-tn tn move-temp)))
 	    
@@ -322,8 +322,9 @@ default-value-8
 		    ((null remaining))
 		  (let ((def (car remaining)))
 		    (emit-label (car def))
-		    (store-stack-tn (cdr def) null-tn)))
-		(inst br zero-tn defaulting-done)))))
+                    (when (null (cdr remaining))
+                      (inst br zero-tn defaulting-done))
+		    (store-stack-tn (cdr def) null-tn)))))))
 
 	(when lra-label
 	  (inst compute-code-from-lra code-tn code-tn lra-label temp))))
@@ -358,9 +359,9 @@ default-value-8
 
     (when lra-label
       (inst compute-code-from-lra code-tn code-tn lra-label temp))
-    (inst addq csp-tn 4 csp-tn)
+    (inst addq csp-tn (fixnumize 1) csp-tn)
     (storew (first *register-arg-tns*) csp-tn -1)
-    (inst subq csp-tn 4 start)
+    (inst subq csp-tn (fixnumize 1) start)
     (inst li (fixnumize 1) count)
     
     (emit-label done)
@@ -431,7 +432,8 @@ default-value-8
       (when cur-nfp
 	(store-stack-tn nfp-save cur-nfp))
       (let ((callee-nfp (callee-nfp-tn callee)))
-	(maybe-load-stack-nfp-tn callee-nfp nfp temp))
+        (when callee-nfp
+          (maybe-load-stack-tn callee-nfp nfp)))
       (maybe-load-stack-tn cfp-tn fp)
       (trace-table-entry trace-table-call-site)
       (inst compute-lra-from-code
@@ -441,7 +443,8 @@ default-value-8
       (trace-table-entry trace-table-normal)
       (emit-return-pc label)
       (default-unknown-values vop values nvals move-temp temp label)
-      (maybe-load-stack-nfp-tn cur-nfp nfp-save temp))))
+      (when cur-nfp
+        (load-stack-tn cur-nfp nfp-save)))))
 
 
 ;;; Non-TR local call for a variable number of return values passed
@@ -468,7 +471,8 @@ default-value-8
       (when cur-nfp
 	(store-stack-tn nfp-save cur-nfp))
       (let ((callee-nfp (callee-nfp-tn callee)))
-	(maybe-load-stack-nfp-tn callee-nfp nfp temp))
+	(when callee-nfp
+          (maybe-load-stack-tn callee-nfp nfp)))
       (maybe-load-stack-tn cfp-tn fp)
       (trace-table-entry trace-table-call-site)
       (inst compute-lra-from-code
@@ -479,7 +483,8 @@ default-value-8
       (emit-return-pc label)
       (note-this-location vop :unknown-return)
       (receive-unknown-values values-start nvals start count label temp)
-      (maybe-load-stack-nfp-tn cur-nfp nfp-save temp))))
+      (when cur-nfp
+        (load-stack-tn cur-nfp nfp-save)))))
 
 
 ;;;; local call with known values return
@@ -508,7 +513,8 @@ default-value-8
       (when cur-nfp
 	(store-stack-tn nfp-save cur-nfp))
       (let ((callee-nfp (callee-nfp-tn callee)))
-	(maybe-load-stack-nfp-tn callee-nfp nfp temp))
+	(when callee-nfp
+          (maybe-load-stack-tn callee-nfp nfp)))
       (maybe-load-stack-tn cfp-tn fp)
       (trace-table-entry trace-table-call-site)
       (inst compute-lra-from-code
@@ -518,7 +524,8 @@ default-value-8
       (trace-table-entry trace-table-normal)
       (emit-return-pc label)
       (note-this-location vop :known-return)
-      (maybe-load-stack-nfp-tn cur-nfp nfp-save temp))))
+      (when cur-nfp
+        (load-stack-tn cur-nfp nfp-save)))))
 
 ;;; Return from known values call. We receive the return locations as
 ;;; arguments to terminate their lifetimes in the returning function.
@@ -709,7 +716,7 @@ default-value-8
 			     `((inst subq csp-tn new-fp nargs-pass)
 			       ,@(let ((index -1))
 				   (mapcar (lambda (name)
-					     `(inst ldl ,name
+                                             `(inst ldq ,name
 						    ,(ash (incf index)
 							  word-shift)
 						    new-fp))
@@ -721,7 +728,7 @@ default-value-8
 				 (any-reg
 				  (inst move ocfp ocfp-pass))
 				 (control-stack
-				  (inst ldl ocfp-pass
+                                  (inst ldq ocfp-pass
 					(ash (tn-offset ocfp)
 					     word-shift)
 					cfp-tn))))
@@ -730,7 +737,7 @@ default-value-8
 				 (#!-gengc descriptor-reg #!+gengc any-reg
 				  (inst move return-pc return-pc-pass))
 				 (control-stack
-				  (inst ldl return-pc-pass
+                                  (inst ldq return-pc-pass
 					(ash (tn-offset return-pc)
 					     word-shift)
 					 cfp-tn))))
@@ -759,31 +766,31 @@ default-value-8
 		 `((sc-case name
 		     (descriptor-reg (move name name-pass))
 		     (control-stack
-		      (inst ldl name-pass
+                      (inst ldq name-pass
 			    (ash (tn-offset name) word-shift) cfp-tn)
 		      (do-next-filler))
 		     (constant
-		      (inst ldl name-pass
+                      (inst ldq name-pass
 			    (- (ash (tn-offset name) word-shift)
 			       other-pointer-lowtag) code-tn)
 		      (do-next-filler)))
-		   (inst ldl entry-point
+                   (inst ldq entry-point
 			 (- (ash fdefn-raw-addr-slot word-shift)
 			    other-pointer-lowtag) name-pass)
 		   (do-next-filler))
 		 `((sc-case arg-fun
 		     (descriptor-reg (move arg-fun lexenv))
 		     (control-stack
-		      (inst ldl lexenv
+		      (inst ldq lexenv
 			    (ash (tn-offset arg-fun) word-shift) cfp-tn)
 		      (do-next-filler))
 		     (constant
-		      (inst ldl lexenv
+                      (inst ldq lexenv
 			    (- (ash (tn-offset arg-fun) word-shift)
 			       other-pointer-lowtag) code-tn)
 		      (do-next-filler)))
 		   #!-gengc
-		   (inst ldl function
+                   (inst ldq function
 			 (- (ash closure-fun-slot word-shift)
 			    fun-pointer-lowtag) lexenv)
 		   #!-gengc
@@ -793,7 +800,7 @@ default-value-8
 			 (- (ash simple-fun-code-offset word-shift)
 			    fun-pointer-lowtag) entry-point)
 		   #!+gengc
-		   (inst ldl entry-point
+                   (inst ldq entry-point
 			 (- (ash closure-entry-point-slot word-shift)
 			    fun-pointer-lowtag) lexenv)
 		   #!+gengc
@@ -813,14 +820,16 @@ default-value-8
 		(emit-return-pc lra-label)
 		(default-unknown-values vop values nvals
 					move-temp temp lra-label)
-		(maybe-load-stack-nfp-tn cur-nfp nfp-save temp)))
+		(when cur-nfp
+                  (load-stack-tn cur-nfp nfp-save))))
 	     (:unknown
 	      '((trace-table-entry trace-table-normal)
 		(emit-return-pc lra-label)
 		(note-this-location vop :unknown-return)
 		(receive-unknown-values values-start nvals start count
 					lra-label temp)
-		(maybe-load-stack-nfp-tn cur-nfp nfp-save temp)))
+		(when cur-nfp
+                  (load-stack-tn cur-nfp nfp-save))))
 	     (:tail))))))
 
 (define-full-call call nil :fixed nil)
@@ -998,7 +1007,7 @@ default-value-8
       ;; Check for the single case.
       (inst li (fixnumize 1) a0)
       (inst cmpeq nvals-arg a0 temp)
-      (inst ldl a0 0 vals-arg)
+      (inst ldq a0 0 vals-arg)
       (inst beq temp not-single)
 
       ;; Return with one value.
@@ -1109,7 +1118,9 @@ default-value-8
 (define-vop (listify-rest-args)
   (:args (context-arg :target context :scs (descriptor-reg))
 	 (count-arg :target count :scs (any-reg)))
-  (:arg-types * tagged-num)
+  (:info dx)
+  (:ignore dx)
+  (:arg-types * tagged-num (:constant t))
   (:temporary (:scs (any-reg) :from (:argument 0)) context)
   (:temporary (:scs (any-reg) :from (:argument 1)) count)
   (:temporary (:scs (descriptor-reg) :from :eval) temp dst)

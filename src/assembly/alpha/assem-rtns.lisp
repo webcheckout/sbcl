@@ -40,19 +40,19 @@
   ;; can assume that we are never called with NVALS == 1 and that A0
   ;; has already been loaded.
   (inst ble nvals default-a0-and-on)
-  (inst ldl a1 (* 1 n-word-bytes) vals)
+  (inst ldq a1 (* 1 n-word-bytes) vals)
   (inst subq nvals (fixnumize 2) count)
   (inst ble count default-a2-and-on)
-  (inst ldl a2 (* 2 n-word-bytes) vals)
+  (inst ldq a2 (* 2 n-word-bytes) vals)
   (inst subq nvals (fixnumize 3) count)
   (inst ble count default-a3-and-on)
-  (inst ldl a3 (* 3 n-word-bytes) vals)
+  (inst ldq a3 (* 3 n-word-bytes) vals)
   (inst subq nvals (fixnumize 4) count)
   (inst ble count default-a4-and-on)
-  (inst ldl a4 (* 4 n-word-bytes) vals)
+  (inst ldq a4 (* 4 n-word-bytes) vals)
   (inst subq nvals (fixnumize 5) count)
   (inst ble count default-a5-and-on)
-  (inst ldl a5 (* 5 n-word-bytes) vals)
+  (inst ldq a5 (* 5 n-word-bytes) vals)
   (inst subq nvals (fixnumize 6) count)
   (inst ble count done)
 
@@ -61,9 +61,9 @@
   (inst addq cfp-tn (* 6 n-word-bytes) dst)
 
   LOOP
-  (inst ldl temp 0 vals)
+  (inst ldq temp 0 vals)
   (inst addq vals n-word-bytes vals)
-  (inst stl temp 0 dst)
+  (inst stq temp 0 dst)
   (inst subq count (fixnumize 1) count)
   (inst addq dst n-word-bytes dst)
   (inst bne count loop)
@@ -128,12 +128,12 @@
      
   ;; Load the argument regs (must do this now, 'cause the blt might
   ;; trash these locations)
-  (inst ldl a0 (* 0 n-word-bytes) args)
-  (inst ldl a1 (* 1 n-word-bytes) args)
-  (inst ldl a2 (* 2 n-word-bytes) args)
-  (inst ldl a3 (* 3 n-word-bytes) args)
-  (inst ldl a4 (* 4 n-word-bytes) args)
-  (inst ldl a5 (* 5 n-word-bytes) args)
+  (inst ldq a0 (* 0 n-word-bytes) args)
+  (inst ldq a1 (* 1 n-word-bytes) args)
+  (inst ldq a2 (* 2 n-word-bytes) args)
+  (inst ldq a3 (* 3 n-word-bytes) args)
+  (inst ldq a4 (* 4 n-word-bytes) args)
+  (inst ldq a5 (* 5 n-word-bytes) args)
 
   ;; Calc SRC, DST, and COUNT
   (inst subq nargs (fixnumize register-arg-count) count)
@@ -143,9 +143,9 @@
 	
   LOOP
   ;; Copy one arg.
-  (inst ldl temp 0 src)
+  (inst ldq temp 0 src)
   (inst addq src n-word-bytes src)
-  (inst stl temp 0 dst)
+  (inst stq temp 0 dst)
   (inst subq count (fixnumize 1) count)
   (inst addq dst n-word-bytes dst)
   (inst bgt count loop)

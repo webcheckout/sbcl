@@ -23,7 +23,7 @@
       (symbol
        (load-symbol y val))
       (character
-       (inst li (logior (ash (char-code val) n-widetag-bits) character-widetag)
+       (inst li (logior (ash (char-code val) n-widetag-bits) base-char-widetag)
 	     y)))))
 
 (define-move-fun (load-number 1) (vop x y)
@@ -31,8 +31,8 @@
    (signed-reg unsigned-reg))
   (inst li (tn-value x) y))
 
-(define-move-fun (load-character 1) (vop x y)
-  ((immediate) (character-reg))
+(define-move-fun (load-base-char 1) (vop x y)
+  ((immediate) (base-char-reg))
   (inst li (char-code (tn-value x)) y))
 
 (define-move-fun (load-system-area-pointer 1) (vop x y)
@@ -48,7 +48,7 @@
   (load-stack-tn y x))
 
 (define-move-fun (load-number-stack 5) (vop x y)
-  ((character-stack) (character-reg))
+  ((base-char-stack) (base-char-reg))
   (let ((nfp (current-nfp-tn vop)))
     (loadw y nfp (tn-offset x))))
 
@@ -64,7 +64,7 @@
   (store-stack-tn y x))
 
 (define-move-fun (store-number-stack 5) (vop x y)
-  ((character-reg) (character-stack))
+  ((base-char-reg) (base-char-stack))
   (let ((nfp (current-nfp-tn vop)))
     (storew x nfp (tn-offset y))))
 
@@ -142,7 +142,7 @@
 ;;;; representation. Similarly, the MOVE-FROM-WORD VOPs converts a raw
 ;;;; integer to a tagged bignum or fixnum.
 
-;;; ARG is a fixnum, so just shift it. We need a type restriction
+;;; Arg is a fixnum, so just shift it. We need a type restriction
 ;;; because some possible arg SCs (control-stack) overlap with
 ;;; possible bignum arg SCs.
 (define-vop (move-to-word/fixnum)
@@ -152,49 +152,41 @@
   (:note "fixnum untagging")
   (:generator 1
     (inst sra x n-fixnum-tag-bits y)))
+;;;
 (define-move-vop move-to-word/fixnum :move
   (any-reg descriptor-reg) (signed-reg unsigned-reg))
 
-;;; ARG is a non-immediate constant, load it.
+;;; Arg is a non-immediate constant, load it.
 (define-vop (move-to-word-c)
   (:args (x :scs (constant)))
   (:results (y :scs (signed-reg unsigned-reg)))
   (:note "constant load")
   (:generator 1
     (inst li (tn-value x) y)))
+;;;
 (define-move-vop move-to-word-c :move
   (constant) (signed-reg unsigned-reg))
 
-;;; ARG is a fixnum or bignum, figure out which and load if necessary.
+;;; Arg is a fixnum or bignum, figure out which and load if necessary.
 (define-vop (move-to-word/integer)
   (:args (x :scs (descriptor-reg)))
   (:results (y :scs (signed-reg unsigned-reg)))
   (:note "integer to untagged word coercion")
-  (:temporary (:sc non-descriptor-reg) header)
   (:temporary (:scs (non-descriptor-reg)) temp)
   (:generator 3
     (inst and x fixnum-tag-mask temp)
     (inst sra x n-fixnum-tag-bits y)
     (inst beq temp done)
 
-    (loadw header x 0 other-pointer-lowtag)
-    (inst srl header (1+ n-widetag-bits) header)
     (loadw y x bignum-digits-offset other-pointer-lowtag)
-    (inst beq header one)
 
-    (loadw header x (1+ bignum-digits-offset) other-pointer-lowtag)
-    (inst sll header 32 header)
-    (inst mskll y 4 y)
-    (inst bis header y y)
-    (inst br zero-tn done)
-    ONE
-    (when (sc-is y unsigned-reg)
-      (inst mskll y 4 y))
     DONE))
+;;;
 (define-move-vop move-to-word/integer :move
   (descriptor-reg) (signed-reg unsigned-reg))
 
-;;; RESULT is a fixnum, so we can just shift. We need the result type
+
+;;; Result is a fixnum, so we can just shift. We need the result type
 ;;; restriction because of the control-stack ambiguity noted above.
 (define-vop (move-from-word/fixnum)
   (:args (x :scs (signed-reg unsigned-reg)))
@@ -203,16 +195,16 @@
   (:note "fixnum tagging")
   (:generator 1
     (inst sll x n-fixnum-tag-bits y)))
+;;;
 (define-move-vop move-from-word/fixnum :move
   (signed-reg unsigned-reg) (any-reg descriptor-reg))
 
-;;; RESULT may be a bignum, so we have to check. Use a worst-case cost
+;;; Result may be a bignum, so we have to check. Use a worst-case cost
 ;;; to make sure people know they may be number consing.
 (define-vop (move-from-signed)
   (:args (arg :scs (signed-reg unsigned-reg) :target x))
   (:results (y :scs (any-reg descriptor-reg)))
   (:temporary (:scs (non-descriptor-reg) :from (:argument 0)) x temp)
-  (:temporary (:sc non-descriptor-reg) header)
   (:note "signed word to integer coercion")
   (:generator 18
     (move arg x)
@@ -222,21 +214,12 @@
     (inst not temp temp)
     (inst beq temp done)
 
-    (inst li 2 header)
-    (inst sra x 31 temp)
-    (inst cmoveq temp 1 header)
-    (inst not temp temp)
-    (inst cmoveq temp 1 header)
-    (inst sll header n-widetag-bits header)
-    (inst bis header bignum-widetag header)
-      
-    (pseudo-atomic (:extra (pad-data-block (+ bignum-digits-offset 3)))
-      (inst bis alloc-tn other-pointer-lowtag y)
-      (storew header y 0 other-pointer-lowtag)
-      (storew x y bignum-digits-offset other-pointer-lowtag)
-      (inst srl x 32 temp)
-      (storew temp y (1+ bignum-digits-offset) other-pointer-lowtag))
+    (with-fixed-allocation (y temp bignum-widetag (1+ bignum-digits-offset))
+      (storew x y bignum-digits-offset other-pointer-lowtag))
+
     DONE))
+      
+;;;
 (define-move-vop move-from-signed :move
   (signed-reg) (descriptor-reg))
 
@@ -247,28 +230,26 @@
   (:args (arg :scs (signed-reg unsigned-reg) :target x))
   (:results (y :scs (any-reg descriptor-reg)))
   (:temporary (:scs (non-descriptor-reg) :from (:argument 0)) x temp)
-  (:temporary (:sc non-descriptor-reg) temp1)
+  (:temporary (:scs (any-reg)) widetag)
   (:note "unsigned word to integer coercion")
   (:generator 20
     (move arg x)
     (inst srl x n-positive-fixnum-bits temp)
     (inst sll x n-fixnum-tag-bits y)
     (inst beq temp done)
-      
-    (inst li 3 temp)
-    (inst cmovge x 2 temp)
-    (inst srl x 31 temp1)
-    (inst cmoveq temp1 1 temp)
-    (inst sll temp n-widetag-bits temp)
-    (inst bis temp bignum-widetag temp)
 
-    (pseudo-atomic (:extra (pad-data-block (+ bignum-digits-offset 3)))
-      (inst bis alloc-tn other-pointer-lowtag y)
-      (storew temp y 0 other-pointer-lowtag)
-      (storew x y bignum-digits-offset other-pointer-lowtag)
-      (inst srl x 32 temp)
-      (storew temp y (1+ bignum-digits-offset) other-pointer-lowtag))
+    (pseudo-atomic (:extra (pad-data-block (+ bignum-digits-offset 2)))
+      (inst or alloc-tn other-pointer-lowtag y)
+      (inst cmplt x zero-tn temp)
+      (inst sll temp n-widetag-bits temp)
+      (inst li (logior (ash 1 n-widetag-bits) bignum-widetag) widetag)
+      (inst addq temp widetag temp)
+      (storew temp y 0 other-pointer-lowtag))
+
+    (storew x y bignum-digits-offset other-pointer-lowtag)
     DONE))
+
+;;;
 (define-move-vop move-from-unsigned :move
   (unsigned-reg) (descriptor-reg))
 
@@ -284,6 +265,7 @@
   (:note "word integer move")
   (:generator 0
     (move x y)))
+;;;
 (define-move-vop word-move :move
   (signed-reg unsigned-reg) (signed-reg unsigned-reg))
 
@@ -301,6 +283,7 @@
        (move x y))
       ((signed-stack unsigned-stack)
        (storeq x fp (tn-offset y))))))
+;;;
 (define-move-vop move-word-arg :move-arg
   (descriptor-reg any-reg signed-reg unsigned-reg) (signed-reg unsigned-reg))
 

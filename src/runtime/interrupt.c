@@ -161,7 +161,7 @@ void reset_signal_mask ()
 void 
 build_fake_control_stack_frames(struct thread *th,os_context_t *context)
 {
-#ifndef LISP_FEATURE_C_STACK_IS_CONTROL_STACK
+#ifndef LISP_FEATURE_X86
     
     lispobj oldcont;
 
@@ -219,9 +219,9 @@ fake_foreign_function_call(os_context_t *context)
 #ifdef reg_ALLOC
     dynamic_space_free_pointer =
 	(lispobj *)(*os_context_register_addr(context, reg_ALLOC));
-#ifdef alpha
+#if 0
     if ((long)dynamic_space_free_pointer & 1) {
-	lose("dead in fake_foreign_function_call, context = %x", context);
+	lose("dead in fake_foreign_function_call, context = %lx", context);
     }
 #endif
 #endif
@@ -364,10 +364,12 @@ interrupt_handle_now(int signal, siginfo_t *info, void *void_context)
 {
     os_context_t *context = (os_context_t*)void_context;
     struct thread *thread=arch_os_get_current_thread();
-#if !defined(LISP_FEATURE_X86) && !defined(LISP_FEATURE_X86_64)
+#ifndef LISP_FEATURE_X86
     boolean were_in_lisp;
 #endif
     union interrupt_handler handler;
+
+    FSHOW((stderr, "/interrupted at %#lx\n", *os_context_pc_addr(context)));
 
 #ifdef LISP_FEATURE_LINUX
     /* Under Linux on some architectures, we appear to have to restore
@@ -381,7 +383,7 @@ interrupt_handle_now(int signal, siginfo_t *info, void *void_context)
 	return;
     }
     
-#if !defined(LISP_FEATURE_X86) && !defined(LISP_FEATURE_X86_64)
+#ifndef LISP_FEATURE_X86
     were_in_lisp = !foreign_function_call_active;
     if (were_in_lisp)
 #endif
@@ -440,7 +442,7 @@ interrupt_handle_now(int signal, siginfo_t *info, void *void_context)
         (*handler.c)(signal, info, void_context);
     }
 
-#if !defined(LISP_FEATURE_X86) && !defined(LISP_FEATURE_X86_64)
+#ifndef LISP_FEATURE_X86
     if (were_in_lisp)
 #endif
     {
@@ -481,7 +483,7 @@ maybe_defer_handler(void *handler, struct interrupt_data *data,
      * actually use its argument for anything on x86, so this branch
      * may succeed even when context is null (gencgc alloc()) */
     if (
-#if !defined(LISP_FEATURE_X86) && !defined(LISP_FEATURE_X86_64)
+#ifndef LISP_FEATURE_X86
 	(!foreign_function_call_active) &&
 #endif
 	arch_pseudo_atomic_atomic(context)) {
@@ -625,31 +627,10 @@ void arrange_return_to_lisp_function(os_context_t *context, lispobj function)
 #ifdef LISP_FEATURE_X86
     /* Suppose the existence of some function that saved all
      * registers, called call_into_lisp, then restored GP registers and
-     * returned.  It would look something like this:
-
-     push   ebp
-     mov    ebp esp
-     pushad
-     push   $0
-     push   $0
-     pushl  {address of function to call}
-     call   0x8058db0 <call_into_lisp>
-     addl   $12,%esp
-     popa
-     leave  
-     ret    
-
-     * What we do here is set up the stack that call_into_lisp would
-     * expect to see if it had been called by this code, and frob the
-     * signal context so that signal return goes directly to call_into_lisp,
-     * and when that function (and the lisp function it invoked) returns,
-     * it returns to the second half of this imaginary function which
-     * restores all registers and returns to C
-
-     * For this to work, the latter part of the imaginary function
-     * must obviously exist in reality.  That would be post_signal_tramp
+     * returned.  We shortcut this: fake the stack that call_into_lisp
+     * would see, then arrange to have it called directly.  post_signal_tramp
+     * is the second half of this function
      */
-
     u32 *sp=(u32 *)*os_context_register_addr(context,reg_ESP);
 
     *(sp-14) = post_signal_tramp; /* return address for call_into_lisp */
@@ -659,9 +640,9 @@ void arrange_return_to_lisp_function(os_context_t *context, lispobj function)
     /* this order matches that used in POPAD */
     *(sp-10)=*os_context_register_addr(context,reg_EDI);
     *(sp-9)=*os_context_register_addr(context,reg_ESI);
-
-    *(sp-8)=*os_context_register_addr(context,reg_ESP)-8;
-    *(sp-7)=0;
+    /* this gets overwritten again before it's used, anyway */
+    *(sp-8)=*os_context_register_addr(context,reg_EBP);
+    *(sp-7)=0 ; /* POPAD doesn't set ESP, but expects a gap for it anyway */
     *(sp-6)=*os_context_register_addr(context,reg_EBX);
 
     *(sp-5)=*os_context_register_addr(context,reg_EDX);
@@ -679,13 +660,7 @@ void arrange_return_to_lisp_function(os_context_t *context, lispobj function)
     *os_context_pc_addr(context) = call_into_lisp;
     *os_context_register_addr(context,reg_ECX) = 0; 
     *os_context_register_addr(context,reg_EBP) = sp-2;
-#ifdef __NetBSD__ 
-    *os_context_register_addr(context,reg_UESP) = sp-14;
-#else
     *os_context_register_addr(context,reg_ESP) = sp-14;
-#endif
-#elif defined(LISP_FEATURE_X86_64)
-    lose("deferred gubbins still needs to be written");
 #else
     /* this much of the calling convention is common to all
        non-x86 ports */
@@ -722,41 +697,22 @@ void thread_exit_handler(int num, siginfo_t *info, void *v_context)
 {   /* called when a child thread exits */
     mark_dead_threads();
 }
+
 	
 #endif
 
-boolean handle_guard_page_triggered(os_context_t *context,void *addr){
+boolean handle_control_stack_guard_triggered(os_context_t *context,void *addr){
     struct thread *th=arch_os_get_current_thread();
-    
     /* note the os_context hackery here.  When the signal handler returns, 
      * it won't go back to what it was doing ... */
-    if(addr >= CONTROL_STACK_GUARD_PAGE(th) && 
-       addr < CONTROL_STACK_GUARD_PAGE(th) + os_vm_page_size) {
-        /* We hit the end of the control stack: disable guard page
-         * protection so the error handler has some headroom, protect the
-         * previous page so that we can catch returns from the guard page
-         * and restore it. */
-        protect_control_stack_guard_page(th->pid,0);
-        protect_control_stack_return_guard_page(th->pid,1);
-        
-        arrange_return_to_lisp_function
-            (context, SymbolFunction(CONTROL_STACK_EXHAUSTED_ERROR));
-        return 1;
-    }
-    else if(addr >= CONTROL_STACK_RETURN_GUARD_PAGE(th) &&
-            addr < CONTROL_STACK_RETURN_GUARD_PAGE(th) + os_vm_page_size) {
-        /* We're returning from the guard page: reprotect it, and
-         * unprotect this one. This works even if we somehow missed
-         * the return-guard-page, and hit it on our way to new
-         * exhaustion instead. */
-        protect_control_stack_guard_page(th->pid,1);
-        protect_control_stack_return_guard_page(th->pid,0);
-        return 1;
-    }
-    else if (addr >= undefined_alien_address &&
-	     addr < undefined_alien_address + os_vm_page_size) {
+    if(addr>=(void *)CONTROL_STACK_GUARD_PAGE(th) && 
+       addr<(void *)(CONTROL_STACK_GUARD_PAGE(th)+os_vm_page_size)) {
+	/* we hit the end of the control stack.  disable protection
+	 * temporarily so the error handler has some headroom */
+	protect_control_stack_guard_page(th->pid,0L);
+	
 	arrange_return_to_lisp_function
-          (context, SymbolFunction(UNDEFINED_ALIEN_ERROR));
+	    (context, SymbolFunction(CONTROL_STACK_EXHAUSTED_ERROR));
 	return 1;
     }
     else return 0;

@@ -30,5 +30,5 @@
       (inst li (make-fixup "call_into_c" :foreign) temp)
       (inst jsr lip-tn temp (make-fixup "call_into_c" :foreign))
       (when cur-nfp
-	(maybe-load-stack-nfp-tn cur-nfp nfp-save temp))
+	(load-stack-tn cur-nfp nfp-save))
       (move cfunc result))))

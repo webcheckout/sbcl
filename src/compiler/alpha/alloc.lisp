@@ -113,8 +113,7 @@
 
 (define-vop (make-closure)
   (:args (function :to :save :scs (descriptor-reg)))
-  (:info length stack-allocate-p)
-  (:ignore stack-allocate-p)
+  (:info length)
   (:temporary (:scs (non-descriptor-reg)) temp)
   (:results (result :scs (descriptor-reg)))
   (:generator 10
@@ -170,7 +169,8 @@
   (:temporary (:scs (non-descriptor-reg)) bytes)
   (:generator 6
     (inst lda bytes (* (1+ words) n-word-bytes) extra)
-    (inst sll bytes (- n-widetag-bits 2) header)
+    (inst sll bytes (- n-widetag-bits n-fixnum-tag-bits) header)
+    ;; hmmm, this looks suspicious
     (inst lda header (+ (ash -2 n-widetag-bits) type) header)
     (inst srl bytes n-lowtag-bits bytes)
     (inst sll bytes n-lowtag-bits bytes)

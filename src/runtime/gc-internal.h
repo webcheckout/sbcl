@@ -30,13 +30,13 @@
 
 #define CEILING(x,y) (((x) + ((y) - 1)) & (~((y) - 1)))
 
-static inline unsigned long
-NWORDS(unsigned long x, unsigned long n_bits)
+static inline unsigned int
+NWORDS(unsigned int x, unsigned int n_bits)
 {
     /* A good compiler should be able to constant-fold this whole thing,
        even with the conditional. */
     if(n_bits <= N_WORD_BITS) {
-        unsigned long elements_per_word = N_WORD_BITS/n_bits;
+        unsigned int elements_per_word = N_WORD_BITS/n_bits;
 
         return CEILING(x, elements_per_word)/elements_per_word;
     }
@@ -48,17 +48,6 @@ NWORDS(unsigned long x, unsigned long n_bits)
 }
 
 /* FIXME: Shouldn't this be defined in sbcl.h? */
-
-/* FIXME (1) this could probably be defined using something like
- *  sizeof(lispobj)*floor(sizeof(struct simple_fun)/sizeof(lispobj))
- *    -  FUN_POINTER_LOWTAG
- * as I'm reasonably sure that simple_fun->code must always be the 
- * last slot in the object 
-
- * FIXME (2) it also appears in purify.c, and it has a different value
- * for SPARC users in that bit
- */
-
 #define FUN_RAW_ADDR_OFFSET (6*sizeof(lispobj) - FUN_POINTER_LOWTAG)
 
 /* values for the *_alloc_* parameters */
@@ -71,27 +60,25 @@ NWORDS(unsigned long x, unsigned long n_bits)
 #define ALLOC_UNBOXED 1
 #define ALLOC_QUICK 1
 
-void *gc_general_alloc(long nbytes,int unboxed_p,int quick_p);
+void *gc_general_alloc(int nbytes,int unboxed_p,int quick_p);
 
-extern long (*scavtab[256])(lispobj *where, lispobj object);
+extern int (*scavtab[256])(lispobj *where, lispobj object);
 extern lispobj (*transother[256])(lispobj object);
-extern long (*sizetab[256])(lispobj *where);
+extern int (*sizetab[256])(lispobj *where);
 
 extern struct weak_pointer *weak_pointers; /* in gc-common.c */
 
 extern void scavenge(lispobj *start, long n_words);
 extern void scan_weak_pointers(void);
 
-lispobj  copy_large_unboxed_object(lispobj object, long nwords);
-lispobj  copy_unboxed_object(lispobj object, long nwords);
-lispobj  copy_large_object(lispobj object, long nwords);
-lispobj  copy_object(lispobj object, long nwords);
+lispobj  copy_large_unboxed_object(lispobj object, int nwords);
+lispobj  copy_unboxed_object(lispobj object, int nwords);
+lispobj  copy_large_object(lispobj object, int nwords);
+lispobj  copy_object(lispobj object, int nwords);
 
 lispobj *search_read_only_space(void *pointer);
 lispobj *search_static_space(void *pointer);
 lispobj *search_dynamic_space(void *pointer);
-
-#include "fixnump.h"
 
 /* Scan an area looking for an object which encloses the given pointer.
  * Return the object start on success or NULL on failure. */
@@ -105,7 +92,7 @@ search_space(lispobj *start, size_t words, lispobj *pointer)
 	/* If thing is an immediate then this is a cons. */
 	if (is_lisp_pointer(thing)
 	    || (fixnump(thing))
-	    || (widetag_of(thing) == CHARACTER_WIDETAG)
+	    || (widetag_of(thing) == BASE_CHAR_WIDETAG)
 	    || (widetag_of(thing) == UNBOUND_MARKER_WIDETAG))
 	    count = 2;
 	else

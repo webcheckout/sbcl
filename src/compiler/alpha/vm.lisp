@@ -144,7 +144,7 @@
 		:element-size 2 :alignment 2) ; (signed-byte 64)
   (unsigned-stack non-descriptor-stack
 		  :element-size 2 :alignment 2) ; (unsigned-byte 64)
-  (character-stack non-descriptor-stack) ; non-descriptor characters.
+  (base-char-stack non-descriptor-stack) ; non-descriptor characters.
   (sap-stack non-descriptor-stack
 	     :element-size 2 :alignment 2) ; System area pointers.
   (single-stack non-descriptor-stack) ; single-floats
@@ -174,11 +174,11 @@
                   :alternate-scs (control-stack))
 
   ;; Non-Descriptor characters
-  (character-reg registers
+  (base-char-reg registers
                  :locations #.non-descriptor-regs
    :constant-scs (immediate)
    :save-p t
-   :alternate-scs (character-stack))
+   :alternate-scs (base-char-stack))
 
   ;; Non-Descriptor SAP's (arbitrary pointers into address space)
   (sap-reg registers
@@ -286,19 +286,20 @@
      (sc-number-or-lose 'zero))
     (null
      (sc-number-or-lose 'null ))
-    ((or fixnum system-area-pointer character)
+    ((or (integer #.sb!xc:most-negative-fixnum #.sb!xc:most-positive-fixnum)
+         system-area-pointer character)
      (sc-number-or-lose 'immediate ))
     (symbol
      (if (static-symbol-p value)
-	 (sc-number-or-lose 'immediate )
+	 (sc-number-or-lose 'immediate)
 	 nil))
     (single-float
      (if (eql value 0f0)
-	 (sc-number-or-lose 'fp-single-zero )
+	 (sc-number-or-lose 'fp-single-zero)
 	 nil))
     (double-float
      (if (eql value 0d0)
-	 (sc-number-or-lose 'fp-double-zero )
+	 (sc-number-or-lose 'fp-double-zero)
 	 nil))))
 
 ;;;; function call parameters
@@ -354,10 +355,6 @@
 ;;; occure in the symbol table (for example, prepending an
 ;;; underscore). 
 (defun extern-alien-name (name)
-  (declare (type string name))
-  ;; ELF ports currently don't need any prefix
-  (typecase name
-    (simple-base-string name)
-    (base-string (coerce name 'simple-base-string))
-    (t (handler-case (coerce name 'simple-base-string)
-	 (type-error () (error "invalid external alien name: ~S" name))))))
+  (declare (type simple-base-string name))
+  ;; On the Alpha we don't do anything.
+  name)

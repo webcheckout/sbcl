@@ -223,14 +223,14 @@ char **ptr;
             printf("unknown variable: ``%s''\n", token);
             throw_to_monitor();
         }
-        result &= ~7;
+        result &= ~LOWTAG_MASK;
     }
     else {
         if (!string_to_long(token, &result)) {
             printf("invalid number: ``%s''\n", token);
             throw_to_monitor();
         }
-        result &= ~3;
+        result &= ~FIXNUM_TAG_MASK;
     }
 
     if (!is_valid_lisp_addr((os_vm_address_t)result)) {
@@ -258,7 +258,7 @@ static boolean lookup_symbol(char *name, lispobj *result)
 
     /* Search dynamic space. */
     headerptr = (lispobj *)DYNAMIC_SPACE_START;
-#if !(defined(LISP_FEATURE_X86) || defined(LISP_FEATURE_X86_64))
+#if !defined(LISP_FEATURE_X86)
     count =
 	dynamic_space_free_pointer -
 	(lispobj *)DYNAMIC_SPACE_START;
@@ -322,7 +322,7 @@ char **ptr;
 	    int regnum;
 	    os_context_t *context;
 
-	    free = SymbolValue(FREE_INTERRUPT_CONTEXT_INDEX,thread)>>2;
+	    free = fixnum_value(SymbolValue(FREE_INTERRUPT_CONTEXT_INDEX,thread));
 
 	    if (free == 0) {
 		printf("Variable ``%s'' is not valid -- there is no current interrupt context.\n", token);

@@ -12,7 +12,7 @@
 (eval-when  (:compile-toplevel :load-toplevel :execute)
 
 ;;; number of bits per word where a word holds one lisp descriptor
-(def!constant n-word-bits 32)
+(def!constant n-word-bits 64)
 
 ;;; the natural width of a machine word (as seen in e.g. register width,
 ;;; address space)
@@ -43,8 +43,8 @@
 (def!constant single-float-digits
   (+ (byte-size single-float-significand-byte) 1))
 
-(def!constant double-float-digits
-  (+ (byte-size double-float-significand-byte) n-word-bits 1))
+(def!constant double-float-digits 53
+  #+nil (+ (byte-size double-float-significand-byte) n-word-bits 1))
 
 ;;; These values are originally from the DEC Assembly Language
 ;;; Programmers guide.  Where possible we read/write the software
@@ -115,33 +115,24 @@
 
 #!+osf1
 (progn
-  (defconstant read-only-space-start #x10000000)
-  (defconstant read-only-space-end   #x25000000))
+  (defconstant read-only-space-start #x20000000000)
+  (defconstant read-only-space-end   #x2001fff0000))
 
 
-(def!constant static-space-start    #x28000000)
-(def!constant static-space-end      #x2c000000)
+(def!constant static-space-start    #x20020000000)
+(def!constant static-space-end      #x2002fff0000)
 
 ;; this is used in PURIFY as part of a sloppy check to see if a pointer
 ;; is in dynamic space.  Chocolate brownie for the first person to fix it
 ;; -dan 20010502
-(def!constant dynamic-space-start   #x30000000)
-(def!constant dynamic-space-end     #x3fff0000)
+(def!constant dynamic-space-start   #x20030000000)
+(def!constant dynamic-space-end     #x2003fff0000)
 
-(def!constant dynamic-0-space-start   #x30000000)
-(def!constant dynamic-0-space-end     #x3fff0000)
+(def!constant dynamic-0-space-start   #x20030000000)
+(def!constant dynamic-0-space-end     #x2003fff0000)
 
-(def!constant dynamic-1-space-start   #x40000000)
-(def!constant dynamic-1-space-end     #x4fff0000)
-
-;;; FIXME nothing refers to either of these in alpha or x86 cmucl
-;;; backend, so they could probably be removed.
-
-;; The space-register holding the lisp heap.
-(def!constant lisp-heap-space 4)
-
-;; The space-register holding the C text segment.
-(def!constant c-text-space 4)
+(def!constant dynamic-1-space-start   #x20040000000)
+(def!constant dynamic-1-space-end     #x2004fff0000)
 
 ;;; the X86 port defines *nil-value* as (+ *target-static-space-start* #xB)
 ;;; here, but it seems to be the only port that needs to know the
@@ -184,7 +175,6 @@
     sub-gc
     sb!kernel::internal-error
     sb!kernel::control-stack-exhausted-error
-    sb!kernel::undefined-alien-error
     sb!di::handle-breakpoint
     sb!di::handle-fun-end-breakpoint
 

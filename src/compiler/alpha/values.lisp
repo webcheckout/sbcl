@@ -16,26 +16,6 @@
   (:generator 1
     (move ptr csp-tn)))
 
-(define-vop (%%pop-dx)
-  (:args (ptr :scs (any-reg)))
-  (:ignore ptr)
-  (:generator 1
-    (bug "VOP %%POP-DX is not implemented.")))
-
-(define-vop (%%nip-dx)
-  (:args (last-nipped-ptr :scs (any-reg) :target dest)
-	 (last-preserved-ptr :scs (any-reg) :target src)
-	 (moved-ptrs :scs (any-reg) :more t))
-  (:results (r-moved-ptrs :scs (any-reg) :more t))
-  (:temporary (:sc any-reg) src)
-  (:temporary (:sc any-reg) dest)
-  (:temporary (:sc non-descriptor-reg) temp)
-  (:ignore r-moved-ptrs
-           last-nipped-ptr last-preserved-ptr moved-ptrs
-           src dest temp)
-  (:generator 1
-    (bug "VOP %%NIP-DX is not implemented.")))
-
 (define-vop (%%nip-values)
   (:args (last-nipped-ptr :scs (any-reg) :target dest)
 	 (last-preserved-ptr :scs (any-reg) :target src)
@@ -166,10 +146,10 @@
     (inst move csp-tn dst)
     (inst addq csp-tn count csp-tn)
     LOOP
-    (inst ldl temp 0 src)
-    (inst addq src 4 src)
-    (inst addq dst 4 dst)
-    (inst stl temp -4 dst)
+    (inst ldq temp 0 src)
+    (inst addq src n-word-bytes src)
+    (inst addq dst n-word-bytes dst)
+    (inst stq temp (- n-word-bytes) dst)
     (inst cmpeq dst csp-tn temp1)
     (inst beq temp1 loop)
     DONE))

@@ -95,7 +95,7 @@ alloc_vector(int type, int length, int size)
     struct vector *result;
 
     result = (struct vector *)
-      pa_alloc(ALIGNED_SIZE((2 + (length*size + 31) / 32) * sizeof(lispobj)));
+      pa_alloc(ALIGNED_SIZE((2 + (length*size + (N_WORD_BITS-1)) / N_WORD_BITS) * sizeof(lispobj)));
 
     result->header = type;
     result->length = make_fixnum(length);

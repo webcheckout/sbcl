@@ -13,7 +13,7 @@
 
 (!def-vm-support-routine generate-call-sequence (name style vop)
   (ecase style
-    ((:raw :none)
+    (:raw
      (values
       `((inst li (make-fixup ',name :assembly-routine) temp)
 	(inst jsr lip-tn temp))
@@ -41,7 +41,7 @@
 	    (inst compute-code-from-lra code-tn code-tn
 		  lra-label ,temp)
 	    (when cur-nfp
-	      (maybe-load-stack-nfp-tn cur-nfp ,nfp-save temp1))))
+	      (load-stack-tn cur-nfp ,nfp-save))))
 	`((:temporary (:scs (non-descriptor-reg) :from (:eval 0) :to (:eval 1))
 		      ,temp)
 	  (:temporary (:sc descriptor-reg :offset lra-offset
@@ -50,7 +50,13 @@
 	  (:temporary (:scs (control-stack) :offset nfp-save-offset)
 		      ,nfp-save)
 	  (:temporary (:scs (non-descriptor-reg)) temp1)
-	  (:save-p t)))))))
+	  (:save-p t)))))
+    (:none
+     (values
+      `((inst li (make-fixup ',name :assembly-routine) temp)
+        (inst jsr lip-tn temp (make-fixup ',name :assembly-routine)))
+      '((:temporary (:scs (non-descriptor-reg)) temp))
+      nil))))
 
 (!def-vm-support-routine generate-return-sequence (style)
   (ecase style

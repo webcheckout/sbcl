@@ -67,6 +67,8 @@
 			  'single-stack
 			  (* 2 (- stack-frame-size 6))))))
 
+
+
 (define-alien-type-method (integer :result-tn) (type state)
   (declare (ignore state))
   (multiple-value-bind
@@ -111,7 +113,7 @@
   (:translate foreign-symbol-address)
   (:policy :fast-safe)
   (:args)
-  (:arg-types (:constant simple-string))
+  (:arg-types (:constant simple-base-string))
   (:info foreign-symbol)
   (:results (res :scs (sap-reg)))
   (:result-types system-area-pointer)
@@ -137,7 +139,7 @@
       (inst li (make-fixup "call_into_c" :foreign) temp)
       (inst jsr lip-tn temp (make-fixup "call_into_c" :foreign))
       (when cur-nfp
-	(maybe-load-stack-nfp-tn cur-nfp nfp-save temp)))))
+	(load-stack-tn cur-nfp nfp-save)))))
 
 (define-vop (alloc-number-stack-space)
   (:info amount)

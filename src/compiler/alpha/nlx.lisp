@@ -43,22 +43,20 @@
     (load-symbol-value catch *current-catch-block*)
     (let ((cur-nfp (current-nfp-tn vop)))
       (when cur-nfp
-	(inst mskll cur-nfp 4 nfp)))
-    (inst mskll nsp-tn 4 nsp)))
+	(inst move cur-nfp nfp)))
+    (inst move nsp-tn nsp)))
 
 (define-vop (restore-dynamic-state)
   (:args (catch :scs (descriptor-reg))
 	 (nfp :scs (descriptor-reg))
 	 (nsp :scs (descriptor-reg)))
   (:vop-var vop)
-  (:temporary (:sc any-reg) temp)
   (:generator 10
     (store-symbol-value catch *current-catch-block*)
-    (inst mskll nsp-tn 0 temp)
     (let ((cur-nfp (current-nfp-tn vop)))
       (when cur-nfp
-	(inst bis nfp temp cur-nfp)))
-    (inst bis nsp temp nsp-tn)))
+	(inst move nfp cur-nfp)))
+    (inst move nsp nsp-tn)))
 
 (define-vop (current-stack-pointer)
   (:results (res :scs (any-reg descriptor-reg)))

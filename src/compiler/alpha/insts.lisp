@@ -11,8 +11,7 @@
 
 (in-package "SB!VM")
 
-;;;(def-assembler-params
-;;;  :scheduler-p nil)
+;;; (def-assembler-params :scheduler-p nil)
 
 ;;; ../x86/insts contains the invocation
 ;;; (setf sb!disassem:*disassem-inst-alignment-bytes* 1)
@@ -247,6 +246,7 @@
                                   ,@(when float
                                       '((ra nil :type 'fp-reg)))))
                 (:emitter
+                 ;; FIXME: 64-bit issues?
                  (emit-back-patch segment 4
                                   (lambda (segment posn)
 				    (emit-branch segment ,op
@@ -363,6 +363,8 @@
   (define-operate umulh  #x13 #x30)
   (define-operate mulq   #x13 #x20)
 
+  (define-operate sextb  #x1c #x00)
+  (define-operate sextw  #x1c #x01)
   (define-operate ctpop  #x1c #x30)     ; CIX extension
   (define-operate ctlz   #x1c #x32)     ; CIX extension
   (define-operate cttz   #x1c #x33))    ; CIX extension
@@ -477,6 +479,9 @@
 (define-instruction-macro nop ()
   `(inst bis zero-tn zero-tn zero-tn))
 
+(define-instruction-macro or (src1 src2 dst)
+  `(inst bis ,src1 ,src2 ,dst))
+
 (defun %li (value reg)
   (etypecase value
     ((signed-byte 16)
@@ -554,6 +559,12 @@
 
 ;;;;
 
+(define-instruction qword (segment qword)
+  (:declare (type (or (unsigned-byte 64) (signed-byte 64)) qword))
+  (:cost 0)
+  (:emitter
+   (emit-qword segment qword)))
+
 (define-instruction lword (segment lword)
   (:declare (type (or (unsigned-byte 32) (signed-byte 32)) lword))
   (:cost 0)
@@ -574,9 +585,9 @@
 
 (defun emit-header-data (segment type)
   (emit-back-patch
-   segment 4
+   segment n-word-bytes
    (lambda (segment posn)
-     (emit-lword segment
+     (emit-qword segment
 		 (logior type
 			 (ash (+ posn (component-header-length))
 			      (- n-widetag-bits word-shift)))))))

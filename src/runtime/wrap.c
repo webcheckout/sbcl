@@ -156,7 +156,7 @@ wrapped_readlink(char *path)
  * (2003-10-03) on all working platforms except MIPS and HPPA; if some
  * motivated spark would simply fix those, this hack could go away.
  * -- CSR, 2003-10-03 */
-typedef u32 ffi_dev_t; /* since Linux dev_t can be 64 bits */
+typedef int ffi_dev_t; /* since Linux dev_t can be 64 bits */
 typedef u32 ffi_off_t; /* since OpenBSD 2.8 st_size is 64 bits */
 
 /* a representation of stat(2) results which doesn't depend on CPU or OS */
@@ -168,7 +168,7 @@ struct stat_wrapper {
      * I remember when I was young and innocent, I read about how the
      * C preprocessor isn't to be used to globally munge random
      * lowercase symbols like this, because things like this could
-     * happen, and I nodded sagely. But now I know better.:-| This is
+     * happen, and I nodded sagely. But now I know better. :-| This is
      * another entry for Dan Barlow's ongoing episodic rant about C
      * header files, I guess.. -- WHN 2001-05-10 */
     ffi_dev_t     wrapped_st_dev;         /* device */
@@ -211,8 +211,10 @@ stat_wrapper(const char *file_name, struct stat_wrapper *buf)
 {
     struct stat real_buf;
     int ret;
+    fprintf(stderr, "in stat_wrapper, buf=%#lx\n", buf);
     if ((ret = stat(file_name,&real_buf)) >= 0)
 	copy_to_stat_wrapper(buf, &real_buf); 
+    fprintf(stderr, "examined %s, ret=%d\n", file_name, ret);
     return ret;
 }
 
@@ -221,6 +223,7 @@ lstat_wrapper(const char *file_name, struct stat_wrapper *buf)
 {
     struct stat real_buf;
     int ret;
+    fprintf(stderr, "in lstat_wrapper");
     if ((ret = lstat(file_name,&real_buf)) >= 0) 
 	copy_to_stat_wrapper(buf, &real_buf); 
     return ret;
@@ -231,6 +234,7 @@ fstat_wrapper(int filedes, struct stat_wrapper *buf)
 {
     struct stat real_buf;
     int ret;
+    fprintf(stderr, "in fstat_wrapper");
     if ((ret = fstat(filedes,&real_buf)) >= 0)
 	copy_to_stat_wrapper(buf, &real_buf); 
     return ret;

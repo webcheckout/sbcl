@@ -58,6 +58,9 @@ extern void globals_init(void);
 #ifdef __linux__
 #define EXTERN(name,bytes) .globl name 
 #endif
+#ifdef osf1
+#define EXTERN(name,bytes) .globl name
+#endif
 #endif
 #ifdef ppc
 #ifdef LISP_FEATURE_DARWIN
@@ -81,16 +84,16 @@ extern void globals_init(void);
  * done   -dan 2002.05.07
  */
 
-EXTERN(foreign_function_call_active, 4)
+EXTERN(foreign_function_call_active, N_WORD_BYTES)
 
-EXTERN(current_control_stack_pointer, 4)
-EXTERN(current_control_frame_pointer, 4)
-EXTERN(current_binding_stack_pointer, 4)
-EXTERN(dynamic_space_free_pointer, 4)
-EXTERN(current_dynamic_space, 4)
+EXTERN(current_control_stack_pointer, N_WORD_BYTES)
+EXTERN(current_control_frame_pointer, N_WORD_BYTES)
+EXTERN(current_binding_stack_pointer, N_WORD_BYTES)
+EXTERN(dynamic_space_free_pointer, N_WORD_BYTES)
+EXTERN(current_dynamic_space, N_WORD_BYTES)
 
 #ifdef mips
-EXTERN(current_flags_register, 4)
+EXTERN(current_flags_register, N_WORD_BYTES)
 #endif
 
 #endif /* LANGUAGE_ASSEMBLY */

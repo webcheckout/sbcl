@@ -88,7 +88,8 @@ arch_skip_instruction(os_context_t *context)
     /* This may be complete rubbish, as (at least for traps) pc points
      * _after_ the instruction that caused us to be here anyway.
      */
-    ((char*)*os_context_pc_addr(context)) +=4; }
+    ((char*)*os_context_pc_addr(context)) +=4;
+}
 
 unsigned char *
 arch_internal_error_arguments(os_context_t *context)
@@ -278,7 +279,7 @@ void arch_do_displaced_inst(os_context_t *context,unsigned int orig_inst)
 static void
 sigtrap_handler(int signal, siginfo_t *siginfo, os_context_t *context)
 {
-    unsigned int code;
+    unsigned long code;
     sigset_t *mask;
 #ifdef LISP_FEATURE_LINUX
     os_restore_fp_control(context);
@@ -312,11 +313,13 @@ sigtrap_handler(int signal, siginfo_t *siginfo, os_context_t *context)
 	    *os_context_sigmask_addr(context)= orig_sigmask;
 	    after_breakpoint=0;	/* false */
 	    return;
-	} else 
+	} else {
 	    code = trap_Breakpoint;
-    } else
+        }
+    } else {
 	/* a "system service" */
-    code=*((u32 *)(*os_context_pc_addr(context)));
+        code=*os_context_pc_addr(context);
+    }
     
     switch (code) {
       case trap_PendingInterrupt:
@@ -345,7 +348,7 @@ sigtrap_handler(int signal, siginfo_t *siginfo, os_context_t *context)
 	break;
 
       default:
-	fprintf(stderr, "unidentified breakpoint/trap %d\n",code);
+	fprintf(stderr, "unidentified breakpoint/trap %ld\n",code);
 	interrupt_handle_now(signal, siginfo, context);
 	break;
     }

@@ -24,11 +24,12 @@
 			  (:res result descriptor-reg a0-offset)
 
 			  (:temp ndescr non-descriptor-reg nl0-offset))
-  ;; This is kinda sleezy, changing words like this.  But we can because
+  ;; This is kinda sleazy, changing words like this.  But we can because
   ;; the vop thinks it is temporary.
-  (inst addq words (+ (1- (ash 1 n-lowtag-bits))
+  (inst addq words (+ lowtag-mask
 		      (* vector-data-offset n-word-bytes))
 	words)
+  ;; FIXME: check to see how many instructions this LI expands to
   (inst li (lognot lowtag-mask) ndescr)
   (inst and words ndescr words)
   (inst srl type word-shift ndescr)

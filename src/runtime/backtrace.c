@@ -28,34 +28,22 @@
 #include "genesis/primitive-objects.h"
 #include "thread.h"
 
-#if !(defined(LISP_FEATURE_X86) || defined(LISP_FEATURE_X86_64))
+#ifndef LISP_FEATURE_X86
 
 /* KLUDGE: Sigh ... I know what the call frame looks like and it had
  * better not change. */
 
 struct call_frame {
-#ifndef alpha
 	struct call_frame *old_cont;
-#else
-        u32 old_cont;
-#endif
 	lispobj saved_lra;
         lispobj code;
 	lispobj other_state[5];
 };
 
 struct call_info {
-#ifndef alpha
     struct call_frame *frame;
-#else
-    u32 frame;
-#endif
     int interrupted;
-#ifndef alpha
     struct code *code;
-#else
-    u32 code;
-#endif
     lispobj lra;
     int pc; /* Note: this is the trace file offset, not the actual pc. */
 };
@@ -139,11 +127,7 @@ call_info_from_context(struct call_info *info, os_context_t *context)
     }
     if (info->code != NULL)
         info->pc = pc - (unsigned long) info->code -
-#ifndef alpha
-            (HEADER_LENGTH(info->code->header) * sizeof(lispobj));
-#else
             (HEADER_LENGTH(((struct code *)info->code)->header) * sizeof(lispobj));
-#endif
     else
         info->pc = 0;
 }
@@ -170,7 +154,7 @@ previous_info(struct call_info *info)
 
     if (info->lra == NIL) {
         /* We were interrupted. Find the correct signal context. */
-        free = SymbolValue(FREE_INTERRUPT_CONTEXT_INDEX,thread)>>2;
+        free = fixnum_value(SymbolValue(FREE_INTERRUPT_CONTEXT_INDEX,thread));
         while (free-- > 0) {
 	    os_context_t *context = 
 		thread->interrupt_contexts[free];
@@ -187,11 +171,7 @@ previous_info(struct call_info *info)
         if (info->code != NULL)
             info->pc = (unsigned long)native_pointer(info->lra) -
                 (unsigned long)info->code -
-#ifndef alpha
                 (HEADER_LENGTH(info->code->header) * sizeof(lispobj));
-#else
-                (HEADER_LENGTH(((struct code *)info->code)->header) * sizeof(lispobj));
-#endif
         else
             info->pc = 0;
     }
@@ -213,13 +193,10 @@ backtrace(int nframes)
         if (info.code != (struct code *) 0) {
             lispobj function;
 
-            printf("CODE: 0x%08X, ", (unsigned long) info.code | OTHER_POINTER_LOWTAG);
+            printf("CODE: 0x%016X, ", (pointer_sized_uint_t)info.code | OTHER_POINTER_LOWTAG);
 
-#ifndef alpha
             function = info.code->entry_points;
-#else
-            function = ((struct code *)info.code)->entry_points;
-#endif
+
             while (function != NIL) {
                 struct simple_fun *header;
                 lispobj name;
@@ -244,7 +221,6 @@ backtrace(int nframes)
                         string = (struct vector *) object;
                         printf("%s, ", (char *) string->data);
                     } else
-			/* FIXME: broken from (VECTOR NIL) */
                         printf("(Not simple string??\?), ");
                 } else
                     printf("(Not other pointer??\?), ");
@@ -257,7 +233,7 @@ backtrace(int nframes)
             printf("CODE: ???, ");
 
         if (info.lra != NIL)
-            printf("LRA: 0x%08x, ", (unsigned long)info.lra);
+            printf("LRA: 0x%016x, ", (unsigned long)info.lra);
         else
             printf("<no LRA>, ");
 

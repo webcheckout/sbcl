@@ -37,7 +37,6 @@
 #include "validate.h"
 #include "lispregs.h"
 #include "arch.h"
-#include "fixnump.h"
 #include "gc.h"
 #include "genesis/primitive-objects.h"
 #include "genesis/static-symbols.h"
@@ -81,9 +80,9 @@ set_forwarding_pointer(lispobj * pointer, lispobj newspace_copy) {
     return newspace_copy;
 }
 
-long (*scavtab[256])(lispobj *where, lispobj object);
+int (*scavtab[256])(lispobj *where, lispobj object);
 lispobj (*transother[256])(lispobj object);
-long (*sizetab[256])(lispobj *where);
+int (*sizetab[256])(lispobj *where);
 struct weak_pointer *weak_pointers;
 
 unsigned long bytes_consed_between_gcs = 12*1024*1024;
@@ -95,7 +94,7 @@ unsigned long bytes_consed_between_gcs = 12*1024*1024;
 
 /* to copy a boxed object */
 lispobj
-copy_object(lispobj object, long nwords)
+copy_object(lispobj object, int nwords)
 {
     int tag;
     lispobj *new;
@@ -115,7 +114,7 @@ copy_object(lispobj object, long nwords)
     return make_lispobj(new,tag);
 }
 
-static long scav_lose(lispobj *where, lispobj object); /* forward decl */
+static int scav_lose(lispobj *where, lispobj object); /* forward decl */
 
 /* FIXME: Most calls end up going to some trouble to compute an
  * 'n_words' value for this function. The system might be a little
@@ -125,9 +124,8 @@ scavenge(lispobj *start, long n_words)
 {
     lispobj *end = start + n_words;
     lispobj *object_ptr;
-    long n_words_scavenged;
+    int n_words_scavenged;
     for (object_ptr = start;
-
 	 object_ptr < end;
 	 object_ptr += n_words_scavenged) {
 
@@ -192,7 +190,7 @@ scavenge(lispobj *start, long n_words)
 static lispobj trans_fun_header(lispobj object); /* forward decls */
 static lispobj trans_boxed(lispobj object);
 
-static long
+static int
 scav_fun_pointer(lispobj *where, lispobj object)
 {
     lispobj *first_pointer;
@@ -234,7 +232,7 @@ trans_code(struct code *code)
 {
     struct code *new_code;
     lispobj first, l_code, l_new_code;
-    long nheader_words, ncode_words, nwords;
+    int nheader_words, ncode_words, nwords;
     unsigned long displacement;
     lispobj fheaderl, *prev_pointer;
 
@@ -302,7 +300,7 @@ trans_code(struct code *code)
 		
 	/* fix self pointer. */
 	nfheaderp->self =
-#if defined(LISP_FEATURE_X86) || defined(LISP_FEATURE_X86_64)
+#ifdef LISP_FEATURE_X86
 	    FUN_RAW_ADDR_OFFSET +
 #endif
 	    nfheaderl; 
@@ -312,19 +310,19 @@ trans_code(struct code *code)
 	fheaderl = fheaderp->next;
 	prev_pointer = &nfheaderp->next;
     }
-    os_flush_icache((os_vm_address_t) (((long *)new_code) + nheader_words),
-		    ncode_words * sizeof(long));
+    os_flush_icache((os_vm_address_t) (((int *)new_code) + nheader_words),
+		    ncode_words * sizeof(int));
 #ifdef LISP_FEATURE_GENCGC
     gencgc_apply_code_fixups(code, new_code);
 #endif
     return new_code;
 }
 
-static long
+static int
 scav_code_header(lispobj *where, lispobj object)
 {
     struct code *code;
-    long n_header_words, n_code_words, n_words;
+    int n_header_words, n_code_words, n_words;
     lispobj entry_point;	/* tagged pointer to entry point */
     struct simple_fun *function_ptr; /* untagged pointer to entry point */
 
@@ -366,11 +364,11 @@ trans_code_header(lispobj object)
 }
 
 
-static long
+static int
 size_code_header(lispobj *where)
 {
     struct code *code;
-    long nheader_words, ncode_words, nwords;
+    int nheader_words, ncode_words, nwords;
 
     code = (struct code *) where;
 	
@@ -382,8 +380,8 @@ size_code_header(lispobj *where)
     return nwords;
 }
 
-#ifndef LISP_FEATURE_X86 || LISP_FEATURE_X86_64
-static long
+#ifndef LISP_FEATURE_X86
+static int
 scav_return_pc_header(lispobj *where, lispobj object)
 {
     lose("attempted to scavenge a return PC header where=0x%08x object=0x%08x",
@@ -417,8 +415,8 @@ trans_return_pc_header(lispobj object)
  * objects don't move, we don't need to update anything, but we do
  * have to figure out that the function is still live. */
 
-#if defined(LISP_FEATURE_X86) || defined(LISP_FEATURE_X86_64)
-static long
+#ifdef LISP_FEATURE_X86
+static int
 scav_closure_header(lispobj *where, lispobj object)
 {
     struct closure *closure;
@@ -437,8 +435,8 @@ scav_closure_header(lispobj *where, lispobj object)
 }
 #endif
 
-#if !(defined(LISP_FEATURE_X86) || defined(LISP_FEATURE_X86_64))
-static long
+#ifndef LISP_FEATURE_X86
+static int
 scav_fun_header(lispobj *where, lispobj object)
 {
     lose("attempted to scavenge a function header where=0x%08x object=0x%08x",
@@ -471,7 +469,7 @@ trans_fun_header(lispobj object)
  * instances
  */
 
-static long
+static int
 scav_instance_pointer(lispobj *where, lispobj object)
 {
     lispobj copy, *first_pointer;
@@ -497,7 +495,7 @@ scav_instance_pointer(lispobj *where, lispobj object)
 
 static lispobj trans_list(lispobj object);
 
-static long
+static int
 scav_list_pointer(lispobj *where, lispobj object)
 {
     lispobj first, *first_pointer;
@@ -581,7 +579,7 @@ trans_list(lispobj object)
  * scavenging and transporting other pointers
  */
 
-static long
+static int
 scav_other_pointer(lispobj *where, lispobj object)
 {
     lispobj first, *first_pointer;
@@ -611,13 +609,13 @@ scav_other_pointer(lispobj *where, lispobj object)
  * immediate, boxed, and unboxed objects
  */
 
-static long
+static int
 size_pointer(lispobj *where)
 {
     return 1;
 }
 
-static long
+static int
 scav_immediate(lispobj *where, lispobj object)
 {
     return 1;
@@ -630,14 +628,14 @@ trans_immediate(lispobj object)
     return NIL; /* bogus return value to satisfy static type checking */
 }
 
-static long
+static int
 size_immediate(lispobj *where)
 {
     return 1;
 }
 
 
-static long
+static int
 scav_boxed(lispobj *where, lispobj object)
 {
     return 1;
@@ -659,7 +657,7 @@ trans_boxed(lispobj object)
 }
 
 
-static long
+static int
 size_boxed(lispobj *where)
 {
     lispobj header;
@@ -675,7 +673,7 @@ size_boxed(lispobj *where)
 /* Note: on the sparc we don't have to do anything special for fdefns, */
 /* 'cause the raw-addr has a function lowtag. */
 #ifndef LISP_FEATURE_SPARC
-static long
+static int
 scav_fdefn(lispobj *where, lispobj object)
 {
     struct fdefn *fdefn;
@@ -703,7 +701,7 @@ scav_fdefn(lispobj *where, lispobj object)
 }
 #endif
 
-static long
+static int
 scav_unboxed(lispobj *where, lispobj object)
 {
     unsigned long length;
@@ -730,7 +728,7 @@ trans_unboxed(lispobj object)
     return copy_unboxed_object(object, length);
 }
 
-static long
+static int
 size_unboxed(lispobj *where)
 {
     lispobj header;
@@ -743,13 +741,13 @@ size_unboxed(lispobj *where)
     return length;
 }
 
-
+static int
 /* vector-like objects */
-static long
+
 scav_base_string(lispobj *where, lispobj object)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     /* NOTE: Strings contain one more byte of data than the length */
     /* slot indicates. */
@@ -764,7 +762,7 @@ static lispobj
 trans_base_string(lispobj object)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     gc_assert(is_lisp_pointer(object));
 
@@ -779,11 +777,11 @@ trans_base_string(lispobj object)
     return copy_large_unboxed_object(object, nwords);
 }
 
-static long
+static int
 size_base_string(lispobj *where)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     /* NOTE: A string contains one more byte of data (a terminating
      * '\0' to help when interfacing with C functions) than indicated
@@ -792,57 +790,6 @@ size_base_string(lispobj *where)
     vector = (struct vector *) where;
     length = fixnum_value(vector->length) + 1;
     nwords = CEILING(NWORDS(length, 8) + 2, 2);
-
-    return nwords;
-}
-
-static long
-scav_character_string(lispobj *where, lispobj object)
-{
-    struct vector *vector;
-    int length, nwords;
-
-    /* NOTE: Strings contain one more byte of data than the length */
-    /* slot indicates. */
-
-    vector = (struct vector *) where;
-    length = fixnum_value(vector->length) + 1;
-    nwords = CEILING(NWORDS(length, 32) + 2, 2);
-
-    return nwords;
-}
-static lispobj
-trans_character_string(lispobj object)
-{
-    struct vector *vector;
-    int length, nwords;
-
-    gc_assert(is_lisp_pointer(object));
-
-    /* NOTE: A string contains one more byte of data (a terminating
-     * '\0' to help when interfacing with C functions) than indicated
-     * by the length slot. */
-
-    vector = (struct vector *) native_pointer(object);
-    length = fixnum_value(vector->length) + 1;
-    nwords = CEILING(NWORDS(length, 32) + 2, 2);
-
-    return copy_large_unboxed_object(object, nwords);
-}
-
-static long
-size_character_string(lispobj *where)
-{
-    struct vector *vector;
-    int length, nwords;
-
-    /* NOTE: A string contains one more byte of data (a terminating
-     * '\0' to help when interfacing with C functions) than indicated
-     * by the length slot. */
-
-    vector = (struct vector *) where;
-    length = fixnum_value(vector->length) + 1;
-    nwords = CEILING(NWORDS(length, 32) + 2, 2);
 
     return nwords;
 }
@@ -851,7 +798,7 @@ static lispobj
 trans_vector(lispobj object)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     gc_assert(is_lisp_pointer(object));
 
@@ -863,11 +810,11 @@ trans_vector(lispobj object)
     return copy_large_object(object, nwords);
 }
 
-static long
+static int
 size_vector(lispobj *where)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     vector = (struct vector *) where;
     length = fixnum_value(vector->length);
@@ -876,7 +823,7 @@ size_vector(lispobj *where)
     return nwords;
 }
 
-static long
+static int
 scav_vector_nil(lispobj *where, lispobj object)
 {
     return 2;
@@ -889,18 +836,18 @@ trans_vector_nil(lispobj object)
     return copy_unboxed_object(object, 2);
 }
 
-static long
+static int
 size_vector_nil(lispobj *where)
 {
     /* Just the header word and the length word */
     return 2;
 }
 
-static long
+static int
 scav_vector_bit(lispobj *where, lispobj object)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     vector = (struct vector *) where;
     length = fixnum_value(vector->length);
@@ -913,7 +860,7 @@ static lispobj
 trans_vector_bit(lispobj object)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     gc_assert(is_lisp_pointer(object));
 
@@ -924,11 +871,11 @@ trans_vector_bit(lispobj object)
     return copy_large_unboxed_object(object, nwords);
 }
 
-static long
+static int
 size_vector_bit(lispobj *where)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     vector = (struct vector *) where;
     length = fixnum_value(vector->length);
@@ -937,11 +884,11 @@ size_vector_bit(lispobj *where)
     return nwords;
 }
 
-static long
+static int
 scav_vector_unsigned_byte_2(lispobj *where, lispobj object)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     vector = (struct vector *) where;
     length = fixnum_value(vector->length);
@@ -954,7 +901,7 @@ static lispobj
 trans_vector_unsigned_byte_2(lispobj object)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     gc_assert(is_lisp_pointer(object));
 
@@ -965,11 +912,11 @@ trans_vector_unsigned_byte_2(lispobj object)
     return copy_large_unboxed_object(object, nwords);
 }
 
-static long
+static int
 size_vector_unsigned_byte_2(lispobj *where)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     vector = (struct vector *) where;
     length = fixnum_value(vector->length);
@@ -978,11 +925,11 @@ size_vector_unsigned_byte_2(lispobj *where)
     return nwords;
 }
 
-static long
+static int
 scav_vector_unsigned_byte_4(lispobj *where, lispobj object)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     vector = (struct vector *) where;
     length = fixnum_value(vector->length);
@@ -995,7 +942,7 @@ static lispobj
 trans_vector_unsigned_byte_4(lispobj object)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     gc_assert(is_lisp_pointer(object));
 
@@ -1005,11 +952,11 @@ trans_vector_unsigned_byte_4(lispobj object)
 
     return copy_large_unboxed_object(object, nwords);
 }
-static long
+static int
 size_vector_unsigned_byte_4(lispobj *where)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     vector = (struct vector *) where;
     length = fixnum_value(vector->length);
@@ -1019,11 +966,11 @@ size_vector_unsigned_byte_4(lispobj *where)
 }
 
 
-static long
+static int
 scav_vector_unsigned_byte_8(lispobj *where, lispobj object)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     vector = (struct vector *) where;
     length = fixnum_value(vector->length);
@@ -1040,7 +987,7 @@ static lispobj
 trans_vector_unsigned_byte_8(lispobj object)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     gc_assert(is_lisp_pointer(object));
 
@@ -1051,11 +998,11 @@ trans_vector_unsigned_byte_8(lispobj object)
     return copy_large_unboxed_object(object, nwords);
 }
 
-static long
+static int
 size_vector_unsigned_byte_8(lispobj *where)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     vector = (struct vector *) where;
     length = fixnum_value(vector->length);
@@ -1065,11 +1012,11 @@ size_vector_unsigned_byte_8(lispobj *where)
 }
 
 
-static long
+static int
 scav_vector_unsigned_byte_16(lispobj *where, lispobj object)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     vector = (struct vector *) where;
     length = fixnum_value(vector->length);
@@ -1082,7 +1029,7 @@ static lispobj
 trans_vector_unsigned_byte_16(lispobj object)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     gc_assert(is_lisp_pointer(object));
 
@@ -1093,11 +1040,11 @@ trans_vector_unsigned_byte_16(lispobj object)
     return copy_large_unboxed_object(object, nwords);
 }
 
-static long
+static int
 size_vector_unsigned_byte_16(lispobj *where)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     vector = (struct vector *) where;
     length = fixnum_value(vector->length);
@@ -1106,11 +1053,11 @@ size_vector_unsigned_byte_16(lispobj *where)
     return nwords;
 }
 
-static long
+static int
 scav_vector_unsigned_byte_32(lispobj *where, lispobj object)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     vector = (struct vector *) where;
     length = fixnum_value(vector->length);
@@ -1123,7 +1070,7 @@ static lispobj
 trans_vector_unsigned_byte_32(lispobj object)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     gc_assert(is_lisp_pointer(object));
 
@@ -1134,11 +1081,11 @@ trans_vector_unsigned_byte_32(lispobj object)
     return copy_large_unboxed_object(object, nwords);
 }
 
-static long
+static int
 size_vector_unsigned_byte_32(lispobj *where)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     vector = (struct vector *) where;
     length = fixnum_value(vector->length);
@@ -1148,11 +1095,11 @@ size_vector_unsigned_byte_32(lispobj *where)
 }
 
 #if N_WORD_BITS == 64
-static long
+static int
 scav_vector_unsigned_byte_64(lispobj *where, lispobj object)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     vector = (struct vector *) where;
     length = fixnum_value(vector->length);
@@ -1165,7 +1112,7 @@ static lispobj
 trans_vector_unsigned_byte_64(lispobj object)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     gc_assert(is_lisp_pointer(object));
 
@@ -1176,11 +1123,11 @@ trans_vector_unsigned_byte_64(lispobj object)
     return copy_large_unboxed_object(object, nwords);
 }
 
-static long
+static int
 size_vector_unsigned_byte_64(lispobj *where)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     vector = (struct vector *) where;
     length = fixnum_value(vector->length);
@@ -1190,11 +1137,11 @@ size_vector_unsigned_byte_64(lispobj *where)
 }
 #endif
 
-static long
+static int
 scav_vector_single_float(lispobj *where, lispobj object)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     vector = (struct vector *) where;
     length = fixnum_value(vector->length);
@@ -1207,7 +1154,7 @@ static lispobj
 trans_vector_single_float(lispobj object)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     gc_assert(is_lisp_pointer(object));
 
@@ -1218,11 +1165,11 @@ trans_vector_single_float(lispobj object)
     return copy_large_unboxed_object(object, nwords);
 }
 
-static long
+static int
 size_vector_single_float(lispobj *where)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     vector = (struct vector *) where;
     length = fixnum_value(vector->length);
@@ -1231,11 +1178,11 @@ size_vector_single_float(lispobj *where)
     return nwords;
 }
 
-static long
+static int
 scav_vector_double_float(lispobj *where, lispobj object)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     vector = (struct vector *) where;
     length = fixnum_value(vector->length);
@@ -1248,7 +1195,7 @@ static lispobj
 trans_vector_double_float(lispobj object)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     gc_assert(is_lisp_pointer(object));
 
@@ -1259,11 +1206,11 @@ trans_vector_double_float(lispobj object)
     return copy_large_unboxed_object(object, nwords);
 }
 
-static long
+static int
 size_vector_double_float(lispobj *where)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     vector = (struct vector *) where;
     length = fixnum_value(vector->length);
@@ -1273,11 +1220,11 @@ size_vector_double_float(lispobj *where)
 }
 
 #ifdef SIMPLE_ARRAY_LONG_FLOAT_WIDETAG
-static long
+static int
 scav_vector_long_float(lispobj *where, lispobj object)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     vector = (struct vector *) where;
     length = fixnum_value(vector->length);
@@ -1291,7 +1238,7 @@ static lispobj
 trans_vector_long_float(lispobj object)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     gc_assert(is_lisp_pointer(object));
 
@@ -1302,11 +1249,11 @@ trans_vector_long_float(lispobj object)
     return copy_large_unboxed_object(object, nwords);
 }
 
-static long
+static int
 size_vector_long_float(lispobj *where)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     vector = (struct vector *) where;
     length = fixnum_value(vector->length);
@@ -1318,11 +1265,11 @@ size_vector_long_float(lispobj *where)
 
 
 #ifdef SIMPLE_ARRAY_COMPLEX_SINGLE_FLOAT_WIDETAG
-static long
+static int
 scav_vector_complex_single_float(lispobj *where, lispobj object)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     vector = (struct vector *) where;
     length = fixnum_value(vector->length);
@@ -1335,7 +1282,7 @@ static lispobj
 trans_vector_complex_single_float(lispobj object)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     gc_assert(is_lisp_pointer(object));
 
@@ -1346,11 +1293,11 @@ trans_vector_complex_single_float(lispobj object)
     return copy_large_unboxed_object(object, nwords);
 }
 
-static long
+static int
 size_vector_complex_single_float(lispobj *where)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     vector = (struct vector *) where;
     length = fixnum_value(vector->length);
@@ -1361,11 +1308,11 @@ size_vector_complex_single_float(lispobj *where)
 #endif
 
 #ifdef SIMPLE_ARRAY_COMPLEX_DOUBLE_FLOAT_WIDETAG
-static long
+static int
 scav_vector_complex_double_float(lispobj *where, lispobj object)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     vector = (struct vector *) where;
     length = fixnum_value(vector->length);
@@ -1378,7 +1325,7 @@ static lispobj
 trans_vector_complex_double_float(lispobj object)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     gc_assert(is_lisp_pointer(object));
 
@@ -1389,11 +1336,11 @@ trans_vector_complex_double_float(lispobj object)
     return copy_large_unboxed_object(object, nwords);
 }
 
-static long
+static int
 size_vector_complex_double_float(lispobj *where)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     vector = (struct vector *) where;
     length = fixnum_value(vector->length);
@@ -1405,11 +1352,11 @@ size_vector_complex_double_float(lispobj *where)
 
 
 #ifdef SIMPLE_ARRAY_COMPLEX_LONG_FLOAT_WIDETAG
-static long
+static int
 scav_vector_complex_long_float(lispobj *where, lispobj object)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     vector = (struct vector *) where;
     length = fixnum_value(vector->length);
@@ -1422,7 +1369,7 @@ static lispobj
 trans_vector_complex_long_float(lispobj object)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     gc_assert(is_lisp_pointer(object));
 
@@ -1433,11 +1380,11 @@ trans_vector_complex_long_float(lispobj object)
     return copy_large_unboxed_object(object, nwords);
 }
 
-static long
+static int
 size_vector_complex_long_float(lispobj *where)
 {
     struct vector *vector;
-    long length, nwords;
+    int length, nwords;
 
     vector = (struct vector *) where;
     length = fixnum_value(vector->length);
@@ -1478,7 +1425,7 @@ trans_weak_pointer(lispobj object)
     return copy;
 }
 
-static long
+static int
 size_weak_pointer(lispobj *where)
 {
     return WEAK_POINTER_NWORDS;
@@ -1520,7 +1467,7 @@ void scan_weak_pointers(void)
  * initialization
  */
 
-static long
+static int
 scav_lose(lispobj *where, lispobj object)
 {
     lose("no scavenge function for object 0x%08x (widetag 0x%x)",
@@ -1539,7 +1486,7 @@ trans_lose(lispobj object)
     return NIL; /* bogus return value to satisfy static type checking */
 }
 
-static long
+static int
 size_lose(lispobj *where)
 {
     lose("no size function for object at 0x%08x (widetag 0x%x)",
@@ -1556,7 +1503,7 @@ size_lose(lispobj *where)
 void
 gc_init_tables(void)
 {
-    long i;
+    int i;
 
     /* Set default value in all slots of scavenge table.  FIXME
      * replace this gnarly sizeof with something based on
@@ -1602,9 +1549,6 @@ gc_init_tables(void)
 #endif
     scavtab[SIMPLE_ARRAY_WIDETAG] = scav_boxed;
     scavtab[SIMPLE_BASE_STRING_WIDETAG] = scav_base_string;
-#ifdef SIMPLE_CHARACTER_STRING_WIDETAG
-    scavtab[SIMPLE_CHARACTER_STRING_WIDETAG] = scav_character_string;
-#endif
     scavtab[SIMPLE_BIT_VECTOR_WIDETAG] = scav_vector_bit;
     scavtab[SIMPLE_ARRAY_NIL_WIDETAG] = scav_vector_nil;
     scavtab[SIMPLE_ARRAY_UNSIGNED_BYTE_2_WIDETAG] =
@@ -1680,9 +1624,6 @@ gc_init_tables(void)
 	scav_vector_complex_long_float;
 #endif
     scavtab[COMPLEX_BASE_STRING_WIDETAG] = scav_boxed;
-#ifdef COMPLEX_CHARACTER_STRING_WIDETAG
-    scavtab[COMPLEX_CHARACTER_STRING_WIDETAG] = scav_boxed;
-#endif
     scavtab[COMPLEX_VECTOR_NIL_WIDETAG] = scav_boxed;
     scavtab[COMPLEX_BIT_VECTOR_WIDETAG] = scav_boxed;
     scavtab[COMPLEX_VECTOR_WIDETAG] = scav_boxed;
@@ -1692,7 +1633,7 @@ gc_init_tables(void)
     scavtab[SIMPLE_FUN_HEADER_WIDETAG] = scav_fun_header;
     scavtab[RETURN_PC_HEADER_WIDETAG] = scav_return_pc_header;
 #endif
-#if defined(LISP_FEATURE_X86) || defined(LISP_FEATURE_X86_64)
+#ifdef LISP_FEATURE_X86
     scavtab[CLOSURE_HEADER_WIDETAG] = scav_closure_header;
     scavtab[FUNCALLABLE_INSTANCE_HEADER_WIDETAG] = scav_closure_header;
 #else
@@ -1701,7 +1642,7 @@ gc_init_tables(void)
 #endif
     scavtab[VALUE_CELL_HEADER_WIDETAG] = scav_boxed;
     scavtab[SYMBOL_HEADER_WIDETAG] = scav_boxed;
-    scavtab[CHARACTER_WIDETAG] = scav_immediate;
+    scavtab[BASE_CHAR_WIDETAG] = scav_immediate;
     scavtab[SAP_WIDETAG] = scav_unboxed;
     scavtab[UNBOUND_MARKER_WIDETAG] = scav_immediate;
     scavtab[INSTANCE_HEADER_WIDETAG] = scav_boxed;
@@ -1733,9 +1674,6 @@ gc_init_tables(void)
 #endif
     transother[SIMPLE_ARRAY_WIDETAG] = trans_boxed; /* but not GENCGC */
     transother[SIMPLE_BASE_STRING_WIDETAG] = trans_base_string;
-#ifdef SIMPLE_CHARACTER_STRING_WIDETAG
-    transother[SIMPLE_CHARACTER_STRING_WIDETAG] = trans_character_string;
-#endif
     transother[SIMPLE_BIT_VECTOR_WIDETAG] = trans_vector_bit;
     transother[SIMPLE_VECTOR_WIDETAG] = trans_vector;
     transother[SIMPLE_ARRAY_NIL_WIDETAG] = trans_vector_nil;
@@ -1816,9 +1754,6 @@ gc_init_tables(void)
 	trans_vector_complex_long_float;
 #endif
     transother[COMPLEX_BASE_STRING_WIDETAG] = trans_boxed;
-#ifdef COMPLEX_CHARACTER_STRING_WIDETAG
-    transother[COMPLEX_CHARACTER_STRING_WIDETAG] = trans_boxed;
-#endif
     transother[COMPLEX_BIT_VECTOR_WIDETAG] = trans_boxed;
     transother[COMPLEX_VECTOR_NIL_WIDETAG] = trans_boxed;
     transother[COMPLEX_VECTOR_WIDETAG] = trans_boxed;
@@ -1830,7 +1765,7 @@ gc_init_tables(void)
     transother[FUNCALLABLE_INSTANCE_HEADER_WIDETAG] = trans_boxed;
     transother[VALUE_CELL_HEADER_WIDETAG] = trans_boxed;
     transother[SYMBOL_HEADER_WIDETAG] = trans_boxed;
-    transother[CHARACTER_WIDETAG] = trans_immediate;
+    transother[BASE_CHAR_WIDETAG] = trans_immediate;
     transother[SAP_WIDETAG] = trans_unboxed;
     transother[UNBOUND_MARKER_WIDETAG] = trans_immediate;
     transother[WEAK_POINTER_WIDETAG] = trans_weak_pointer;
@@ -1869,9 +1804,6 @@ gc_init_tables(void)
 #endif
     sizetab[SIMPLE_ARRAY_WIDETAG] = size_boxed;
     sizetab[SIMPLE_BASE_STRING_WIDETAG] = size_base_string;
-#ifdef SIMPLE_CHARACTER_STRING_WIDETAG
-    sizetab[SIMPLE_CHARACTER_STRING_WIDETAG] = size_character_string;
-#endif
     sizetab[SIMPLE_BIT_VECTOR_WIDETAG] = size_vector_bit;
     sizetab[SIMPLE_VECTOR_WIDETAG] = size_vector;
     sizetab[SIMPLE_ARRAY_NIL_WIDETAG] = size_vector_nil;
@@ -1948,9 +1880,6 @@ gc_init_tables(void)
 	size_vector_complex_long_float;
 #endif
     sizetab[COMPLEX_BASE_STRING_WIDETAG] = size_boxed;
-#ifdef COMPLEX_CHARACTER_STRING_WIDETAG
-    sizetab[COMPLEX_CHARACTER_STRING_WIDETAG] = size_boxed;
-#endif
     sizetab[COMPLEX_VECTOR_NIL_WIDETAG] = size_boxed;
     sizetab[COMPLEX_BIT_VECTOR_WIDETAG] = size_boxed;
     sizetab[COMPLEX_VECTOR_WIDETAG] = size_boxed;
@@ -1965,7 +1894,7 @@ gc_init_tables(void)
     sizetab[FUNCALLABLE_INSTANCE_HEADER_WIDETAG] = size_boxed;
     sizetab[VALUE_CELL_HEADER_WIDETAG] = size_boxed;
     sizetab[SYMBOL_HEADER_WIDETAG] = size_boxed;
-    sizetab[CHARACTER_WIDETAG] = size_immediate;
+    sizetab[BASE_CHAR_WIDETAG] = size_immediate;
     sizetab[SAP_WIDETAG] = size_unboxed;
     sizetab[UNBOUND_MARKER_WIDETAG] = size_immediate;
     sizetab[WEAK_POINTER_WIDETAG] = size_weak_pointer;

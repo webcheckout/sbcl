@@ -99,7 +99,7 @@
     ;; it is a fixnum.  The lowtag selection magic that is required to
     ;; ensure this is explained in the comment in objdef.lisp
     (loadw res symbol symbol-hash-slot other-pointer-lowtag)
-    (inst bic res #.(ash lowtag-mask -1) res)))
+    (inst bic res fixnum-tag-mask res)))
 
 ;;;; fdefinition (FDEFN) objects
 

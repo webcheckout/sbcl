@@ -127,10 +127,41 @@
 
 ;;;; Other integer ranges.
 
-;;; A (signed-byte 32) can be represented with either fixnum or a bignum with
+(defun signed-byte-32-test (value temp temp1 not-p target not-target)
+  (multiple-value-bind (yep nope) (if not-p
+				      (values not-target target)
+				      (values target not-target))
+    (assemble ()
+     ;; value must be a fixnum
+     (inst and value fixnum-tag-mask temp)
+     (inst bne temp nope)
+     ;; value must have all bits > 31 set or no bits > 31 set
+     (inst sra value (+ 32 3 -1) temp)
+     (beq temp yep)			; no bits set
+     (inst not temp temp)
+     (beq temp yep)			; all bits set
+     (beq zero nope))
+    (values)))
+
+(define-vop (signed-byte-32-p type-predicate)
+  (:translate signed-byte-32-p)
+  (:temporary (:scs (non-descriptor-reg)) temp1)
+  (:generator 45
+    (signed-byte-32-test value temp temp1 not-p target not-target)
+    NOT-TARGET))
+
+(define-vop (check-signed-byte-32 check-type)
+  (:temporary (:scs (non-descriptor-reg)) temp1)
+  (:generator 45
+    (let ((loose (generate-error-code vop object-not-signed-byte-32-error value)))
+      (signed-byte-32-test value temp temp1 t loose okay))
+    OKAY
+    (inst move value result)))
+
+;;; A (signed-byte 64) can be represented with either fixnum or a bignum with
 ;;; exactly one digit.
 
-(defun signed-byte-32-test (value temp temp1 not-p target not-target)
+(defun signed-byte-64-test (value temp temp1 not-p target not-target)
   (multiple-value-bind
       (yep nope)
       (if not-p
@@ -150,27 +181,55 @@
 	  (inst beq temp target))))
   (values))
 
-(define-vop (signed-byte-32-p type-predicate)
-  (:translate signed-byte-32-p)
+(define-vop (signed-byte-64-p type-predicate)
+  (:translate signed-byte-64-p)
   (:temporary (:scs (non-descriptor-reg)) temp1)
   (:generator 45
-    (signed-byte-32-test value temp temp1 not-p target not-target)
+    (signed-byte-64-test value temp temp1 not-p target not-target)
     NOT-TARGET))
 
-(define-vop (check-signed-byte-32 check-type)
+(define-vop (check-signed-byte-64 check-type)
   (:temporary (:scs (non-descriptor-reg)) temp1)
   (:generator 45
-    (let ((loose (generate-error-code vop object-not-signed-byte-32-error
+    (let ((loose (generate-error-code vop object-not-signed-byte-64-error
 				      value)))
-      (signed-byte-32-test value temp temp1 t loose okay))
+      (signed-byte-64-test value temp temp1 t loose okay))
     OKAY
-    (move value result)))
+    (inst move value result)))
 
-;;; An (unsigned-byte 32) can be represented with either a positive fixnum, a
+(defun unsigned-byte-32-test (value temp temp1 not-p target not-target)
+  (multiple-value-bind (yep nope) (if not-p
+				      (values not-target target)
+				      (values target not-target))
+    (assemble ()
+      ;; must be a fixnum with upper bits zeros
+      (inst and value fixnum-tag-mask temp)
+      (inst bne temp nope)
+      (inst sra value (+ 32 n-fixnum-tag-bits) temp)
+      (inst beq temp yep))
+    (values)))
+
+(define-vop (unsigned-byte-32-p type-predicate)
+  (:translate unsigned-byte-32-p)
+  (:temporary (:scs (non-descritor-reg)) temp1)
+  (:generator 45
+    (unsigned-byte-32-test value temp temp1 not-p target not-target)
+    NOT-TARGET))
+
+(define-vop (check-unsigned-byte-32 check-type)
+  (:temporary (:scs (non-descriptor-reg)) temp1)
+  (:generator 56
+    (let ((loose (generate-error-code vop object-not-unsigned-byte-32-error
+				      value)))
+      (unsigned-byte-32-test value temp temp1 t loose okay))
+    OKAY
+    (inst move value result)))
+
+;;; An (unsigned-byte 64) can be represented with either a positive fixnum, a
 ;;; bignum with exactly one positive digit, or a bignum with exactly two digits
 ;;; and the second digit all zeros.
 
-(defun unsigned-byte-32-test (value temp temp1 not-p target not-target)
+(defun unsigned-byte-64-test (value temp temp1 not-p target not-target)
   (multiple-value-bind (yep nope)
 		       (if not-p
 			   (values not-target target)
@@ -191,7 +250,7 @@
       (inst li  (+ (ash 1 n-widetag-bits) bignum-widetag) temp1)
       (inst xor temp temp1 temp)
       (inst beq temp single-word)
-      ;; If it's other than two, we can't be an (unsigned-byte 32)
+      ;; If it's other than two, we can't be an (unsigned-byte 64)
       (inst li (logxor (+ (ash 1 n-widetag-bits) bignum-widetag)
 		       (+ (ash 2 n-widetag-bits) bignum-widetag))
 	    temp1)
@@ -199,7 +258,7 @@
       (inst bne temp nope)
       ;; Get the second digit.
       (loadw temp value (1+ bignum-digits-offset) other-pointer-lowtag)
-      ;; All zeros, its an (unsigned-byte 32).
+      ;; All zeros, its an (unsigned-byte 64).
       (inst beq temp yep)
       (inst br zero-tn nope)
 	
@@ -207,26 +266,26 @@
       ;; Get the single digit.
       (loadw temp value bignum-digits-offset other-pointer-lowtag)
 
-      ;; positive implies (unsigned-byte 32).
+      ;; positive implies (unsigned-byte 64).
       FIXNUM
       (if not-p
 	  (inst blt temp target)
 	  (inst bge temp target))))
   (values))
 
-(define-vop (unsigned-byte-32-p type-predicate)
-  (:translate unsigned-byte-32-p)
+(define-vop (unsigned-byte-64-p type-predicate)
+  (:translate unsigned-byte-64-p)
   (:temporary (:scs (non-descriptor-reg)) temp1)
   (:generator 45
-    (unsigned-byte-32-test value temp temp1 not-p target not-target)
+    (unsigned-byte-64-test value temp temp1 not-p target not-target)
     NOT-TARGET))
 
-(define-vop (check-unsigned-byte-32 check-type)
+(define-vop (check-unsigned-byte-64 check-type)
   (:temporary (:scs (non-descriptor-reg)) temp1)
   (:generator 45
-    (let ((loose (generate-error-code vop object-not-unsigned-byte-32-error
+    (let ((loose (generate-error-code vop object-not-unsigned-byte-64-error
 				      value)))
-      (unsigned-byte-32-test value temp temp1 t loose okay))
+      (unsigned-byte-64-test value temp temp1 t loose okay))
     OKAY
     (move value result)))
 

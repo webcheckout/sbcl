@@ -11,6 +11,14 @@
 
 (in-package "SB!VM")
 
+#+sb-assembling
+(defun %static-fun-call (static-fun-name lip nargs ocfp)
+  (inst ldq lip (static-fun-offset static-fun-name) null-tn)
+  (inst li (fixnumize 2) nargs)
+  (inst move cfp-tn ocfp)
+  (inst move csp-tn cfp-tn)
+  (inst jmp zero-tn lip))
+  
 (define-assembly-routine (generic-+
 			  (:cost 10)
 			  (:return-style :full-call)
@@ -24,48 +32,48 @@
 
 			  (:temp temp non-descriptor-reg nl0-offset)
 			  (:temp temp2 non-descriptor-reg nl1-offset)
-			  (:temp temp3 non-descriptor-reg nl2-offset)
+                          (:temp temp3 non-descriptor-reg nl2-offset)
 			  (:temp lip interior-reg lip-offset)
 			  (:temp lra descriptor-reg lra-offset)
 			  (:temp nargs any-reg nargs-offset)
 			  (:temp ocfp any-reg ocfp-offset))
-  (inst and x 3 temp)
+  ;; check for fixnums
+  (inst or x y temp)
+  (inst and temp fixnum-tag-mask temp)
   (inst bne temp DO-STATIC-FUN)
-  (inst and y 3 temp)
-  (inst bne temp DO-STATIC-FUN)
+
+  (inst move x temp3)                    ; save a copy of x
   (inst addq x y res)
+
+  ;; check for overflow.  this is a long and complicated process because
+  ;; Alpha doesn't provide any condition bits or anything like that,
+  ;; prefering instead to provide instructions which trap to the OS on
+  ;; overflow.  trapping to the OS would cause all sorts of problems, I
+  ;; think, so we do things the long way.
+  (inst xor temp3 y temp)		; combine x and y's sign bit
+  (inst srl temp 63 temp)
+  (inst bne temp DONE)                 ; they were not equal, get out of here
+
+  ;; even if the sign bits were equal, the addition might not have
+  ;; overflowed.  check the sign bit of the result.
+  (inst xor res temp3 temp)		; combine res and x's sign bit
+  (inst srl temp 63 temp)
+  (inst beq temp DONE)			; they were equal, get out of here
   
-  ; Check whether we need a bignum.
-  (inst sra res 31 temp)
-  (inst beq temp DONE)
-  (inst not temp temp)
-  (inst beq temp DONE)
-  (inst sra res 2 temp3)
-  
+  ;; do the add the proper way
+  (inst sra temp3 n-fixnum-tag-bits temp)
+  (inst sra y n-fixnum-tag-bits temp2)
+  (inst addq temp temp2 temp)
+
   ; from move-from-signed
-  (inst li 2 temp2)
-  (inst sra temp3 31 temp)
-  (inst cmoveq temp 1 temp2)
-  (inst not temp temp)
-  (inst cmoveq temp 1 temp2)
-  (inst sll temp2 n-widetag-bits temp2)
-  (inst bis temp2 bignum-widetag temp2)
-  
-  (pseudo-atomic (:extra (pad-data-block (+ bignum-digits-offset 3)))
-    (inst bis alloc-tn other-pointer-lowtag res)
-    (storew temp2 res 0 other-pointer-lowtag)
-    (storew temp3 res bignum-digits-offset other-pointer-lowtag)
-    (inst srl temp3 32 temp)
-    (storew temp res (1+ bignum-digits-offset) other-pointer-lowtag))
+  (with-fixed-allocation (res temp2 bignum-widetag (1+ bignum-digits-offset))
+    (storew temp res bignum-digits-offset other-pointer-lowtag))
+
   DONE
   (lisp-return lra lip :offset 2)
 
   DO-STATIC-FUN
-  (inst ldl lip (static-fun-offset 'two-arg-+) null-tn)
-  (inst li (fixnumize 2) nargs)
-  (inst move cfp-tn ocfp)
-  (inst move csp-tn cfp-tn)
-  (inst jmp zero-tn lip))
+  (%static-fun-call 'two-arg-+ lip nargs ocfp))
 
 
 (define-assembly-routine (generic--
@@ -80,49 +88,44 @@
 			  (:res res (descriptor-reg any-reg) a0-offset)
 
 			  (:temp temp non-descriptor-reg nl0-offset)
-			  (:temp temp2 non-descriptor-reg nl1-offset)
-			  (:temp temp3 non-descriptor-reg nl2-offset)
+                          (:temp temp2 non-descriptor-reg nl1-offset)
+                          (:temp temp3 non-descriptor-reg nl2-offset)
 			  (:temp lip interior-reg lip-offset)
 			  (:temp lra descriptor-reg lra-offset)
 			  (:temp nargs any-reg nargs-offset)
 			  (:temp ocfp any-reg ocfp-offset))
-  (inst and x 3 temp)
+  ;; check for fixnums
+  (inst or x y temp)
+  (inst and temp fixnum-tag-mask temp)
   (inst bne temp DO-STATIC-FUN)
-  (inst and y 3 temp)
-  (inst bne temp DO-STATIC-FUN)
+
+  (inst move x temp3)
   (inst subq x y res)
-  
-  ; Check whether we need a bignum.
-  (inst sra res 31 temp)
-  (inst beq temp DONE)
-  (inst not temp temp)
-  (inst beq temp DONE)
-  (inst sra res 2 temp3)
-  
+
+  ;; check for overflow
+  (inst xor y temp3 temp)               ; combine sign bits
+  (inst srl temp 63 temp)
+  (inst beq temp DONE)                  ; they were equal, get out of here
+
+  ;; check the sign bit of the result
+  (inst xor res temp3 temp)		; combine sign bits
+  (inst srl temp 63 temp)
+  (inst beq temp DONE)			; they were equal, get out of here
+
+  ;; do the subtract the proper way
+  (inst sra temp3 n-fixnum-tag-bits temp)
+  (inst sra y n-fixnum-tag-bits temp2)
+  (inst subq temp temp2 temp)
+
   ; from move-from-signed
-  (inst li 2 temp2)
-  (inst sra temp3 31 temp)
-  (inst cmoveq temp 1 temp2)
-  (inst not temp temp)
-  (inst cmoveq temp 1 temp2)
-  (inst sll temp2 n-widetag-bits temp2)
-  (inst bis temp2 bignum-widetag temp2)
-  
-  (pseudo-atomic (:extra (pad-data-block (+ bignum-digits-offset 3)))
-    (inst bis alloc-tn other-pointer-lowtag res)
-    (storew temp2 res 0 other-pointer-lowtag)
-    (storew temp3 res bignum-digits-offset other-pointer-lowtag)
-    (inst srl temp3 32 temp)
-    (storew temp res (1+ bignum-digits-offset) other-pointer-lowtag))
+  (with-fixed-allocation (res temp2 bignum-widetag (1+ bignum-digits-offset))
+    (storew temp res bignum-digits-offset other-pointer-lowtag))
+
   DONE
   (lisp-return lra lip :offset 2)
 
   DO-STATIC-FUN
-  (inst ldl lip (static-fun-offset 'two-arg--) null-tn)
-  (inst li (fixnumize 2) nargs)
-  (inst move cfp-tn ocfp)
-  (inst move csp-tn cfp-tn)
-  (inst jmp zero-tn lip))
+  (%static-fun-call 'two-arg-- lip nargs ocfp))
 
 
 (define-assembly-routine (generic-*
@@ -139,45 +142,47 @@
 			  (:temp temp non-descriptor-reg nl0-offset)
 			  (:temp lo non-descriptor-reg nl1-offset)
 			  (:temp hi non-descriptor-reg nl2-offset)
-			  (:temp temp2 non-descriptor-reg nl3-offset)
+                          (:temp temp2 non-descriptor-reg nl3-offset)
 			  (:temp lip interior-reg lip-offset)
 			  (:temp lra descriptor-reg lra-offset)
 			  (:temp nargs any-reg nargs-offset)
 			  (:temp ocfp any-reg ocfp-offset))
-  ;; If either arg is not a fixnum, call the static function.
-  (inst and x 3 temp)
-  (inst bne temp DO-STATIC-FUN)
-  (inst and y 3 temp)
+  ;; check for fixnums
+  (inst or x y temp)
+  (inst and temp fixnum-tag-mask temp)
   (inst bne temp DO-STATIC-FUN)
 
   ;; Remove the tag from one arg so that the result will have the
   ;; correct fixnum tag.
-  (inst sra x 2 temp)
-  (inst mulq temp y lo)
-  (inst sra lo 32 hi)
-  (inst sll lo 32 res)
-  (inst sra res 32 res)
-  ;; Check to see if the result will fit in a fixnum. (I.e. the high
-  ;; word is just 32 copies of the sign bit of the low word).
-  (inst sra res 31 temp)
-  (inst xor hi temp temp)
+  (inst sra x n-fixnum-tag-bits temp)
+  (inst mulq temp y res)
+  (inst umulh temp y hi)
+
+  ;; check to see if the result will fit in a fixnum (i.e. the high word
+  ;; is just 64 copies of the sign bit of the low word).
+  (inst sra res 63 temp)
+  (inst xor temp hi temp)
   (inst beq temp DONE)
-  ;; Shift the double word hi:res down two bits into hi:low to get rid
+
+  ;; Shift the double word hi:res down three bits into hi:low to get rid
   ;; of the fixnum tag.
-  (inst sra lo 2 lo)
-  (inst sra lo 32 hi)
+  (inst srl res n-fixnum-tag-bits lo)
+  (inst sll hi (- n-word-bits n-fixnum-tag-bits) temp)
+  (inst or lo temp lo)
+  (inst sra hi n-fixnum-tag-bits hi)
 
   ;; Do we need one word or two?  Assume two.
   (inst li (logior (ash 2 n-widetag-bits) bignum-widetag) temp2)
-  (inst sra lo 31 temp)
+  (inst sra lo 63 temp)
   (inst xor temp hi temp)
   (inst bne temp two-words)
 
   ;; Only need one word, fix the header.
   (inst li (logior (ash 1 n-widetag-bits) bignum-widetag) temp2)
+
   ;; Allocate one word.
   (pseudo-atomic (:extra (pad-data-block (1+ bignum-digits-offset)))
-    (inst bis alloc-tn other-pointer-lowtag res)
+    (inst or alloc-tn other-pointer-lowtag res)
     (storew temp2 res 0 other-pointer-lowtag))
   ;; Store one word
   (storew lo res bignum-digits-offset other-pointer-lowtag)
@@ -187,7 +192,7 @@
   TWO-WORDS
   ;; Allocate two words.
   (pseudo-atomic (:extra (pad-data-block (+ 2 bignum-digits-offset)))
-    (inst bis alloc-tn other-pointer-lowtag res)
+    (inst or alloc-tn other-pointer-lowtag res)
     (storew temp2 res 0 other-pointer-lowtag))
   ;; Store two words.
   (storew lo res bignum-digits-offset other-pointer-lowtag)
@@ -196,11 +201,7 @@
   (lisp-return lra lip :offset 2)
 
   DO-STATIC-FUN
-  (inst ldl lip (static-fun-offset 'two-arg-*) null-tn)
-  (inst li (fixnumize 2) nargs)
-  (inst move cfp-tn ocfp)
-  (inst move csp-tn cfp-tn)
-  (inst jmp zero-tn lip)
+  (%static-fun-call 'two-arg-* lip nargs ocfp)
 
   DONE)
 
@@ -245,10 +246,10 @@
   (dotimes (i 64)
     (inst srl dividend 63 temp1)
     (inst sll rem 1 rem)
-    (inst bis temp1 rem rem)
+    (inst or temp1 rem rem)
     (inst cmple divisor rem temp1)
     (inst sll quo 1 quo)
-    (inst bis temp1 quo quo)
+    (inst or temp1 quo quo)
     (inst sll dividend 1 dividend)
     (inst subq temp1 1 temp1)
     (inst zap divisor temp1 temp1)
@@ -285,17 +286,13 @@
 				  (:temp lip interior-reg lip-offset)
 				  (:temp nargs any-reg nargs-offset)
 				  (:temp ocfp any-reg ocfp-offset))
-	  (inst and x 3 temp)
-	  (inst bne temp DO-STATIC-FN)
-	  (inst and y 3 temp)
+	  (inst and x fixnum-tag-mask temp)
+	  (inst bne temp DO-STATIC-FUN)
+	  (inst and y fixnum-tag-mask temp)
 	  (inst beq temp DO-COMPARE)
 	  
-	  DO-STATIC-FN
-	  (inst ldl lip (static-fun-offset ',static-fn) null-tn)
-	  (inst li (fixnumize 2) nargs)
-	  (inst move cfp-tn ocfp)
-	  (inst move csp-tn cfp-tn)
-	  (inst jmp zero-tn lip)
+	  DO-STATIC-FUN
+          (%static-fun-call ',static-fn lip nargs ocfp)
 	  
 	  DO-COMPARE
 	  ,cmp
@@ -324,23 +321,23 @@
 			  (:temp lra descriptor-reg lra-offset)
 			  (:temp nargs any-reg nargs-offset)
 			  (:temp ocfp any-reg ocfp-offset))
+  ;; check easy case
   (inst cmpeq x y temp)
   (inst bne temp RETURN-T)
-  (inst and x 3 temp)
+
+  ;; if X is a fixnum, then we're done (since it's not equal to Y)
+  (inst and x fixnum-tag-mask temp)
   (inst beq temp RETURN-NIL)
-  (inst and y 3 temp)
-  (inst bne temp DO-STATIC-FN)
+  ;; if Y is a fixnum, then we're done; if not, we really need to compare
+  (inst and y fixnum-tag-mask temp)
+  (inst bne temp DO-STATIC-FUN)
 
   RETURN-NIL
   (inst move null-tn res)
   (lisp-return lra lip :offset 2)
 
-  DO-STATIC-FN
-  (inst ldl lip (static-fun-offset 'eql) null-tn)
-  (inst li (fixnumize 2) nargs)
-  (inst move cfp-tn ocfp)
-  (inst move csp-tn cfp-tn)
-  (inst jmp zero-tn lip)
+  DO-STATIC-FUN
+  (%static-fun-call 'eql lip nargs ocfp)
 
   RETURN-T
   (load-symbol res t))
@@ -361,22 +358,19 @@
 			  (:temp lra descriptor-reg lra-offset)
 			  (:temp nargs any-reg nargs-offset)
 			  (:temp ocfp any-reg ocfp-offset))
-  (inst and x 3 temp)
-  (inst bne temp DO-STATIC-FN)
-  (inst and y 3 temp)
-  (inst bne temp DO-STATIC-FN)
+  ;; check for fixnums
+  (inst or x y temp)
+  (inst and temp fixnum-tag-mask temp)
+  (inst bne temp DO-STATIC-FUN)
+
   (inst cmpeq x y temp)
   (inst bne temp RETURN-T)
 
   (inst move null-tn res)
   (lisp-return lra lip :offset 2)
 
-  DO-STATIC-FN
-  (inst ldl lip (static-fun-offset 'two-arg-=) null-tn)
-  (inst li (fixnumize 2) nargs)
-  (inst move cfp-tn ocfp)
-  (inst move csp-tn cfp-tn)
-  (inst jmp zero-tn lip)
+  DO-STATIC-FUN
+  (%static-fun-call 'two-arg-= lip nargs ocfp)
 
   RETURN-T
   (load-symbol res t))
@@ -397,22 +391,19 @@
 			  (:temp lra descriptor-reg lra-offset)
 			  (:temp nargs any-reg nargs-offset)
 			  (:temp ocfp any-reg ocfp-offset))
-  (inst and x 3 temp)
-  (inst bne temp DO-STATIC-FN)
-  (inst and y 3 temp)
-  (inst bne temp DO-STATIC-FN)
+  ;; check for fixnums
+  (inst or x y temp)
+  (inst and temp fixnum-tag-mask temp)
+  (inst bne temp DO-STATIC-FUN)
+
   (inst cmpeq x y temp)
   (inst bne temp RETURN-NIL)
 
   (load-symbol res t)
   (lisp-return lra lip :offset 2)
 
-  DO-STATIC-FN
-  (inst ldl lip (static-fun-offset 'two-arg-=) null-tn)
-  (inst li (fixnumize 2) nargs)
-  (inst move cfp-tn ocfp)
-  (inst move csp-tn cfp-tn)
-  (inst jmp zero-tn lip)
+  DO-STATIC-FUN
+  (%static-fun-call 'two-arg-= lip nargs ocfp)
 
   RETURN-NIL
   (inst move null-tn res))

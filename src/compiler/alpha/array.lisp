@@ -12,6 +12,7 @@
 (in-package "SB!VM")
 
 ;;;; allocator for the array header
+
 (define-vop (make-array-header)
   (:policy :fast-safe)
   (:translate make-array-header)
@@ -35,6 +36,8 @@
       (inst bis alloc-tn other-pointer-lowtag result)
       (storew header result 0 other-pointer-lowtag)
       (inst addq alloc-tn bytes alloc-tn))))
+
+
 
 ;;;; additional accessors and setters for the array header
 (define-full-reffer %array-dimension *
@@ -58,6 +61,7 @@
     (inst sll temp n-fixnum-tag-bits res)))
 
 ;;;; bounds checking routine
+
 (define-vop (check-bound)
   (:translate %check-bound)
   (:policy :fast-safe)
@@ -126,7 +130,7 @@
                                 (inst srl index ,bit-shift temp)
                                 (inst sll temp n-fixnum-tag-bits temp)
                                 (inst addq object temp lip)
-                                (inst ldl result
+                                (inst ldq result
                                       (- (* vector-data-offset n-word-bytes)
                                          other-pointer-lowtag)
                                       lip)
@@ -182,7 +186,7 @@
                                 (inst srl index ,bit-shift temp)
                                 (inst sll temp n-fixnum-tag-bits temp)
                                 (inst addq object temp lip)
-                                (inst ldl old
+                                (inst ldq old
                                       (- (* vector-data-offset n-word-bytes)
                                          other-pointer-lowtag)
                                       lip)
@@ -211,7 +215,7 @@
 						  temp)))
                                   (inst sll temp shift temp)
                                   (inst bis old temp old))
-                                (inst stl old
+                                (inst stq old
                                       (- (* vector-data-offset n-word-bytes)
                                          other-pointer-lowtag)
                                       lip)
@@ -244,7 +248,7 @@
                     (:generator 20
                                 (multiple-value-bind (word extra)
 				    (floor index ,elements-per-word)
-                                  (inst ldl old
+                                  (inst ldq old
                                         (- (* (+ word vector-data-offset)
 					      n-word-bytes)
                                            other-pointer-lowtag)
@@ -281,7 +285,7 @@
                                             (inst sll value (* extra ,bits)
 						  temp)
                                             (inst bis old temp old)))
-                                  (inst stl old
+                                  (inst stq old
                                         (- (* (+ word vector-data-offset)
 					      n-word-bytes)
                                            other-pointer-lowtag)
@@ -296,10 +300,8 @@
   (def-full-data-vector-frobs simple-vector *
     descriptor-reg any-reg null zero)
   
-  (def-partial-data-vector-frobs simple-base-string character :byte nil
-    character-reg)
-  #!+sb-unicode ; FIXME: what about when a word is 64 bits?
-  (def-full-data-vector-frobs simple-character-string character character-reg)
+  (def-partial-data-vector-frobs simple-base-string base-char :byte nil
+    base-char-reg)
   
   (def-partial-data-vector-frobs simple-array-unsigned-byte-7 positive-fixnum
     :byte nil unsigned-reg signed-reg)
@@ -311,23 +313,33 @@
   (def-partial-data-vector-frobs simple-array-unsigned-byte-16 positive-fixnum
     :short nil unsigned-reg signed-reg)
   
-  (def-full-data-vector-frobs simple-array-unsigned-byte-31 unsigned-num
+  (def-partial-data-vector-frobs simple-array-unsigned-byte-31 positive-fixnum
+    :longword nil unsigned-reg signed-reg)
+  (def-partial-data-vector-frobs simple-array-unsigned-byte-32 positive-fixnum
+    :longword nil unsigned-reg signed-reg)
+
+  (def-full-data-vector-frobs simple-array-unsigned-byte-63 unsigned-num
     unsigned-reg)
-  (def-full-data-vector-frobs simple-array-unsigned-byte-32 unsigned-num
+  (def-full-data-vector-frobs simple-array-unsigned-byte-64 unsigned-num
     unsigned-reg)
-  
+
   (def-partial-data-vector-frobs simple-array-signed-byte-8 tagged-num
     :byte t signed-reg)
   
   (def-partial-data-vector-frobs simple-array-signed-byte-16 tagged-num
     :short t signed-reg)
   
-  (def-full-data-vector-frobs simple-array-unsigned-byte-29 positive-fixnum any-reg)  
-  (def-full-data-vector-frobs simple-array-signed-byte-30 tagged-num any-reg)
-  
-  (def-full-data-vector-frobs simple-array-signed-byte-32 signed-num
+  (def-partial-data-vector-frobs simple-array-signed-byte-32 tagged-num
+    :longword t signed-reg)
+
+  (def-full-data-vector-frobs simple-array-unsigned-byte-60 positive-fixnum
+    any-reg)
+  (def-full-data-vector-frobs simple-array-signed-byte-61 tagged-num
+    any-reg)
+
+  (def-full-data-vector-frobs simple-array-signed-byte-64 signed-num
     signed-reg)
-  
+
   ;; Integer vectors whos elements are smaller than a byte. I.e. bit,
   ;; 2-bit, and 4-bit vectors.
   (def-small-data-vector-frobs simple-bit-vector 1)
@@ -346,6 +358,9 @@
   (:results (value :scs (single-reg)))
   (:result-types single-float)
   (:temporary (:scs (interior-reg)) lip)
+  ;; Hmmm...these arrays might be mistaken, because they assume that
+  ;; SINGLE-FLOAT is the size of a lispobj and that DOUBLE-FLOAT is
+  ;; the size of two lispobjs.
   (:generator 20
     (inst addq object index lip)
     (inst lds value
@@ -527,39 +542,41 @@
 ;;;
 (define-vop (raw-ref-single data-vector-ref/simple-array-single-float)
   (:translate %raw-ref-single)
-  (:arg-types sb!c::raw-vector positive-fixnum))
+  (:arg-types simple-array-unsigned-byte-32 positive-fixnum))
 ;;;
 (define-vop (raw-set-single data-vector-set/simple-array-single-float)
   (:translate %raw-set-single)
-  (:arg-types sb!c::raw-vector positive-fixnum single-float))
+  (:arg-types simple-array-unsigned-byte-32 positive-fixnum single-float))
 ;;;
 (define-vop (raw-ref-double data-vector-ref/simple-array-double-float)
   (:translate %raw-ref-double)
-  (:arg-types sb!c::raw-vector positive-fixnum))
+  (:arg-types simple-array-unsigned-byte-32 positive-fixnum))
 ;;;
 (define-vop (raw-set-double data-vector-set/simple-array-double-float)
   (:translate %raw-set-double)
-  (:arg-types sb!c::raw-vector positive-fixnum double-float))
+  (:arg-types simple-array-unsigned-byte-32 positive-fixnum double-float))
 
 (define-vop (raw-ref-complex-single
 	     data-vector-ref/simple-array-complex-single-float)
   (:translate %raw-ref-complex-single)
-  (:arg-types sb!c::raw-vector positive-fixnum))
+  (:arg-types simple-array-unsigned-byte-32 positive-fixnum))
 ;;;
 (define-vop (raw-set-complex-single
 	     data-vector-set/simple-array-complex-single-float)
   (:translate %raw-set-complex-single)
-  (:arg-types sb!c::raw-vector positive-fixnum complex-single-float))
+  (:arg-types simple-array-unsigned-byte-32 positive-fixnum
+	      complex-single-float))
 ;;;
 (define-vop (raw-ref-complex-double
 	     data-vector-ref/simple-array-complex-double-float)
   (:translate %raw-ref-complex-double)
-  (:arg-types sb!c::raw-vector positive-fixnum))
+  (:arg-types simple-array-unsigned-byte-32 positive-fixnum))
 ;;;
 (define-vop (raw-set-complex-double
 	     data-vector-set/simple-array-complex-double-float)
   (:translate %raw-set-complex-double)
-  (:arg-types sb!c::raw-vector positive-fixnum complex-double-float))
+  (:arg-types simple-array-unsigned-byte-32 positive-fixnum
+	      complex-double-float))
 
 ;;; These vops are useful for accessing the bits of a vector irrespective of
 ;;; what type of vector it is.

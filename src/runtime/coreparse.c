@@ -41,7 +41,7 @@ unsigned char build_id[] =
 ;
 
 static void
-process_directory(int fd, u32 *ptr, int count)
+process_directory(int fd, lispobj *ptr, int count)
 {
     struct ndir_entry *entry;
 
@@ -69,7 +69,7 @@ process_directory(int fd, u32 *ptr, int count)
 	    }
 	}
 
-	FSHOW((stderr, "/space id = %d, free pointer = 0x%08x\n",
+	FSHOW((stderr, "/space id = %d, free pointer = 0x%08lx\n",
 	       id, (long)free_pointer));
 
 	switch (id) {
@@ -135,7 +135,7 @@ load_core_file(char *file)
 	exit(1);
     }
 
-    header = calloc(os_vm_page_size / sizeof(u32), sizeof(u32));
+    header = calloc(os_vm_page_size / N_WORD_BYTES, N_WORD_BYTES);
 
     count = read(fd, header, os_vm_page_size);
     if (count < os_vm_page_size) {
@@ -209,13 +209,13 @@ load_core_file(char *file)
 	    SHOW("NEW_DIRECTORY_CORE_ENTRY_TYPE_CODE case");
 	    process_directory(fd,
 			      ptr,
-#ifndef alpha
 			      remaining_len / (sizeof(struct ndir_entry) /
+					       /* FIXME: this should be
+						* something like
+						*   sizeof(uword)
+						* where `uword' is
+						* appropriately typedef'd */
 					       sizeof(long))
-#else
-			      remaining_len / (sizeof(struct ndir_entry) /
-					       sizeof(u32))
-#endif
 			      );
 	    break;
 
@@ -229,7 +229,7 @@ load_core_file(char *file)
 	}
 
 	ptr += remaining_len;
-	FSHOW((stderr, "/new ptr=%x\n", ptr));
+	FSHOW((stderr, "/new ptr=%lx\n", ptr));
     }
     SHOW("about to free(header)");
     free(header);
