@@ -690,6 +690,8 @@
 ;;;
 ;;; FIXME: This should use the data in *RAW-SLOT-DATA-LIST*.
 (defun structure-raw-slot-type-and-size (type)
+  (values nil nil nil)
+  #+nil
   (cond #+nil
 	(;; FIXME: For now we suppress raw slots, since there are various
 	 ;; issues about the way that the cross-compiler handles them.

@@ -28,7 +28,7 @@
 #!-sb-fluid (declaim (inline pointer-hash))
 (defun pointer-hash (key)
   (declare (values hash))
-  (truly-the hash (%primitive sb!c:make-fixnum key)))
+  (truly-the hash (logand 536870911 (%primitive sb!c:make-fixnum key))))
 
 #!-sb-fluid (declaim (inline eq-hash))
 (defun eq-hash (key)
