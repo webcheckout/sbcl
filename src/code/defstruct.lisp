@@ -1554,7 +1554,8 @@
 		(metaclass-constructor (missing-arg))
 		(dd-type (missing-arg))
 		predicate
-		(runtime-type-checks-p t))
+		(runtime-type-checks-p t)
+                (inheritance-type :instance))
 
   (declare (type (and list (not null)) slot-names))
   (declare (type (and symbol (not null))
@@ -1592,7 +1593,15 @@
       `(progn
 
 	 (eval-when (:compile-toplevel :load-toplevel :execute)
-	   (%compiler-set-up-layout ',dd))
+	   (%compiler-set-up-layout
+            ',dd
+            ,@(case inheritance-type
+                (:instance nil)
+                (:funcallable-instance
+                 (list (vector (find-layout t)
+                               (find-layout 'function)
+                               (find-layout 'funcallable-instance))))
+                (t (error "Unknown inheritance-type")))))
 
 	 ;; slot readers and writers
 	 (declaim (inline ,@(mapcar #'dsd-accessor-name dd-slots)))

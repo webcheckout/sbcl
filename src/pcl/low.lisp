@@ -180,11 +180,13 @@
   (when (valid-function-name-p fun)
     (setq fun (fdefinition fun)))
   (when (funcallable-instance-p fun)
-    (if (if (eq *boot-state* 'complete)
-		 (typep fun 'generic-function)
-		 (eq (class-of fun) *the-class-standard-generic-function*))
-	     (setf (%funcallable-instance-info fun 1) new-name)
-	     (bug "unanticipated function type")))
+    (if (or (if (eq *boot-state* 'complete)
+                (typep fun 'generic-function)
+                (eq (class-of fun) *the-class-standard-generic-function*))
+            #+sb-eval
+            (typep fun 'sb-eval:interpreted-function))
+        (setf (%funcallable-instance-info fun 1) new-name)
+        (bug "unanticipated function type")))
   ;; Fixup name-to-function mappings in cases where the function
   ;; hasn't been defined by DEFUN.  (FIXME: is this right?  This logic
   ;; comes from CMUCL).  -- CSR, 2004-12-31
