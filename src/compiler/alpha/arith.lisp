@@ -857,7 +857,7 @@
       (any-reg
        (inst sll digit n-fixnum-tag-bits res))
       (signed-reg
-       (inst move res digit)))))
+       (move digit res)))))
 
 (define-vop (digit-ashr)
   (:translate sb!bignum:%ashr)

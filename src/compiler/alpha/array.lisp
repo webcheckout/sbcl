@@ -304,7 +304,8 @@
     character-reg)
   ;; not entirely sure about this one
   #!+sb-unicode
-  (def-full-data-vector-frobs simple-character-string character character-reg)
+  (def-partial-data-vector-frobs simple-character-string character :longword
+    nil character-reg)
   
   (def-partial-data-vector-frobs simple-array-unsigned-byte-7 positive-fixnum
     :byte nil unsigned-reg signed-reg)
