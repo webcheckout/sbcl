@@ -667,10 +667,7 @@
        (inst ldl bits (* (tn-offset stack-temp) n-word-bytes)
              (current-nfp-tn vop)))
       (descriptor-reg
-       (loadl bits float single-float-value-slot other-pointer-lowtag)))
-    ;; KLUDGE: the SEXTL instruction macro isn't working; this cryptic
-    ;; instruction sign-extends the resutl.
-    (inst addl zero-tn bits bits)))
+       (loadl bits float single-float-value-slot other-pointer-lowtag)))))
 
 (define-vop (double-float-high-bits)
   (:args (float :scs (double-reg descriptor-reg)
@@ -697,10 +694,7 @@
 	      (current-nfp-tn vop)))
       (descriptor-reg
         (loadl hi-bits float (1+ double-float-value-slot)
-	       (+ other-pointer-lowtag 4))))
-    ;; KLUDGE: the SEXTL instruction macro isn't working; this cryptic
-    ;; instruction sign-extends the resutl.
-    (inst addl zero-tn hi-bits hi-bits)))
+	       (+ other-pointer-lowtag 4))))))
 
 (define-vop (double-float-low-bits)
   (:args (float :scs (double-reg descriptor-reg)
@@ -727,7 +721,8 @@
 	     (current-nfp-tn vop)))
       (descriptor-reg
        (loadl lo-bits float double-float-value-slot
-	      other-pointer-lowtag)))))
+	      other-pointer-lowtag)))
+    (inst mskll lo-bits 4 lo-bits)))
 
 
 ;;;; float mode hackery has moved to alpha-vm.lisp

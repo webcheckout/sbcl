@@ -206,9 +206,9 @@
     (inst srl number ndesc result)
     ;; FIXME: this looks like a candidate for a conditional move --
     ;; CSR, 2003-09-10
-    (inst cmoveq temp zero-tn result)
-    ;(inst bne temp done)
-    ;(move zero-tn result)
+    ;(inst cmoveq temp zero-tn result)
+    (inst bne temp done)
+    (move zero-tn result)
     (inst br zero-tn done)
 
     POSITIVE
@@ -693,9 +693,9 @@
     ;; better way.  --njf
     (let ((carry-in (gen-label))
           (done (gen-label)))
-      (inst addq a b result)
+      (inst addq a b res)
       (inst bne c carry-in)
-      (inst cmpult result b carry)
+      (inst cmpult res b carry)
       (inst br zero-tn done)
 
       (emit-label carry-in)
