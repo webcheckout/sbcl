@@ -23,7 +23,7 @@
       (symbol
        (load-symbol y val))
       (character
-       (inst li (logior (ash (char-code val) n-widetag-bits) base-char-widetag)
+       (inst li (logior (ash (char-code val) n-widetag-bits) character-widetag)
 	     y)))))
 
 (define-move-fun (load-number 1) (vop x y)
@@ -31,8 +31,8 @@
    (signed-reg unsigned-reg))
   (inst li (tn-value x) y))
 
-(define-move-fun (load-base-char 1) (vop x y)
-  ((immediate) (base-char-reg))
+(define-move-fun (load-character 1) (vop x y)
+  ((immediate) (character-reg))
   (inst li (char-code (tn-value x)) y))
 
 (define-move-fun (load-system-area-pointer 1) (vop x y)
@@ -48,7 +48,7 @@
   (load-stack-tn y x))
 
 (define-move-fun (load-number-stack 5) (vop x y)
-  ((base-char-stack) (base-char-reg))
+  ((character-stack) (character-reg))
   (let ((nfp (current-nfp-tn vop)))
     (loadw y nfp (tn-offset x))))
 
@@ -64,7 +64,7 @@
   (store-stack-tn y x))
 
 (define-move-fun (store-number-stack 5) (vop x y)
-  ((base-char-reg) (base-char-stack))
+  ((character-reg) (character-stack))
   (let ((nfp (current-nfp-tn vop)))
     (storew x nfp (tn-offset y))))
 

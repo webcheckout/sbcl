@@ -137,10 +137,10 @@
      (inst bne temp nope)
      ;; value must have all bits > 31 set or no bits > 31 set
      (inst sra value (+ 32 3 -1) temp)
-     (beq temp yep)			; no bits set
+     (inst beq temp yep)			; no bits set
      (inst not temp temp)
-     (beq temp yep)			; all bits set
-     (beq zero nope))
+     (inst beq temp yep)			; all bits set
+     (inst beq zero-tn nope))
     (values)))
 
 (define-vop (signed-byte-32-p type-predicate)
@@ -211,7 +211,7 @@
 
 (define-vop (unsigned-byte-32-p type-predicate)
   (:translate unsigned-byte-32-p)
-  (:temporary (:scs (non-descritor-reg)) temp1)
+  (:temporary (:scs (non-descriptor-reg)) temp1)
   (:generator 45
     (unsigned-byte-32-test value temp temp1 not-p target not-target)
     NOT-TARGET))
