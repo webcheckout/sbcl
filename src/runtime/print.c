@@ -194,7 +194,8 @@ static void print_fixnum(lispobj obj)
 
 static void brief_otherimm(lispobj obj)
 {
-    int type, c, idx;
+    int type, c;
+    long idx;
     char buffer[10];
 
     type = widetag_of(obj);
@@ -234,7 +235,7 @@ static void brief_otherimm(lispobj obj)
             break;
 
         default:
-	    idx = type >> 2;
+	    idx = fixnum_value(type);
 	    if (idx < (sizeof(lowtag_Names) / sizeof(char *)))
 		    printf("%s", lowtag_Names[idx]);
 	    else
@@ -245,10 +246,11 @@ static void brief_otherimm(lispobj obj)
 
 static void print_otherimm(lispobj obj)
 {
-    int type, idx;
+    int type;
+    long idx;
 
     type = widetag_of(obj);
-    idx = type >> 2;
+    idx = fixnum_value(type);
 
     if (idx < (sizeof(lowtag_Names) / sizeof(char *)))
 	    printf(", %s", lowtag_Names[idx]);
@@ -571,7 +573,7 @@ static void print_otherptr(lispobj obj)
                 break;
 
             case SIMPLE_FUN_HEADER_WIDETAG:
-                print_slots(fn_slots, 5, ptr);
+                print_slots(simple_fun_slots, 5, ptr);
                 break;
 
             case RETURN_PC_HEADER_WIDETAG:

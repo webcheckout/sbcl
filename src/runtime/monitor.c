@@ -125,9 +125,9 @@ dump_cmd(char **ptr)
     lastcount = count;
 
     if (count > 0)
-        displacement = 4;
+        displacement = N_WORD_BYTES;
     else {
-        displacement = -4;
+        displacement = -N_WORD_BYTES;
         count = -count;
     }
 
@@ -340,7 +340,7 @@ print_context_cmd(char **ptr)
     int free;
     struct thread *thread=arch_os_get_current_thread();
 
-    free = SymbolValue(FREE_INTERRUPT_CONTEXT_INDEX,thread)>>2;
+    free = fixnum_value(SymbolValue(FREE_INTERRUPT_CONTEXT_INDEX,thread));
 	
     if (more_p(ptr)) {
 	int index;
