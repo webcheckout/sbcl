@@ -63,7 +63,7 @@
   ;; algorithms, but we're not pushing them hard enough here for them
   ;; to be cryptographically strong.)
   (let* ((xy (+ (* x 3) y)))
-    (logand most-positive-fixnum
+    (logand 536870911 ; FIXME
             (logxor 441516657
                     xy
                     (ash xy -5)))))

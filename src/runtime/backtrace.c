@@ -34,28 +34,16 @@
  * better not change. */
 
 struct call_frame {
-#ifndef alpha
 	struct call_frame *old_cont;
-#else
-        u32 old_cont;
-#endif
 	lispobj saved_lra;
         lispobj code;
 	lispobj other_state[5];
 };
 
 struct call_info {
-#ifndef alpha
     struct call_frame *frame;
-#else
-    u32 frame;
-#endif
     int interrupted;
-#ifndef alpha
     struct code *code;
-#else
-    u32 code;
-#endif
     lispobj lra;
     int pc; /* Note: this is the trace file offset, not the actual pc. */
 };
@@ -171,7 +159,7 @@ previous_info(struct call_info *info)
 
     if (info->lra == NIL) {
         /* We were interrupted. Find the correct signal context. */
-        free = SymbolValue(FREE_INTERRUPT_CONTEXT_INDEX,thread)>>2;
+        free = fixnum_value(SymbolValue(FREE_INTERRUPT_CONTEXT_INDEX,thread));
         while (free-- > 0) {
 	    os_context_t *context = 
 		thread->interrupt_contexts[free];

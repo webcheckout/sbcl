@@ -245,6 +245,7 @@
   (/show0 "enabling GC")
   (gc-on)
   (/show0 "doing first GC")
+  #+nil
   (gc :full t)
   (/show0 "back from first GC")
 

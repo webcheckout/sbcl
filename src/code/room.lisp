@@ -73,13 +73,25 @@
 		 (simple-array-unsigned-byte-8-widetag . 0)
 		 (simple-array-unsigned-byte-15-widetag . 1)
 		 (simple-array-unsigned-byte-16-widetag . 1)
+		 #!-alpha
+		 (simple-array-unsigned-byte-29-widetag . 2)
 		 (simple-array-unsigned-byte-31-widetag . 2)
 		 (simple-array-unsigned-byte-32-widetag . 2)
+		 #!+alpha
+		 (simple-array-unsigned-byte-60-widetag . 3)
+		 #!+alpha
+		 (simple-array-unsigned-byte-63-widetag . 3)
+		 #!+alpha
+		 (simple-array-unsigned-byte-64-widetag . 4)
 		 (simple-array-signed-byte-8-widetag . 0)
 		 (simple-array-signed-byte-16-widetag . 1)
-		 (simple-array-unsigned-byte-29-widetag . 2)
+		 #!-alpha
 		 (simple-array-signed-byte-30-widetag . 2)
 		 (simple-array-signed-byte-32-widetag . 2)
+		 #!+alpha
+		 (simple-array-signed-byte-61-widetag . 3)
+		 #!+alpha
+		 (simple-array-signed-byte-64-widetag . 3)
 		 (simple-array-single-float-widetag . 2)
 		 (simple-array-double-float-widetag . 3)
 		 (simple-array-complex-single-float-widetag . 3)
@@ -423,6 +435,7 @@
 
   (values))
 
+#+nil
 (defun descriptor-vs-non-descriptor-storage (&rest spaces)
   (let ((descriptor-words 0)
 	(non-descriptor-headers 0)

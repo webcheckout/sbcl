@@ -24,14 +24,16 @@
 ;;;   * EVEN-FIXNUM-LOWTAG and ODD-FIXNUM-LOWTAG must be 0 and 4: code
 ;;;     which shifts left two places to convert raw integers to tagged
 ;;;     fixnums is ubiquitous.
-;;;   * LIST-POINTER-LOWTAG + 4 = OTHER-POINTER-LOWTAG: NIL is both a
-;;;     cons and a symbol (at the same address) and depends on this.
-;;;     See the definition of SYMBOL in objdef.lisp
+;;;   * LIST-POINTER-LOWTAG + N-WORD-BYTES = OTHER-POINTER-LOWTAG: NIL
+;;;     is both a cons and a symbol (at the same address) and depends on
+;;;     this.  See the definition of SYMBOL in objdef.lisp
 ;;;   * OTHER-POINTER-LOWTAG > 4: Some code in the SPARC backend,
 ;;;     which uses bit 2 of the ALLOC register to indicate that
 ;;;     PSEUDO-ATOMIC is on, doesn't strip the low bits of reg_ALLOC
 ;;;     before ORing in OTHER-POINTER-LOWTAG within a PSEUDO-ATOMIC
 ;;;     section.
+;;;   * OTHER-IMMEDIATE-n-LOWTAG are spaced 4 apart: various code wants
+;;;     to iterate through these.
 ;;; (These are just the ones we know about as of sbcl-0.7.1.22. There
 ;;; might easily be more, since these values have stayed highly
 ;;; constrained for more than a decade, an inviting target for
@@ -42,17 +44,20 @@
   ;; defined in the first DEFENUM. -- AL 20000216
   (defenum (:suffix -lowtag)
     even-fixnum
-    ;; Note: CMU CL, and SBCL < 0.pre7.39, had FUN-POINTER-LOWTAG
-    ;; here. We swapped FUN-POINTER-LOWTAG and
-    ;; INSTANCE-POINTER-LOWTAG in sbcl-0.pre7.39 in order to help with a
-    ;; low-level pun in the function call sequence on the PPC port.
-    ;; For more information, see the PPC port code. -- WHN 2001-10-03
     instance-pointer
     other-immediate-0
+    pad0
+    pad1
+    pad2
+    other-immediate-1
     list-pointer
     odd-fixnum
     fun-pointer
-    other-immediate-1
+    other-immediate-2
+    pad3
+    pad4
+    pad5
+    other-immediate-3
     other-pointer))
 
 ;;; the heap types, stored in 8 bits of the header of an object on the
@@ -60,7 +65,7 @@
 ;;; least two machine words, often more)
 (defenum (:suffix -widetag
 	  :start (+ (ash 1 n-lowtag-bits) other-immediate-0-lowtag)
-	  :step (ash 1 (1- n-lowtag-bits)))
+	  :step 4)
   bignum
   ratio
   single-float
@@ -82,13 +87,18 @@
   simple-array-unsigned-byte-8
   simple-array-unsigned-byte-15
   simple-array-unsigned-byte-16
-  simple-array-unsigned-byte-29
+  #!-alpha simple-array-unsigned-byte-29
   simple-array-unsigned-byte-31
   simple-array-unsigned-byte-32
+  #!+alpha simple-array-unsigned-byte-60
+  #!+alpha simple-array-unsigned-byte-63
+  #!+alpha simple-array-unsigned-byte-64
   simple-array-signed-byte-8
   simple-array-signed-byte-16
-  simple-array-signed-byte-30
+  #!-alpha simple-array-signed-byte-30
   simple-array-signed-byte-32
+  #!+alpha simple-array-signed-byte-61
+  #!+alpha simple-array-signed-byte-64
   simple-array-single-float
   simple-array-double-float
   #!+long-float simple-array-long-float

@@ -31,7 +31,7 @@
     (inst addq rank (fixnumize (1- array-dimensions-offset)) header)
     (inst sll header n-widetag-bits header)
     (inst bis header type header)
-    (inst srl header 2 header)
+    (inst srl header 3 header)
     (pseudo-atomic ()
       (inst bis alloc-tn other-pointer-lowtag result)
       (storew header result 0 other-pointer-lowtag)
@@ -67,7 +67,7 @@
     (loadw temp x 0 other-pointer-lowtag)
     (inst sra temp n-widetag-bits temp)
     (inst subq temp (1- array-dimensions-offset) temp)
-    (inst sll temp 2 res)))
+    (inst sll temp 3 res)))
 
 
 
@@ -139,7 +139,7 @@
 				temp result)
                     (:generator 20
                                 (inst srl index ,bit-shift temp)
-                                (inst sll temp 2 temp)
+                                (inst sll temp 3 temp)
                                 (inst addq object temp lip)
                                 (inst ldl result
                                       (- (* vector-data-offset n-word-bytes)
@@ -151,7 +151,7 @@
 					    ,(1- (integer-length bits)) temp)))
                                 (inst srl result temp result)
                                 (inst and result ,(1- (ash 1 bits)) result)
-                                (inst sll result 2 value)))
+                                (inst sll result 3 value)))
                   (define-vop (,(symbolicate 'data-vector-ref-c/ type))
                     (:translate data-vector-ref)
                     (:policy :fast-safe)
@@ -195,9 +195,9 @@
 				      :from (:argument 1)) shift)
                     (:generator 25
                                 (inst srl index ,bit-shift temp)
-                                (inst sll temp 2 temp)
+                                (inst sll temp 3 temp)
                                 (inst addq object temp lip)
-                                (inst ldl old
+                                (inst ldq old
                                       (- (* vector-data-offset n-word-bytes)
                                          other-pointer-lowtag)
                                       lip)
@@ -318,27 +318,38 @@
     :byte nil unsigned-reg signed-reg)
   (def-partial-data-vector-frobs simple-array-unsigned-byte-8 positive-fixnum
     :byte nil unsigned-reg signed-reg)
-  
+
+  ;; candidate for s/:short/:word/
   (def-partial-data-vector-frobs simple-array-unsigned-byte-15 positive-fixnum
     :short nil unsigned-reg signed-reg)
   (def-partial-data-vector-frobs simple-array-unsigned-byte-16 positive-fixnum
     :short nil unsigned-reg signed-reg)
   
-  (def-full-data-vector-frobs simple-array-unsigned-byte-31 unsigned-num
+  (def-partial-data-vector-frobs simple-array-unsigned-byte-31 positive-fixnum
+    :longword nil unsigned-reg signed-reg)
+  (def-partial-data-vector-frobs simple-array-unsigned-byte-32 positive-fixnum
+    :longword nil unsigned-reg signed-reg)
+
+  (def-full-data-vector-frobs simple-array-unsigned-byte-63 unsigned-num
     unsigned-reg)
-  (def-full-data-vector-frobs simple-array-unsigned-byte-32 unsigned-num
+  (def-full-data-vector-frobs simple-array-unsigned-byte-64 unsigned-num
     unsigned-reg)
-  
+
   (def-partial-data-vector-frobs simple-array-signed-byte-8 tagged-num
     :byte t signed-reg)
   
   (def-partial-data-vector-frobs simple-array-signed-byte-16 tagged-num
     :short t signed-reg)
-  
-  (def-full-data-vector-frobs simple-array-unsigned-byte-29 positive-fixnum any-reg)  
-  (def-full-data-vector-frobs simple-array-signed-byte-30 tagged-num any-reg)
-  
-  (def-full-data-vector-frobs simple-array-signed-byte-32 signed-num
+
+  (def-partial-data-vector-frobs simple-array-signed-byte-32 tagged-num
+    :longword t signed-reg)
+
+  (def-full-data-vector-frobs simple-array-unsigned-byte-60 positive-fixnum
+    any-reg)
+  (def-full-data-vector-frobs simple-array-signed-byte-61 tagged-num
+    any-reg)
+
+  (def-full-data-vector-frobs simple-array-signed-byte-64 signed-num
     signed-reg)
   
   ;; Integer vectors whos elements are smaller than a byte. I.e. bit,
@@ -359,6 +370,9 @@
   (:results (value :scs (single-reg)))
   (:result-types single-float)
   (:temporary (:scs (interior-reg)) lip)
+  ;; Hmm.  I think these arrays are wrong, too, because they assume
+  ;; that single-float is the size of a lispobj, and that double-float
+  ;; is the size of two lispobjs.
   (:generator 20
     (inst addq object index lip)
     (inst lds value

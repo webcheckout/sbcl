@@ -41,7 +41,7 @@
     (inst blbs object done)
 
     ;; Pick off fixnums.
-    (inst and object 3 result)
+    (inst and object (ash lowtag-mask -1) result)
     (inst beq result done)
 
     ;; Must be an other immediate.
@@ -76,10 +76,10 @@
   (:results (result :scs (unsigned-reg)))
   (:result-types positive-fixnum)
   (:generator 6
-    (inst ldl temp (- fun-pointer-lowtag) function)
+    (inst ldq temp (- fun-pointer-lowtag) function)
     (inst and temp #xff temp)
     (inst bis type temp temp)
-    (inst stl temp (- fun-pointer-lowtag) function)
+    (inst stq temp (- fun-pointer-lowtag) function)
     (move type result)))
 
 
@@ -116,7 +116,7 @@
     (inst and t1 widetag-mask t1)
     (sc-case data
       (any-reg
-       (inst sll data (- n-widetag-bits 2) t2)
+       (inst sll data (- n-widetag-bits 3) t2)
        (inst bis t1 t2 t1))
       (immediate
        (let ((c (ash (tn-value data) n-widetag-bits)))
@@ -129,15 +129,20 @@
     (storew t1 x 0 other-pointer-lowtag)
     (move x res)))
 
+;;; FIXME: Turn this VOP into MAKE-POSITIVE-FIXNUM
 (define-vop (make-fixnum)
   (:args (ptr :scs (any-reg descriptor-reg)))
   (:results (res :scs (any-reg descriptor-reg)))
   (:generator 1
-    ;;
     ;; Some code (the hash table code) depends on this returning a
     ;; positive number so make sure it does.
-    (inst sll ptr 35 res)
-    (inst srl res 33 res)))
+    ;;
+    ;; A word of explanation: we make a net shift by 3 to clear the
+    ;; three lowest bits -- but we wish to return a positive fixnum,
+    ;; so shift by four and then back by one to ensure that the top
+    ;; bit is 0 too.
+    (inst sll ptr 4 res)
+    (inst srl res 1 res)))
 
 (define-vop (make-other-immediate-type)
   (:args (val :scs (any-reg descriptor-reg))
@@ -151,8 +156,8 @@
        (inst sll val n-widetag-bits temp)
        (inst bis temp (tn-value type) res))
       (t
-       (inst sra type 2 temp)
-       (inst sll val (- n-widetag-bits 2) res)
+       (inst sra type 3 temp)
+       (inst sll val (- n-widetag-bits 3) res)
        (inst bis res temp res)))))
 
 
@@ -241,6 +246,6 @@
     (let ((offset
 	   (- (* (+ index vector-data-offset) n-word-bytes)
 	      other-pointer-lowtag)))
-      (inst ldl count offset count-vector)
+      (inst ldq count offset count-vector)
       (inst addq count 1 count)
-      (inst stl count offset count-vector))))
+      (inst stq count offset count-vector))))

@@ -29,17 +29,18 @@
 			  (:temp lra descriptor-reg lra-offset)
 			  (:temp nargs any-reg nargs-offset)
 			  (:temp ocfp any-reg ocfp-offset))
-  (inst and x 3 temp)
+  (inst and x 7 temp)
   (inst bne temp DO-STATIC-FUN)
-  (inst and y 3 temp)
+  (inst and y 7 temp)
   (inst bne temp DO-STATIC-FUN)
   (inst addq x y res)
   
   ; Check whether we need a bignum.
-  (inst sra res 31 temp)
+  (inst sra res 60 temp)
   (inst beq temp DONE)
   (inst not temp temp)
   (inst beq temp DONE)
+  ;; FIXME: broken below here
   (inst sra res 2 temp3)
   
   ; from move-from-signed
@@ -61,7 +62,7 @@
   (lisp-return lra lip :offset 2)
 
   DO-STATIC-FUN
-  (inst ldl lip (static-fun-offset 'two-arg-+) null-tn)
+  (inst ldq lip (static-fun-offset 'two-arg-+) null-tn)
   (inst li (fixnumize 2) nargs)
   (inst move cfp-tn ocfp)
   (inst move csp-tn cfp-tn)
@@ -86,17 +87,18 @@
 			  (:temp lra descriptor-reg lra-offset)
 			  (:temp nargs any-reg nargs-offset)
 			  (:temp ocfp any-reg ocfp-offset))
-  (inst and x 3 temp)
+  (inst and x 7 temp)
   (inst bne temp DO-STATIC-FUN)
-  (inst and y 3 temp)
+  (inst and y 7 temp)
   (inst bne temp DO-STATIC-FUN)
   (inst subq x y res)
   
   ; Check whether we need a bignum.
-  (inst sra res 31 temp)
+  (inst sra res 60 temp)
   (inst beq temp DONE)
   (inst not temp temp)
   (inst beq temp DONE)
+  ;; FIXME: broken below here
   (inst sra res 2 temp3)
   
   ; from move-from-signed
@@ -118,7 +120,7 @@
   (lisp-return lra lip :offset 2)
 
   DO-STATIC-FUN
-  (inst ldl lip (static-fun-offset 'two-arg--) null-tn)
+  (inst ldq lip (static-fun-offset 'two-arg--) null-tn)
   (inst li (fixnumize 2) nargs)
   (inst move cfp-tn ocfp)
   (inst move csp-tn cfp-tn)
@@ -145,23 +147,21 @@
 			  (:temp nargs any-reg nargs-offset)
 			  (:temp ocfp any-reg ocfp-offset))
   ;; If either arg is not a fixnum, call the static function.
-  (inst and x 3 temp)
+  (inst and x 7 temp)
   (inst bne temp DO-STATIC-FUN)
-  (inst and y 3 temp)
+  (inst and y 7 temp)
   (inst bne temp DO-STATIC-FUN)
 
   ;; Remove the tag from one arg so that the result will have the
   ;; correct fixnum tag.
-  (inst sra x 2 temp)
-  (inst mulq temp y lo)
-  (inst sra lo 32 hi)
-  (inst sll lo 32 res)
-  (inst sra res 32 res)
-  ;; Check to see if the result will fit in a fixnum. (I.e. the high
-  ;; word is just 32 copies of the sign bit of the low word).
-  (inst sra res 31 temp)
-  (inst xor hi temp temp)
+  (inst sra x 3 temp)
+  (inst mulq temp y res)
+  ;; FIXME: assumes unsigned multiply
+  (inst umulh temp y temp)
   (inst beq temp DONE)
+
+  ;; FIXME: utterly, hopelessly broken.
+  ;;
   ;; Shift the double word hi:res down two bits into hi:low to get rid
   ;; of the fixnum tag.
   (inst sra lo 2 lo)
@@ -285,13 +285,13 @@
 				  (:temp lip interior-reg lip-offset)
 				  (:temp nargs any-reg nargs-offset)
 				  (:temp ocfp any-reg ocfp-offset))
-	  (inst and x 3 temp)
+	  (inst and x 7 temp)
 	  (inst bne temp DO-STATIC-FN)
-	  (inst and y 3 temp)
+	  (inst and y 7 temp)
 	  (inst beq temp DO-COMPARE)
 	  
 	  DO-STATIC-FN
-	  (inst ldl lip (static-fun-offset ',static-fn) null-tn)
+	  (inst ldq lip (static-fun-offset ',static-fn) null-tn)
 	  (inst li (fixnumize 2) nargs)
 	  (inst move cfp-tn ocfp)
 	  (inst move csp-tn cfp-tn)
@@ -326,9 +326,9 @@
 			  (:temp ocfp any-reg ocfp-offset))
   (inst cmpeq x y temp)
   (inst bne temp RETURN-T)
-  (inst and x 3 temp)
+  (inst and x 7 temp)
   (inst beq temp RETURN-NIL)
-  (inst and y 3 temp)
+  (inst and y 7 temp)
   (inst bne temp DO-STATIC-FN)
 
   RETURN-NIL
@@ -361,9 +361,9 @@
 			  (:temp lra descriptor-reg lra-offset)
 			  (:temp nargs any-reg nargs-offset)
 			  (:temp ocfp any-reg ocfp-offset))
-  (inst and x 3 temp)
+  (inst and x 7 temp)
   (inst bne temp DO-STATIC-FN)
-  (inst and y 3 temp)
+  (inst and y 7 temp)
   (inst bne temp DO-STATIC-FN)
   (inst cmpeq x y temp)
   (inst bne temp RETURN-T)
@@ -397,9 +397,9 @@
 			  (:temp lra descriptor-reg lra-offset)
 			  (:temp nargs any-reg nargs-offset)
 			  (:temp ocfp any-reg ocfp-offset))
-  (inst and x 3 temp)
+  (inst and x 7 temp)
   (inst bne temp DO-STATIC-FN)
-  (inst and y 3 temp)
+  (inst and y 7 temp)
   (inst bne temp DO-STATIC-FN)
   (inst cmpeq x y temp)
   (inst bne temp RETURN-NIL)

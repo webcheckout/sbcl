@@ -37,7 +37,8 @@
     `(unless (location= ,n-src ,n-dst)
        (inst move ,n-src ,n-dst))))
 
-(defmacro loadw (result base &optional (offset 0) (lowtag 0))
+;;; this was called loadw, when we had 32 bit words
+(defmacro loadl (result base &optional (offset 0) (lowtag 0))
   (once-only ((result result) (base base))
     `(inst ldl ,result (- (ash ,offset word-shift) ,lowtag) ,base)))
 
@@ -45,27 +46,31 @@
   (once-only ((result result) (base base))
     `(inst ldq ,result (- (ash ,offset word-shift) ,lowtag) ,base)))
 
-(defmacro storew (value base &optional (offset 0) (lowtag 0))
+(defmacro loadw (&rest stuff) `(loadq ,@stuff))
+
+;;; was storew when we had 32 bit words
+(defmacro storel (value base &optional (offset 0) (lowtag 0))
   (once-only ((value value) (base base) (offset offset) (lowtag lowtag))
     `(inst stl ,value (- (ash ,offset word-shift) ,lowtag) ,base)))
 
 (defmacro storeq (value base &optional (offset 0) (lowtag 0))
   (once-only ((value value) (base base) (offset offset) (lowtag lowtag))
     `(inst stq ,value (- (ash ,offset word-shift) ,lowtag) ,base)))
+(defmacro storew (&rest stuff) `(storeq ,@stuff))
 
 (defmacro load-symbol (reg symbol)
   (once-only ((reg reg) (symbol symbol))
     `(inst lda ,reg (static-symbol-offset ,symbol) null-tn)))
 
 (defmacro load-symbol-value (reg symbol)
-  `(inst ldl ,reg
+  `(inst ldq ,reg
 	 (+ (static-symbol-offset ',symbol)
 	    (ash symbol-value-slot word-shift)
 	    (- other-pointer-lowtag))
 	 null-tn))
 
 (defmacro store-symbol-value (reg symbol)
-  `(inst stl ,reg
+  `(inst stq ,reg
 	 (+ (static-symbol-offset ',symbol)
 	    (ash symbol-value-slot word-shift)
 	    (- other-pointer-lowtag))
@@ -78,7 +83,7 @@
 	      (n-source source)
 	      (n-offset offset))
      `(progn
-	(inst ldl ,n-target ,n-offset ,n-source)
+	(inst ldq ,n-target ,n-offset ,n-source)
 	(inst and ,n-target #xff ,n-target))))
 
 ;;; macros to handle the fact that we cannot use the machine native
@@ -96,9 +101,9 @@
 (defmacro lisp-return (return-pc lip &key (offset 0) (frob-code t))
   "Return to RETURN-PC.  LIP is an interior-reg temporary."
   `(progn
-     (inst lda ,lip  
-	   (- (* (1+ ,offset) n-word-bytes) other-pointer-lowtag)
-	    ,return-pc)
+    (inst lda ,lip  
+	  (- (+ n-word-bytes (* 4 ,offset)) other-pointer-lowtag)
+	  ,return-pc)
      ,@(when frob-code
 	 `((move ,return-pc code-tn)))
      (inst ret zero-tn ,lip 1)))
@@ -259,9 +264,7 @@
        (:result-types ,el-type)
        (:generator 5
 	 (inst addq object index lip)
-	 (inst ldl value (- (* ,offset n-word-bytes) ,lowtag) lip)
-	 ,@(when (equal scs '(unsigned-reg))
-	     '((inst mskll value 4 value)))))
+	 (inst ldq value (- (* ,offset n-word-bytes) ,lowtag) lip)))
      (define-vop (,(symbolicate name "-C"))
        ,@(when translate
 	   `((:translate ,translate)))
@@ -274,10 +277,8 @@
        (:results (value :scs ,scs))
        (:result-types ,el-type)
        (:generator 4
-	 (inst ldl value (- (* (+ ,offset index) n-word-bytes) ,lowtag)
-	       object)
-	 ,@(when (equal scs '(unsigned-reg))
-	     '((inst mskll value 4 value)))))))
+	 (inst ldq value (- (* (+ ,offset index) n-word-bytes) ,lowtag)
+	       object)))))
 
 (defmacro define-full-setter (name type offset lowtag scs el-type
 				   &optional translate #!+gengc (remember t))
@@ -295,7 +296,7 @@
        (:result-types ,el-type)
        (:generator 2
 	 (inst addq index object lip)
-	 (inst stl value (- (* ,offset n-word-bytes) ,lowtag) lip)
+	 (inst stq value (- (* ,offset n-word-bytes) ,lowtag) lip)
 	 (move value result)))
      (define-vop (,(symbolicate name "-C"))
        ,@(when translate
@@ -311,14 +312,14 @@
        (:results (result :scs ,scs))
        (:result-types ,el-type)
        (:generator 1
-	 (inst stl value (- (* (+ ,offset index) n-word-bytes) ,lowtag)
+	 (inst stq value (- (* (+ ,offset index) n-word-bytes) ,lowtag)
 	       object)
 	 (move value result)))))
 
 
 (defmacro define-partial-reffer (name type size signed offset lowtag scs
 				      el-type &optional translate)
-  (let ((scale (ecase size (:byte 1) (:short 2))))
+  (let ((scale (ecase size (:byte 1) (:short 2) (:longword 4))))
     `(progn
        (define-vop (,name)
 	 ,@(when translate
@@ -336,6 +337,10 @@
 	   (inst addq object index lip)
 	   ,@(when (eq size :short)
 	       '((inst addq index lip lip)))
+	   ,@(when (eq size :longword)
+	       '((inst addq index lip lip)
+		 (inst addq index lip lip)
+		 (inst addq index lip lip)))
 	   ,@(ecase size
 	       (:byte
 		(if signed
@@ -364,7 +369,21 @@
 		    `((inst ldq_u temp (- (* ,offset n-word-bytes) ,lowtag)
 			    lip)
 		      (inst lda temp1 (- (* ,offset n-word-bytes) ,lowtag) lip)
-		      (inst extwl temp temp1 value)))))))
+		      (inst extwl temp temp1 value))))
+	       (:longword
+		(if signed
+		    `((inst ldq_u temp (- (* ,offset n-word-bytes) ,lowtag)
+			    lip)
+		      (inst lda temp1 (- (* ,offset n-word-bytes) ,lowtag)
+			    lip)
+		      (inst extll temp temp1 temp)
+		      (inst sll temp 32 temp)
+		      (inst sra temp 32 value))
+		    `((inst ldq_u temp (- (* ,offset n-word-bytes) ,lowtag)
+			    lip)
+		      (inst lda temp1 (- (* ,offset n-word-bytes) ,lowtag)
+			    lip)
+		      (inst extll temp temp1 value)))))))
        (define-vop (,(symbolicate name "-C"))
 	 ,@(when translate
 	     `((:translate ,translate)))
@@ -415,11 +434,29 @@
 		      (inst lda temp1 (- (+ (* ,offset n-word-bytes)
 					    (* index ,scale)) ,lowtag)
 			    object)
-		      (inst extwl temp temp1 value))))))))))
+		      (inst extwl temp temp1 value))))
+	       (:longword
+		(if signed
+		    `((inst ldq_u temp (- (+ (* ,offset n-word-bytes)
+					     (* index ,scale)) ,lowtag)
+			    object)
+		      (inst lda temp1 (- (+ (* ,offset n-word-bytes)
+					    (* index ,scale)) ,lowtag)
+			    object)
+		      (inst extll temp temp1 temp)
+		      (inst sll temp 32 temp)
+		      (inst sra temp 32 value))
+		    `((inst ldq_u temp (- (+ (* ,offset n-word-bytes)
+					     (* index ,scale)) ,lowtag)
+			    object)
+		      (inst lda temp1 (- (+ (* ,offset n-word-bytes)
+					    (* index ,scale)) ,lowtag)
+			    object)
+		      (inst extll temp temp1 value))))))))))
 
 (defmacro define-partial-setter (name type size offset lowtag scs el-type
 				      &optional translate)
-  (let ((scale (ecase size (:byte 1) (:short 2))))
+  (let ((scale (ecase size (:byte 1) (:short 2) (:longword 4))))
     `(progn
        (define-vop (,name)
 	 ,@(when translate
@@ -439,6 +476,10 @@
 	   (inst addq object index lip)
 	   ,@(when (eq size :short)
 	       '((inst addq lip index lip)))
+	   ,@(when (eq size :longword)
+	       '((inst addq lip index lip)
+		 (inst addq lip index lip)
+		 (inst addq lip index lip)))
 	   ,@(ecase size
 	       (:byte
 		`((inst lda temp (- (* ,offset n-word-bytes) ,lowtag) lip)
@@ -453,7 +494,14 @@
 		  (inst mskwl temp1 temp temp1)
 		  (inst inswl value temp temp2)
 		  (inst bis temp1 temp2 temp)
-		  (inst stq_u temp (- (* ,offset n-word-bytes) ,lowtag) lip))))
+		  (inst stq_u temp (- (* ,offset n-word-bytes) ,lowtag) lip)))
+	       (:longword
+		`((inst lda temp (- (* ,offset n-word-bytes) ,lowtag) lip)
+		  (inst ldq_u temp1 (- (* ,offset n-word-bytes) ,lowtag) lip)
+		  (inst mskll temp1 temp temp1)
+		  (inst insll value temp temp2)
+		  (inst bis temp1 temp2 temp1)
+		  (inst stq_u temp1 (- (* ,offset n-word-bytes) ,lowtag) lip))))
 	   (move value result)))
        (define-vop (,(symbolicate name "-C"))
 	 ,@(when translate
@@ -500,6 +548,18 @@
 			object)
 		  (inst mskwl temp1 temp temp1)
 		  (inst inswl value temp temp2)
+		  (inst bis temp1 temp2 temp)
+		  (inst stq_u temp (- (* ,offset n-word-bytes)
+				      (* index ,scale) ,lowtag) object)))
+	       (:longword
+		`((inst lda temp (- (* ,offset n-word-bytes)
+				    (* index ,scale) ,lowtag)
+			object)
+		  (inst ldq_u temp1 (- (* ,offset n-word-bytes)
+				       (* index ,scale) ,lowtag)
+			object)
+		  (inst mskll temp1 temp temp1)
+		  (inst insll value temp temp2)
 		  (inst bis temp1 temp2 temp)
 		  (inst stq_u temp (- (+ (* ,offset n-word-bytes)
 					 (* index ,scale))

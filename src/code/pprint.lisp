@@ -1270,6 +1270,7 @@
     ;; printers for regular types
     (/show0 "doing SET-PPRINT-DISPATCH for regular types")
     (set-pprint-dispatch 'array #'pprint-array)
+    #+nil
     (set-pprint-dispatch '(cons symbol)
 			 #'pprint-fun-call -1)
     (set-pprint-dispatch 'cons #'pprint-fill -2)

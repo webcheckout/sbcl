@@ -11,7 +11,7 @@
 
 (eval-when  (:compile-toplevel :load-toplevel :execute)
 
-(def!constant n-word-bits 32
+(def!constant n-word-bits 64
   #!+sb-doc
   "Number of bits per word where a word holds one lisp descriptor.")
 
@@ -53,7 +53,7 @@
   (+ (byte-size single-float-significand-byte) 1))
 
 (def!constant double-float-digits
-  (+ (byte-size double-float-significand-byte) n-word-bits 1))
+  (+ (byte-size double-float-significand-byte) 32 1))
 
 ;;; These values are originally from the DEC Assembly Language
 ;;; Programmers guide.  Where possible we read/write the software

@@ -223,14 +223,14 @@ char **ptr;
             printf("unknown variable: ``%s''\n", token);
             throw_to_monitor();
         }
-        result &= ~7;
+        result &= ~15;
     }
     else {
         if (!string_to_long(token, &result)) {
             printf("invalid number: ``%s''\n", token);
             throw_to_monitor();
         }
-        result &= ~3;
+        result &= ~7;
     }
 
     if (!is_valid_lisp_addr((os_vm_address_t)result)) {
@@ -322,7 +322,8 @@ char **ptr;
 	    int regnum;
 	    os_context_t *context;
 
-	    free = SymbolValue(FREE_INTERRUPT_CONTEXT_INDEX,thread)>>2;
+	    free = fixnum_value
+		(SymbolValue(FREE_INTERRUPT_CONTEXT_INDEX,thread));
 
 	    if (free == 0) {
 		printf("Variable ``%s'' is not valid -- there is no current interrupt context.\n", token);

@@ -38,6 +38,8 @@
 unsigned char build_id[] =
 #include "../../output/build-id.tmp"
 ;
+#define FSHOW(c) fprintf c
+#define SHOW(c) fprintf(stderr,"%s\n",c)
 
 static void
 process_directory(int fd, u32 *ptr, int count)
@@ -126,7 +128,7 @@ process_directory(int fd, u32 *ptr, int count)
 lispobj
 load_core_file(char *file)
 {
-    u32 *header, val, len, *ptr, remaining_len;
+    unsigned long *header, val, len, *ptr, remaining_len;
     int fd = open(file, O_RDONLY), count;
 
     lispobj initial_function = NIL;
@@ -211,13 +213,8 @@ load_core_file(char *file)
 	    SHOW("NEW_DIRECTORY_CORE_ENTRY_TYPE_CODE case");
 	    process_directory(fd,
 			      ptr,
-#ifndef alpha
 			      remaining_len / (sizeof(struct ndir_entry) /
 					       sizeof(long))
-#else
-			      remaining_len / (sizeof(struct ndir_entry) /
-					       sizeof(u32))
-#endif
 			      );
 	    break;
 

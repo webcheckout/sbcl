@@ -162,16 +162,16 @@
 	     (:generator ,untagged-cost
 		(inst ,op x y r)))))))
 
-(define-binop + 1 5 addq (unsigned-byte 6) (unsigned-byte 8))
-(define-binop - 1 5 subq (unsigned-byte 6) (unsigned-byte 8))
-(define-binop logand 1 3 and (unsigned-byte 6) (unsigned-byte 8))
-(define-binop logandc1 1 3 bic (unsigned-byte 6) (unsigned-byte 8) t)
-(define-binop logandc2 1 3 bic (unsigned-byte 6) (unsigned-byte 8))
-(define-binop logior 1 3 bis (unsigned-byte 6) (unsigned-byte 8))
-(define-binop logorc1 1 3 ornot (unsigned-byte 6) (unsigned-byte 8) t t)
-(define-binop logorc2 1 3 ornot (unsigned-byte 6) (unsigned-byte 8) nil t)
-(define-binop logxor 1 3 xor (unsigned-byte 6) (unsigned-byte 8))
-(define-binop logeqv 1 3 eqv (unsigned-byte 6) (unsigned-byte 8) nil t)
+(define-binop + 1 5 addq (unsigned-byte 5) (unsigned-byte 8))
+(define-binop - 1 5 subq (unsigned-byte 5) (unsigned-byte 8))
+(define-binop logand 1 3 and (unsigned-byte 5) (unsigned-byte 8))
+(define-binop logandc1 1 3 bic (unsigned-byte 5) (unsigned-byte 8) t)
+(define-binop logandc2 1 3 bic (unsigned-byte 5) (unsigned-byte 8))
+(define-binop logior 1 3 bis (unsigned-byte 5) (unsigned-byte 8))
+(define-binop logorc1 1 3 ornot (unsigned-byte 5) (unsigned-byte 8) t t)
+(define-binop logorc2 1 3 ornot (unsigned-byte 5) (unsigned-byte 8) nil t)
+(define-binop logxor 1 3 xor (unsigned-byte 5) (unsigned-byte 8))
+(define-binop logeqv 1 3 eqv (unsigned-byte 5) (unsigned-byte 8) nil t)
 
 ;;; special cases for LOGAND where we can use a mask operation
 (define-vop (fast-logand-c-mask/unsigned=>unsigned fast-unsigned-c-binop)
@@ -339,7 +339,7 @@
   (:temporary (:scs (non-descriptor-reg)) temp)
   (:translate *)
   (:generator 4
-    (inst sra y 2 temp)
+    (inst sra y 3 temp)
     (inst mulq x temp r)))
 
 (define-vop (fast-*/signed=>signed fast-signed-binop)
@@ -409,7 +409,8 @@
 
 (define-vop (fast-conditional-c/fixnum fast-conditional/fixnum)
   (:args (x :scs (any-reg)))
-  (:arg-types tagged-num (:constant (unsigned-byte-with-a-bite-out 6 4)))
+  ;; FIXME: Think harder about how big the bite should be.
+  (:arg-types tagged-num (:constant (unsigned-byte-with-a-bite-out 5 4)))
   (:info target not-p y))
 
 (define-vop (fast-conditional/signed fast-conditional)
@@ -533,7 +534,7 @@
 
 (define-vop (fast-eql-c/fixnum fast-conditional/fixnum)
   (:args (x :scs (any-reg)))
-  (:arg-types tagged-num (:constant (signed-byte 6)))
+  (:arg-types tagged-num (:constant (signed-byte 5)))
   (:temporary (:scs (non-descriptor-reg)) temp)
   (:info target not-p y)
   (:translate eql)
@@ -549,7 +550,7 @@
 ;;;
 (define-vop (generic-eql-c/fixnum fast-eql-c/fixnum)
   (:args (x :scs (any-reg descriptor-reg)))
-  (:arg-types * (:constant (signed-byte 6)))
+  (:arg-types * (:constant (signed-byte 5)))
   (:variant-cost 6))
   
 
@@ -576,42 +577,42 @@
       (emit-label done)
       (move res result))))
 
-(define-source-transform 32bit-logical-not (x)
-  `(logand (lognot (the (unsigned-byte 32) ,x)) #.(1- (ash 1 32))))
+(define-source-transform 64bit-logical-not (x)
+  `(logand (lognot (the (unsigned-byte 64) ,x)) #.(1- (ash 1 64))))
 
-(deftransform 32bit-logical-and ((x y))
+(deftransform 64bit-logical-and ((x y))
   '(logand x y))
 
-(define-source-transform 32bit-logical-nand (x y)
-  `(32bit-logical-not (32bit-logical-and ,x ,y)))
+(define-source-transform 64bit-logical-nand (x y)
+  `(64bit-logical-not (64bit-logical-and ,x ,y)))
 
-(deftransform 32bit-logical-or ((x y))
+(deftransform 64bit-logical-or ((x y))
   '(logior x y))
 
-(define-source-transform 32bit-logical-nor (x y)
-  `(logand (lognor (the (unsigned-byte 32) ,x) (the (unsigned-byte 32) ,y))
-           #.(1- (ash 1 32))))
+(define-source-transform 64bit-logical-nor (x y)
+  `(logand (lognor (the (unsigned-byte 64) ,x) (the (unsigned-byte 64) ,y))
+           #.(1- (ash 1 64))))
 
-(deftransform 32bit-logical-xor ((x y))
+(deftransform 64bit-logical-xor ((x y))
   '(logxor x y))
 
-(define-source-transform 32bit-logical-eqv (x y)
-  `(logand (logeqv (the (unsigned-byte 32) ,x) (the (unsigned-byte 32) ,y))
-	   #.(1- (ash 1 32))))
+(define-source-transform 64bit-logical-eqv (x y)
+  `(logand (logeqv (the (unsigned-byte 64) ,x) (the (unsigned-byte 64) ,y))
+	   #.(1- (ash 1 64))))
 
-(define-source-transform 32bit-logical-orc1 (x y)
-  `(logand (logorc1 (the (unsigned-byte 32) ,x) (the (unsigned-byte 32) ,y))
-	   #.(1- (ash 1 32))))
+(define-source-transform 64bit-logical-orc1 (x y)
+  `(logand (logorc1 (the (unsigned-byte 64) ,x) (the (unsigned-byte 64) ,y))
+	   #.(1- (ash 1 64))))
 
-(define-source-transform 32bit-logical-orc2 (x y)
-  `(logand (logorc2 (the (unsigned-byte 32) ,x) (the (unsigned-byte 32) ,y))
-	   #.(1- (ash 1 32))))
+(define-source-transform 64bit-logical-orc2 (x y)
+  `(logand (logorc2 (the (unsigned-byte 64) ,x) (the (unsigned-byte 64) ,y))
+	   #.(1- (ash 1 64))))
 
-(define-source-transform 32bit-logical-andc1 (x y)
-  `(logandc1 (the (unsigned-byte 32) ,x) (the (unsigned-byte 32) ,y)))
+(define-source-transform 64bit-logical-andc1 (x y)
+  `(logandc1 (the (unsigned-byte 64) ,x) (the (unsigned-byte 64) ,y)))
 
-(define-source-transform 32bit-logical-andc2 (x y)
-  `(logandc2 (the (unsigned-byte 32) ,x) (the (unsigned-byte 32) ,y)))
+(define-source-transform 64bit-logical-andc2 (x y)
+  `(logandc2 (the (unsigned-byte 64) ,x) (the (unsigned-byte 64) ,y)))
 
 (define-vop (shift-towards-someplace)
   (:policy :fast-safe)
@@ -626,7 +627,7 @@
   (:note "SHIFT-TOWARDS-START")
   (:temporary (:sc non-descriptor-reg) temp)
   (:generator 1
-    (inst and amount #x1f temp)
+    (inst and amount #x3f temp)
     (inst srl num temp r)))
 
 (define-vop (shift-towards-end shift-towards-someplace)
@@ -634,7 +635,7 @@
   (:note "SHIFT-TOWARDS-END")
   (:temporary (:sc non-descriptor-reg) temp)
   (:generator 1
-    (inst and amount #x1f temp)
+    (inst and amount #x3f temp)
     (inst sll num temp r)))
 
 ;;;; bignum stuff
@@ -769,7 +770,8 @@
   (:results (digit :scs (unsigned-reg)))
   (:result-types unsigned-num)
   (:generator 1
-    (inst sra fixnum 2 digit)))
+	      ;; probably (bignum stuff is broken anyway)
+    (inst sra fixnum 3 digit)))
 
 (define-vop (bignum-floor)
   (:translate sb!bignum::%floor)

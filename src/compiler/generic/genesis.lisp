@@ -186,20 +186,22 @@
 			    (ldb (byte 8 ,(- n 8 (* i 8))) new-value)))))
               `(progn
                  (defun ,name (bigvec byte-index)
-		   (aver (= sb!vm:n-word-bits 32))
-		   (aver (= sb!vm:n-byte-bits 8))
+		   ;(aver (= sb!vm:n-word-bits 32))
+		   ;(aver (= sb!vm:n-byte-bits 8))
 		   (logior ,@(ecase sb!c:*backend-byte-order*
 			       (:little-endian ash-list-le)
 			       (:big-endian ash-list-be))))
 		 (defun (setf ,name) (new-value bigvec byte-index)
-		   (aver (= sb!vm:n-word-bits 32))
-		   (aver (= sb!vm:n-byte-bits 8))
+		   ;(aver (= sb!vm:n-word-bits 32))
+		   ;(aver (= sb!vm:n-byte-bits 8))
 		   (setf ,@(ecase sb!c:*backend-byte-order*
 			     (:little-endian setf-list-le)
 			     (:big-endian setf-list-be))))))))
   (make-bvref-n 8)
   (make-bvref-n 16)
-  (make-bvref-n 32))
+  (make-bvref-n 32)
+  (make-bvref-n 64))
+
 
 ;;;; representation of spaces in the core
 
@@ -294,7 +296,9 @@
 			   (- unsigned #x40000000)
 			   unsigned))))
 	    ((or (= lowtag sb!vm:other-immediate-0-lowtag)
-		 (= lowtag sb!vm:other-immediate-1-lowtag))
+		 (= lowtag sb!vm:other-immediate-1-lowtag)
+		 (= lowtag sb!vm:other-immediate-2-lowtag)
+		 (= lowtag sb!vm:other-immediate-3-lowtag))
 	     (format stream
 		     "for other immediate: #X~X, type #b~8,'0B"
 		     (ash (descriptor-bits des) (- sb!vm:n-widetag-bits))
@@ -350,14 +354,9 @@
 (defun descriptor-fixnum (des)
   (let ((bits (descriptor-bits des)))
     (if (logbitp (1- sb!vm:n-word-bits) bits)
-      ;; KLUDGE: The (- SB!VM:N-WORD-BITS 2) term here looks right to
-      ;; me, and it works, but in CMU CL it was (1- SB!VM:N-WORD-BITS),
-      ;; and although that doesn't make sense for me, or work for me,
-      ;; it's hard to see how it could have been wrong, since CMU CL
-      ;; genesis worked. It would be nice to understand how this came
-      ;; to be.. -- WHN 19990901
-      (logior (ash bits -2) (ash -1 (- sb!vm:n-word-bits 2)))
-      (ash bits -2))))
+	(logior (ash bits -3) (ash -1 (- sb!vm:n-word-bits 3)))
+	(ash bits -3))))
+
 
 ;;; common idioms
 (defun descriptor-bytes (des)
@@ -490,7 +489,7 @@
 	 (bytes (gspace-bytes gspace))
 	 (byte-index (ash (+ index (descriptor-word-offset address))
 			  sb!vm:word-shift))
-	 (value (bvref-32 bytes byte-index)))
+	 (value (bvref-64 bytes byte-index)))
     (make-random-descriptor value)))
 
 (declaim (ftype (function (descriptor) descriptor) read-memory))
@@ -533,7 +532,7 @@
     (let* ((bytes (gspace-bytes (descriptor-intuit-gspace address)))
 	   (byte-index (ash (+ index (descriptor-word-offset address))
 			       sb!vm:word-shift)))
-      (setf (bvref-32 bytes byte-index)
+      (setf (bvref-64 bytes byte-index)
 	    (descriptor-bits value)))))
 
 (declaim (ftype (function (descriptor descriptor)) write-memory))
@@ -735,7 +734,7 @@
 ;;; Copy the given number to the core.
 (defun number-to-core (number)
   (typecase number
-    (integer (if (< (integer-length number) 30)
+    (integer (if (< (integer-length number) 61)
 		 (make-fixnum-descriptor number)
 		 (bignum-to-core number)))
     (ratio (number-pair-to-core (number-to-core (numerator number))
@@ -2953,11 +2952,11 @@ initially undefined function references:~2%")
 (defun write-word (num)
   (ecase sb!c:*backend-byte-order*
     (:little-endian
-     (dotimes (i 4)
+     (dotimes (i 8)
        (write-byte (ldb (byte 8 (* i 8)) num) *core-file*)))
     (:big-endian
-     (dotimes (i 4)
-       (write-byte (ldb (byte 8 (* (- 3 i) 8)) num) *core-file*))))
+     (dotimes (i 8)
+       (write-byte (ldb (byte 8 (* (- 7 i) 8)) num) *core-file*))))
   num)
 
 (defun advance-to-page ()
@@ -2976,10 +2975,11 @@ initially undefined function references:~2%")
     (file-position *core-file*
 		   (* sb!c:*backend-page-size* (1+ *data-page*)))
     (format t
-	    "writing ~S byte~:P [~S page~:P] from ~S~%"
+	    "writing ~S byte~:P [~S page~:P] from ~S (start 0x~X)~%"
 	    total-bytes
 	    pages
-	    gspace)
+	    gspace
+	    (gspace-byte-address gspace))
     (force-output)
 
     ;; Note: It is assumed that the GSPACE allocation routines always

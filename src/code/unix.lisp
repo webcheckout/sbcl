@@ -984,7 +984,7 @@ previous timer after the body has finished executing"
     `(multiple-value-bind (,word ,bit) (floor ,offset 32)
        (setf (deref (slot ,fd-set 'fds-bits) ,word)
 	     (logand (deref (slot ,fd-set 'fds-bits) ,word)
-		     (sb!kernel:32bit-logical-not
+		     (sb!kernel:64bit-logical-not
 		      (truly-the (unsigned-byte 32) (ash 1 ,bit))))))))
 
 ;;; not checked for linux...

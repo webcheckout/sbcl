@@ -685,6 +685,9 @@
 ;;;
 ;;; FIXME: This should use the data in *RAW-SLOT-DATA-LIST*.
 (defun structure-raw-slot-type-and-size (type)
+  ;; FIXME
+  (values nil nil nil)
+  #+nil
   (cond ((and (sb!xc:subtypep type '(unsigned-byte 32))
 	      (multiple-value-bind (fixnum? fixnum-certain?)
 		  (sb!xc:subtypep type 'fixnum)

@@ -1311,7 +1311,7 @@
 			   (declare (type (signed-byte 31) res)
 				    (optimize (inhibit-warnings 3)))
 			   (return res))))))
-		(declare (type (mod 30) k)
+		(declare (type (mod 30) k) ;FIXME 64bit
 			 (type (signed-byte 31) u v)))))
 	   ((bignum bignum)
 	    (bignum-gcd u v))
