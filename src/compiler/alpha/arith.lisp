@@ -117,7 +117,7 @@
 	      `(inst ,op y x ,(if restore-fixnum-mask 'temp 'r))
 	      `(inst ,op x y ,(if restore-fixnum-mask 'temp 'r)))
 	 ,@(when restore-fixnum-mask
-	     `((inst bic temp #.(ash lowtag-mask -1) r)))))
+	     `((inst bic temp fixnum-tag-mask r)))))
      (define-vop (,(symbolicate "FAST-" translate "/SIGNED=>SIGNED")
 		  fast-signed-binop)
        (:args (x :target r :scs (signed-reg))
@@ -148,7 +148,7 @@
 	     (:generator ,cost
 	        (inst ,op x (fixnumize y) ,(if restore-fixnum-mask 'temp 'r))
 		,@(when restore-fixnum-mask
-		    `((inst bic temp #.(ash lowtag-mask -1) r)))))))
+		    `((inst bic temp fixnum-tag-mask r)))))))
      ,@(when (and untagged-type (not arg-swap))
 	 `((define-vop (,(symbolicate "FAST-" translate "-C/SIGNED=>SIGNED")
 			fast-signed-c-binop)

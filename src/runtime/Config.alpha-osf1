@@ -8,10 +8,10 @@
 # files for more information.
 
 CFLAGS += -Dalpha -Dosf1 -O0 -g -D_XOPEN_SOURCE=500 -D_OSF_SOURCE=500
-CFLAGS += -msg_disable newlocale
+CFLAGS += -msg_disable newlocale,badptrarith
 ASFLAGS += -Dalpha -Dosf1 #-ULANGUAGE_ASSEMBLY
 LD = ld -xtaso
-LINKFLAGS = -non_shared # dynamic -v -g  -Wl,-T  -Wl,ld-script.alpha-linux
+LINKFLAGS = # dynamic -v -g  -Wl,-T  -Wl,ld-script.alpha-linux
 # Digital^WCompaq^WHP's cc declares `static inline' functions to exist
 # in multiple places in the binary; we add the '-g' flag to suppress all
 # internal (i.e. static) function names being spat out.  GENESIS
@@ -19,7 +19,7 @@ LINKFLAGS = -non_shared # dynamic -v -g  -Wl,-T  -Wl,ld-script.alpha-linux
 # by anything outside the binary anyway.
 NM = nm -B -g
 
-ASSEM_SRC = alpha-assem.s # ldso-stubs.s
+ASSEM_SRC = alpha-assem.s ldso-stubs.s
 ARCH_SRC = alpha-arch.c undefineds.c
 
 # cancel gnumake's builtin rule for .S files, because digital's cc doesn't

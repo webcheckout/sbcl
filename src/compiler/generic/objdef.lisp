@@ -51,7 +51,7 @@
 (define-primitive-object (bignum :lowtag other-pointer-lowtag
 				 :widetag bignum-widetag
 				 :alloc-trans sb!bignum::%allocate-bignum)
-  (digits :rest-p t :c-type #!-alpha "long" #!+alpha "u32"))
+  (digits :rest-p t :c-type "long"))
 
 (define-primitive-object (ratio :type ratio
 				:lowtag other-pointer-lowtag
@@ -72,8 +72,11 @@
 
 (define-primitive-object (double-float :lowtag other-pointer-lowtag
 				       :widetag double-float-widetag)
-  #!-x86-64 (filler)
-  (value :c-type "double" :length #!-x86-64 2 #!+x86-64 1))
+  #!+#.(cl:if (cl:= 32 sb!vm:n-word-bits) '(and) '(or)) (filler)
+  (value :c-type "double"
+         :length
+         #!+#.(cl:if (cl:= 64 sb!vm:n-word-bits) '(and) '(or)) 1
+         #!+#.(cl:if (cl:= 32 sb!vm:n-word-bits) '(and) '(or)) 2))
 
 #!+long-float
 (define-primitive-object (long-float :lowtag other-pointer-lowtag
@@ -137,7 +140,7 @@
   ;; VECTOR -- see SHRINK-VECTOR.
   (length :ref-trans sb!c::vector-length
 	  :type index)
-  (data :rest-p t :c-type #!-alpha "unsigned long" #!+alpha "u32"))
+  (data :rest-p t :c-type "unsigned long"))
 
 (define-primitive-object (code :type code-component
 			       :lowtag other-pointer-lowtag
@@ -163,7 +166,7 @@
 				:widetag fdefn-widetag)
   (name :ref-trans fdefn-name)
   (fun :type (or function null) :ref-trans fdefn-fun)
-  (raw-addr :c-type #!-alpha "char *" #!+alpha "u32"))
+  (raw-addr :c-type "char *"))
 
 ;;; a simple function (as opposed to hairier things like closures
 ;;; which are also subtypes of Common Lisp's FUNCTION type)
@@ -263,13 +266,6 @@
 	 :ref-known (flushable)
 	 :init :arg))
 
-#!+alpha
-(define-primitive-object (sap :lowtag other-pointer-lowtag
-			      :widetag sap-widetag)
-  (padding)
-  (pointer :c-type "char *" :length 2))
-
-#!-alpha
 (define-primitive-object (sap :lowtag other-pointer-lowtag
 			      :widetag sap-widetag)
   (pointer :c-type "char *"))
@@ -284,7 +280,7 @@
   (broken :type (member t nil)
 	  :ref-trans sb!c::%weak-pointer-broken :ref-known (flushable)
 	  :init :null)
-  (next :c-type #!-alpha "struct weak_pointer *" #!+alpha "u32"))
+  (next :c-type "struct weak_pointer *"))
 
 ;;;; other non-heap data blocks
 
@@ -293,18 +289,18 @@
   symbol)
 
 (define-primitive-object (unwind-block)
-  (current-uwp :c-type #!-alpha "struct unwind_block *" #!+alpha "u32")
-  (current-cont :c-type #!-alpha "lispobj *" #!+alpha "u32")
+  (current-uwp :c-type "struct unwind_block *")
+  (current-cont :c-type "lispobj *")
   #!-(or x86 x86-64) current-code
   entry-pc)
 
 (define-primitive-object (catch-block)
-  (current-uwp :c-type #!-alpha "struct unwind_block *" #!+alpha "u32")
-  (current-cont :c-type #!-alpha "lispobj *" #!+alpha "u32")
+  (current-uwp :c-type "struct unwind_block *")
+  (current-cont :c-type "lispobj *")
   #!-(or x86 x86-64) current-code
   entry-pc
   tag
-  (previous-catch :c-type #!-alpha "struct catch_block *" #!+alpha "u32")
+  (previous-catch :c-type "struct catch_block *")
   size)
 
 ;;; (For an explanation of this, see the comments at the definition of
@@ -350,9 +346,15 @@
 (define-primitive-object (complex-double-float
 			  :lowtag other-pointer-lowtag
 			  :widetag complex-double-float-widetag)
-  #!-x86-64 (filler) 
-  (real :c-type "double" :length #!-x86-64 2 #!+x86-64 1)
-  (imag :c-type "double" :length #!-x86-64 2 #!+x86-64 1))
+  #!+#.(cl:if (cl:= 32 sb!vm:n-word-bits) '(and) '(or)) (filler)
+  (real :c-type "double"
+        :length
+        #!+#.(cl:if (cl:= 64 sb!vm:n-word-bits) '(and) '(or)) 1
+        #!+#.(cl:if (cl:= 32 sb!vm:n-word-bits) '(and) '(or)) 2)
+  (imag :c-type "double"
+        :length
+        #!+#.(cl:if (cl:= 64 sb!vm:n-word-bits) '(and) '(or)) 1
+        #!+#.(cl:if (cl:= 32 sb!vm:n-word-bits) '(and) '(or)) 2))
 
 ;;; this isn't actually a lisp object at all, it's a c structure that lives
 ;;; in c-land.  However, we need sight of so many parts of it from Lisp that
@@ -365,19 +367,18 @@
   ;; pass the address of initial-function into new_thread_trampoline 
   (unbound-marker :init :unbound) ; tls[0] = UNBOUND_MARKER_WIDETAG 
   (pid :c-type "pid_t")
-  (binding-stack-start :c-type "lispobj *" :length #!+alpha 2 #!-alpha 1)
-  (binding-stack-pointer :c-type "lispobj *" :length #!+alpha 2 #!-alpha 1)
-  (control-stack-start :c-type "lispobj *" :length #!+alpha 2 #!-alpha 1)
-  (control-stack-end :c-type "lispobj *" :length #!+alpha 2 #!-alpha 1)
-  (alien-stack-start :c-type "lispobj *" :length #!+alpha 2 #!-alpha 1)
-  (alien-stack-pointer :c-type "lispobj *" :length #!+alpha 2 #!-alpha 1)
+  (binding-stack-start :c-type "lispobj *")
+  (binding-stack-pointer :c-type "lispobj *")
+  (control-stack-start :c-type "lispobj *")
+  (control-stack-end :c-type "lispobj *")
+  (alien-stack-start :c-type "lispobj *")
+  (alien-stack-pointer :c-type "lispobj *")
   #!+gencgc (alloc-region :c-type "struct alloc_region" :length 5)
   (tls-cookie)				;  on x86, the LDT index 
-  (this :c-type "struct thread *" :length #!+alpha 2 #!-alpha 1)
-  (next :c-type "struct thread *" :length #!+alpha 2 #!-alpha 1)
+  (this :c-type "struct thread *")
+  (next :c-type "struct thread *")
   (state)				; running, stopping, stopped, dead
   #!+(or x86 x86-64) (pseudo-atomic-atomic)
   #!+(or x86 x86-64) (pseudo-atomic-interrupted)
-  (interrupt-data :c-type "struct interrupt_data *" 
-		  :length #!+alpha 2 #!-alpha 1)
+  (interrupt-data :c-type "struct interrupt_data *")
   (interrupt-contexts :c-type "os_context_t *" :rest-p t))

@@ -36,7 +36,7 @@
 
 #include "genesis/static-symbols.h"
 
-
+#include "genesis/ldb-print.h"
 
 static int max_lines = 20, cur_lines = 0;
 static int max_depth = 5, brief_depth = 2, cur_depth = 0;
@@ -47,17 +47,6 @@ static int cur_clock = 0;
 static void print_obj(char *prefix, lispobj obj);
 
 #define NEWLINE_OR_RETURN if (continue_p(1)) newline(NULL); else return;
-
-char *lowtag_Names[] = {
-    "even fixnum",
-    "instance pointer",
-    "other immediate [0]",
-    "list pointer",
-    "odd fixnum",
-    "function pointer",
-    "other immediate [1]",
-    "other pointer"
-};
 
 /* FIXME: Yikes! This table implicitly depends on the values in sbcl.h,
  * but doesn't actually depend on them, so if they change, it gets
@@ -195,20 +184,12 @@ static void newline(char *label)
 
 static void brief_fixnum(lispobj obj)
 {
-#ifndef alpha
-    printf("%ld", ((long)obj)>>2);
-#else
-    printf("%d", ((s32)obj)>>2);
-#endif
+    printf("%ld", fixnum_value((long)obj));
 }
 
 static void print_fixnum(lispobj obj)
 {
-#ifndef alpha
-    printf(": %ld", ((long)obj)>>2);
-#else
-    printf(": %d", ((s32)obj)>>2);
-#endif
+    printf(": %ld", fixnum_value((long)obj));
 }
 
 static void brief_otherimm(lispobj obj)
@@ -414,40 +395,14 @@ static void print_slots(char **slots, int count, lispobj *ptr)
     }
 }
 
-/* FIXME: Yikes again! This, like subtype_Names[], needs to depend
- * on the values in sbcl.h (or perhaps be generated automatically
- * by GENESIS as part of sbcl.h). */
-static char *symbol_slots[] = {"value: ", "unused: ",
-    "plist: ", "name: ", "package: ",
-#ifdef LISP_FEATURE_SB_THREAD
-    "tls-index: " ,
-#endif			       
-    NULL};
-static char *ratio_slots[] = {"numer: ", "denom: ", NULL};
-static char *complex_slots[] = {"real: ", "imag: ", NULL};
-static char *code_slots[] = {"words: ", "entry: ", "debug: ", NULL};
-static char *fn_slots[] = {
-    "self: ", "next: ", "name: ", "arglist: ", "type: ", NULL};
-static char *closure_slots[] = {"fn: ", NULL};
-static char *funcallable_instance_slots[] = {"fn: ", "lexenv: ", "layout: ", NULL};
-static char *weak_pointer_slots[] = {"value: ", NULL};
-static char *fdefn_slots[] = {"name: ", "function: ", "raw_addr: ", NULL};
-static char *value_cell_slots[] = {"value: ", NULL};
-
 static void print_otherptr(lispobj obj)
 {
     if (!is_valid_lisp_addr((os_vm_address_t)obj)) {
 	printf("(invalid address)");
     } else {
-#ifndef alpha
         lispobj *ptr;
         unsigned long header;
         unsigned long length;
-#else
-        u32 *ptr;
-        u32 header;
-        u32 length;
-#endif
         int count, type, index;
         char *cptr, buffer[16];
 
@@ -458,7 +413,7 @@ static void print_otherptr(lispobj obj)
 	}
 
 	header = *ptr++;
-	length = (*ptr) >> 2;
+	length = (*ptr) >> N_FIXNUM_TAG_BITS;
 	count = header>>8;
 	type = widetag_of(header);
 
@@ -668,12 +623,28 @@ static void print_otherptr(lispobj obj)
 
 static void print_obj(char *prefix, lispobj obj)
 {
+    /* FIXME: 64-bit ugliness */
+#if N_WORD_BITS == 64
+    static void (*verbose_fns[])(lispobj obj)
+	= {print_fixnum, print_struct, print_otherimm,
+           NULL, NULL, NULL,
+           print_otherimm, print_list, print_fixnum, print_otherptr, print_otherimm,
+           NULL, NULL, NULL,
+           print_otherimm, print_otherptr};
+    static void (*brief_fns[])(lispobj obj)
+	= {brief_fixnum, brief_struct, brief_otherimm,
+           NULL, NULL, NULL,
+           brief_otherimm, brief_list, brief_fixnum, brief_otherptr, brief_otherimm,
+           NULL, NULL, NULL,
+           print_otherimm, brief_otherptr};
+#else
     static void (*verbose_fns[])(lispobj obj)
 	= {print_fixnum, print_struct, print_otherimm, print_list,
 	   print_fixnum, print_otherptr, print_otherimm, print_otherptr};
     static void (*brief_fns[])(lispobj obj)
 	= {brief_fixnum, brief_struct, brief_otherimm, brief_list,
 	   brief_fixnum, brief_otherptr, brief_otherimm, brief_otherptr};
+#endif
     int type = lowtag_of(obj);
     struct var *var = lookup_by_obj(obj);
     char buffer[256];

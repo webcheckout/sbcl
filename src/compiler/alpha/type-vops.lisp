@@ -127,7 +127,7 @@
 
 ;;;; Other integer ranges.
 
-(defun signed-byte-32-test (value temp temp1 not-p target not-target)
+(defun signed-byte-32-test (value temp not-p target not-target)
   (multiple-value-bind (yep nope) (if not-p
 				      (values not-target target)
 				      (values target not-target))
@@ -145,16 +145,14 @@
 
 (define-vop (signed-byte-32-p type-predicate)
   (:translate signed-byte-32-p)
-  (:temporary (:scs (non-descriptor-reg)) temp1)
   (:generator 45
-    (signed-byte-32-test value temp temp1 not-p target not-target)
+    (signed-byte-32-test value temp not-p target not-target)
     NOT-TARGET))
 
 (define-vop (check-signed-byte-32 check-type)
-  (:temporary (:scs (non-descriptor-reg)) temp1)
   (:generator 45
     (let ((loose (generate-error-code vop object-not-signed-byte-32-error value)))
-      (signed-byte-32-test value temp temp1 t loose okay))
+      (signed-byte-32-test value temp t loose okay))
     OKAY
     (inst move value result)))
 
@@ -197,7 +195,7 @@
     OKAY
     (inst move value result)))
 
-(defun unsigned-byte-32-test (value temp temp1 not-p target not-target)
+(defun unsigned-byte-32-test (value temp not-p target not-target)
   (multiple-value-bind (yep nope) (if not-p
 				      (values not-target target)
 				      (values target not-target))
@@ -211,17 +209,15 @@
 
 (define-vop (unsigned-byte-32-p type-predicate)
   (:translate unsigned-byte-32-p)
-  (:temporary (:scs (non-descriptor-reg)) temp1)
   (:generator 45
-    (unsigned-byte-32-test value temp temp1 not-p target not-target)
+    (unsigned-byte-32-test value temp not-p target not-target)
     NOT-TARGET))
 
 (define-vop (check-unsigned-byte-32 check-type)
-  (:temporary (:scs (non-descriptor-reg)) temp1)
   (:generator 56
     (let ((loose (generate-error-code vop object-not-unsigned-byte-32-error
 				      value)))
-      (unsigned-byte-32-test value temp temp1 t loose okay))
+      (unsigned-byte-32-test value temp t loose okay))
     OKAY
     (inst move value result)))
 

@@ -718,6 +718,43 @@ boolean handle_control_stack_guard_triggered(os_context_t *context,void *addr){
     else return 0;
 }
 
+boolean handle_guard_page_triggered(os_context_t *context,void *addr){
+    struct thread *th=arch_os_get_current_thread();
+    
+    /* note the os_context hackery here.  When the signal handler returns, 
+     * it won't go back to what it was doing ... */
+    if(addr >= CONTROL_STACK_GUARD_PAGE(th) && 
+       addr < CONTROL_STACK_GUARD_PAGE(th) + os_vm_page_size) {
+      /* We hit the end of the control stack: disable guard page
+       * protection so the error handler has some headroom, protect the
+       * previous page so that we can catch returns from the guard page
+       * and restore it. */
+        protect_control_stack_guard_page(th->pid,0);
+        protect_control_stack_return_guard_page(th->pid,1);
+        
+        arrange_return_to_lisp_function
+            (context, SymbolFunction(CONTROL_STACK_EXHAUSTED_ERROR));
+        return 1;
+    }
+    else if(addr >= CONTROL_STACK_RETURN_GUARD_PAGE(th) &&
+            addr < CONTROL_STACK_RETURN_GUARD_PAGE(th) + os_vm_page_size) {
+      /* We're returning from the guard page: reprotect it, and
+       * unprotect this one. This works even if we somehow missed
+       * the return-guard-page, and hit it on our way to new
+       * exhaustion instead. */
+        protect_control_stack_guard_page(th->pid,1);
+        protect_control_stack_return_guard_page(th->pid,0);
+        return 1;
+    }
+    else if (addr >= undefined_alien_address &&
+     addr < undefined_alien_address + os_vm_page_size) {
+arrange_return_to_lisp_function
+          (context, SymbolFunction(UNDEFINED_ALIEN_ERROR));
+return 1;
+    }
+    else return 0;
+}
+
 #ifndef LISP_FEATURE_GENCGC
 /* This function gets called from the SIGSEGV (for e.g. Linux, NetBSD, &
  * OpenBSD) or SIGBUS (for e.g. FreeBSD) handler. Here we check

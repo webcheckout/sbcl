@@ -2565,14 +2565,21 @@ core and return a descriptor to it."
     (format t " * ~A~%" line))
   (format t " */~%"))
 
+(defun cpp-feature-name (feature-name)
+  (format nil "LISP_FEATURE_~A" (substitute #\_ #\- (string feature-name))))
+
+(defun c-identifier (symbol &optional (upcase nil))
+  (let ((ident (substitute #\_ #\- (string symbol))))
+    (if upcase
+        (nstring-upcase ident)
+        (nstring-downcase ident))))
+
 (defun write-config-h ()
   ;; propagating *SHEBANG-FEATURES* into C-level #define's
   (dolist (shebang-feature-name (sort (mapcar #'symbol-name
 					      sb-cold:*shebang-features*)
 				      #'string<))
-    (format t
-	    "#define LISP_FEATURE_~A~%"
-	    (substitute #\_ #\- shebang-feature-name)))
+    (format t "#define ~A~%" (cpp-feature-name shebang-feature-name)))
   (terpri)
   ;; and miscellaneous constants
   (format t "#define SBCL_CORE_VERSION_INTEGER ~D~%" sbcl-core-version-integer)
@@ -2586,6 +2593,37 @@ core and return a descriptor to it."
   (format t "#define LISPOBJ(thing) thing~2%")
   (format t "#endif /* LANGUAGE_ASSEMBLY */~2%")
   (terpri))
+
+(defun write-ldb-print-h ()
+  (let ((lowtags (make-array sb!vm:lowtag-limit :initial-element nil)))
+    (do-external-symbols (symbol (find-package "SB!VM"))
+      (when (and (constantp symbol)
+                 (tailwise-equal (symbol-name symbol) "-LOWTAG"))
+        (setf (aref lowtags (symbol-value symbol)) symbol)))
+
+    (format t "#if defined(~A)~2%" (cpp-feature-name :sb-ldb))
+    (format t "static char *lowtag_Names[] = {~%")
+    (dotimes (i sb!vm:lowtag-limit)
+      (let* ((lowtag (aref lowtags i))
+             (name-sans-lowtag (when lowtag
+                                 (subseq (symbol-name lowtag)
+                                         0 (- (length (symbol-name lowtag)) 7)))))
+        (if lowtag
+            (format t "~&    \"~A\",~%"
+                    (nstring-downcase (substitute #\Space #\- name-sans-lowtag)))
+            (format t "~&    NULL,~%"))))
+    (format t "~&};~%")
+
+    (dolist (obj sb!vm:*primitive-objects*)
+      (format t "static char *~A_slots[] = {~{ \"~A: \", ~} NULL };~%"
+              (c-identifier (sb!vm:primitive-object-name obj))
+              (mapcar #'(lambda (slot)
+                          (c-identifier (sb!vm:slot-name slot)))
+                      ;; Old CMUCL print code didn't seem to mess with
+                      ;; rest slots, so we won't either.
+                      (remove-if #'sb!vm:slot-rest-p
+                                 (sb!vm:primitive-object-slots obj)))))
+    (format t "#endif / ~A */~2%" (cpp-feature-name :sb-ldb))))
 
 (defun write-constants-h ()
   ;; writing entire families of named constants 
@@ -2740,35 +2778,31 @@ core and return a descriptor to it."
 	    (substitute #\_ #\- (symbol-name symbol))
 	    (sb!xc:mask-field (symbol-value symbol) -1))))
 
-
-
 (defun write-primitive-object (obj)  
   ;; writing primitive object layouts
-    (format t "#ifndef LANGUAGE_ASSEMBLY~2%")
-      (format t
-	      "struct ~A {~%"
-	      (substitute #\_ #\-
-	      (string-downcase (string (sb!vm:primitive-object-name obj)))))
-      (when (sb!vm:primitive-object-widetag obj)
-	(format t "    lispobj header;~%"))
-      (dolist (slot (sb!vm:primitive-object-slots obj))
-	(format t "    ~A ~A~@[[1]~];~%"
-	(getf (sb!vm:slot-options slot) :c-type "lispobj")
-	(substitute #\_ #\-
-		    (string-downcase (string (sb!vm:slot-name slot))))
-	(sb!vm:slot-rest-p slot)))
+  (format t "#ifndef LANGUAGE_ASSEMBLY~2%")
+  (format t
+          "struct ~A {~%"
+          (c-identifier (sb!vm:primitive-object-name obj)))
+  (when (sb!vm:primitive-object-widetag obj)
+    (format t "    lispobj header;~%"))
+  (dolist (slot (sb!vm:primitive-object-slots obj))
+    (format t "    ~A ~A~@[[1]~];~%"
+            (getf (sb!vm:slot-options slot) :c-type "lispobj")
+            (c-identifier (sb!vm:slot-name slot))
+            (sb!vm:slot-rest-p slot)))
   (format t "};~2%")
-    (format t "#else /* LANGUAGE_ASSEMBLY */~2%")
-      (let ((name (sb!vm:primitive-object-name obj))
-      (lowtag (eval (sb!vm:primitive-object-lowtag obj))))
-	(when lowtag
-	(dolist (slot (sb!vm:primitive-object-slots obj))
-	  (format t "#define ~A_~A_OFFSET ~D~%"
-		  (substitute #\_ #\- (string name))
-		  (substitute #\_ #\- (string (sb!vm:slot-name slot)))
-		  (- (* (sb!vm:slot-offset slot) sb!vm:n-word-bytes) lowtag)))
+  (format t "#else /* LANGUAGE_ASSEMBLY */~2%")
+  (let ((name (sb!vm:primitive-object-name obj))
+        (lowtag (eval (sb!vm:primitive-object-lowtag obj))))
+    (when lowtag
+      (dolist (slot (sb!vm:primitive-object-slots obj))
+        (format t "#define ~A_~A_OFFSET ~D~%"
+                (c-identifier name t)
+                (c-identifier (sb!vm:slot-name slot) t)
+                (- (* (sb!vm:slot-offset slot) sb!vm:n-word-bytes) lowtag)))
       (terpri)))
-    (format t "#endif /* LANGUAGE_ASSEMBLY */~2%"))
+  (format t "#endif /* LANGUAGE_ASSEMBLY */~2%"))
 
 (defun write-static-symbols ()
   (dolist (symbol (cons nil sb!vm:*static-symbols*))
@@ -3210,6 +3244,7 @@ initially undefined function references:~2%")
 	  (write-map)))
 	(out-to "config" (write-config-h))
 	(out-to "constants" (write-constants-h))
+        (out-to "ldb-print" (write-ldb-print-h))
 	(let ((structs (sort (copy-list sb!vm:*primitive-objects*) #'string<
 			     :key (lambda (obj)
 				    (symbol-name

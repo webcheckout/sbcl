@@ -19,7 +19,7 @@
 	       (* n sb!vm:n-word-bytes)))
 
 (defun current-thread-id ()
-  (sb!sys:sap-ref-32 (alien-sap (extern-alien "all_threads" (* t))) 
+  (sb!sys:sap-ref-word (alien-sap (extern-alien "all_threads" (* t))) 
 	       (* sb!vm::thread-pid-slot sb!vm:n-word-bytes)))
 
 (defun reap-dead-threads ())
