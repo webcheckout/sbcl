@@ -95,7 +95,7 @@
 (def!constant float-round-to-positive 3)
 (defconstant-eqx float-rounding-mode   (byte 2 58) #'equalp) 
 
-;;; Miscellaneous stuff - I think it's far to say that you deserve
+;;; Miscellaneous stuff - I think it's fair to say that you deserve
 ;;; what you get if you ask for fast mode.
 (def!constant float-fast-bit 0)
 

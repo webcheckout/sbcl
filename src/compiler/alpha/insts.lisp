@@ -363,8 +363,9 @@
   (define-operate umulh  #x13 #x30)
   (define-operate mulq   #x13 #x20)
 
-  (define-operate sextb  #x1c #x00)
-  (define-operate sextw  #x1c #x01)
+  (define-operate sextb  #x1c #x00)     ; BWX extension
+  (define-operate sextw  #x1c #x01)     ; BWX extension
+
   (define-operate ctpop  #x1c #x30)     ; CIX extension
   (define-operate ctlz   #x1c #x32)     ; CIX extension
   (define-operate cttz   #x1c #x33))    ; CIX extension
@@ -399,6 +400,11 @@
   (define-fp-operate fcmovge  #x17 #x02d)
   (define-fp-operate fcmovle  #x17 #x02e)
   (define-fp-operate fcmovgt  #x17 #x02f)
+
+  (define-fp-operate ftois #x1c #x78)   ; FIX extension
+  (define-fp-operate ftoit #x1c #x70)   ; FIX extension
+  (define-fp-operate itofs #x14 #x004)  ; FIX extension
+  (define-fp-operate itoft #x14 #x024)  ; FIX extension
 
   (define-fp-operate cvtqs #x16 #x0bc 2)
   (define-fp-operate cvtqt #x16 #x0be 2)
@@ -466,6 +472,10 @@
 
 (define-instruction-macro not (src dst)
   `(inst ornot zero-tn ,src ,dst))
+
+;;; 'Sign EXtend Longword'
+(define-instruction-macro sextl (src dst)
+  `(inst addl zero-tn ,src ,dst))
 
 (define-instruction-macro fmove (src dst)
   `(inst cpys ,src ,src ,dst))

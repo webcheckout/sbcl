@@ -165,7 +165,8 @@ call_into_c:
 	addq	reg_CFP, 64, reg_CSP
 	stq	reg_OCFP, 0(reg_CFP)
 	subq	reg_LIP, reg_CODE, reg_L1
-	addq	reg_L1, OTHER_POINTER_LOWTAG, reg_L1
+	/* addq	reg_L1, OTHER_POINTER_LOWTAG, reg_L1 */
+	sll	reg_L1, N_FIXNUM_TAG_BITS, reg_L1
 	stq	reg_L1, 8(reg_CFP)
 	stq	reg_CODE, 16(reg_CFP)
 	stq	reg_NULL, 24(reg_CFP)
@@ -236,7 +237,8 @@ call_into_c:
 	/* can you see anything here which touches LRA?  I can't ...*/
 	ldq	reg_CODE, 16(reg_CFP)
 	ldq	reg_NL0, 8(reg_CFP)
-	subq	reg_NL0, OTHER_POINTER_LOWTAG, reg_NL0
+	/* subq	reg_NL0, OTHER_POINTER_LOWTAG, reg_NL0 */
+	srl	reg_NL0, N_FIXNUM_TAG_BITS, reg_NL0
 	addq	reg_CODE, reg_NL0, reg_NL0
 
 	mov	reg_CFP, reg_CSP

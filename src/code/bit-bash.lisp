@@ -109,9 +109,7 @@
 	   (type index offset)
 	   (values system-area-pointer index))
   (let ((address (sap-int sap)))
-    (values (int-sap #!-alpha (word-logical-andc2 address
-						  sb!vm::fixnum-tag-mask)
-		     #!+alpha (ash (ash address -2) 2))
+    (values (int-sap (word-logical-andc2 address sb!vm::fixnum-tag-mask))
 	    (+ (* (logand address sb!vm::fixnum-tag-mask) n-byte-bits)
 	       offset))))
 

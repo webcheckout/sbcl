@@ -346,8 +346,7 @@
 (define-alien-type-class (system-area-pointer))
 
 (define-alien-type-translator system-area-pointer ()
-  (make-alien-system-area-pointer-type
-   :bits #!-alpha sb!vm:n-word-bits #!+alpha 64))
+  (make-alien-system-area-pointer-type :bits sb!vm:n-word-bits))
 
 (define-alien-type-method (system-area-pointer :unparse) (type)
   (declare (ignore type))
@@ -772,10 +771,8 @@
 
 ;;;; the POINTER type
 
-(define-alien-type-class (pointer :include (alien-value (bits
-							 #!-alpha
-							 sb!vm:n-word-bits
-							 #!+alpha 64)))
+(define-alien-type-class (pointer :include (alien-value
+                                            (bits sb!vm:n-word-bits)))
   (to nil :type (or alien-type null)))
 
 (define-alien-type-translator * (to &environment env)

@@ -366,7 +366,8 @@
   ;; SINGLE-FLOAT is the size of a lispobj and that DOUBLE-FLOAT is
   ;; the size of two lispobjs.
   (:generator 20
-    (inst addq object index lip)
+    (inst srl index 1 lip)
+    (inst addq object lip lip)
     (inst lds value
 	  (- (* vector-data-offset n-word-bytes)
 	     other-pointer-lowtag)
@@ -384,7 +385,8 @@
   (:result-types single-float)
   (:temporary (:scs (interior-reg)) lip)
   (:generator 20
-    (inst addq object index lip)
+    (inst srl index 1 lip)
+    (inst addq object lip lip)
     (inst sts value
 	  (- (* vector-data-offset n-word-bytes)
 	     other-pointer-lowtag)
@@ -404,7 +406,6 @@
   (:temporary (:scs (interior-reg)) lip)
   (:generator 20
     (inst addq object index lip)
-    (inst addq lip index lip)
     (inst ldt value
 	  (- (* vector-data-offset n-word-bytes)
 	     other-pointer-lowtag)
@@ -423,7 +424,6 @@
   (:temporary (:scs (interior-reg)) lip)
   (:generator 20
     (inst addq object index lip)
-    (inst addq lip index lip)
     (inst stt value
 	  (- (* vector-data-offset n-word-bytes)
 	     other-pointer-lowtag) lip)
@@ -444,14 +444,14 @@
   (:result-types complex-single-float)
   (:generator 5
     (let ((real-tn (complex-single-reg-real-tn value)))
-      (inst addq object index lip)
-      (inst addq lip index lip)
+      (inst srl index 1 lip)
+      (inst addq object lip lip)
       (inst lds real-tn
 	    (- (* vector-data-offset n-word-bytes) other-pointer-lowtag)
 	    lip))
     (let ((imag-tn (complex-single-reg-imag-tn value)))
       (inst lds imag-tn
-	    (- (* (1+ vector-data-offset) n-word-bytes) other-pointer-lowtag)
+	    (- (+ (* vector-data-offset n-word-bytes) 4) other-pointer-lowtag)
 	    lip))))
 
 (define-vop (data-vector-set/simple-array-complex-single-float)
@@ -469,8 +469,8 @@
   (:generator 5
     (let ((value-real (complex-single-reg-real-tn value))
 	  (result-real (complex-single-reg-real-tn result)))
-      (inst addq object index lip)
-      (inst addq lip index lip)
+      (inst srl index 1 lip)
+      (inst addq object lip lip)
       (inst sts value-real
 	    (- (* vector-data-offset n-word-bytes) other-pointer-lowtag)
 	    lip)
@@ -479,7 +479,7 @@
     (let ((value-imag (complex-single-reg-imag-tn value))
 	  (result-imag (complex-single-reg-imag-tn result)))
       (inst sts value-imag
-	    (- (* (1+ vector-data-offset) n-word-bytes) other-pointer-lowtag)
+	    (- (+ (* vector-data-offset n-word-bytes) 4) other-pointer-lowtag)
 	    lip)
       (unless (location= result-imag value-imag)
 	(inst fmove value-imag result-imag)))))
@@ -497,15 +497,12 @@
   (:generator 7
     (let ((real-tn (complex-double-reg-real-tn value)))
       (inst addq object index lip)
-      (inst addq lip index lip)
-      (inst addq lip index lip)
-      (inst addq lip index lip)
       (inst ldt real-tn
 	    (- (* vector-data-offset n-word-bytes) other-pointer-lowtag)
 	    lip))
     (let ((imag-tn (complex-double-reg-imag-tn value)))
       (inst ldt imag-tn
-	    (- (* (+ vector-data-offset 2) n-word-bytes) other-pointer-lowtag)
+	    (- (+ (* vector-data-offset n-word-bytes) 8) other-pointer-lowtag)
 	    lip))))
 
 (define-vop (data-vector-set/simple-array-complex-double-float)
@@ -524,9 +521,6 @@
     (let ((value-real (complex-double-reg-real-tn value))
 	  (result-real (complex-double-reg-real-tn result)))
       (inst addq object index lip)
-      (inst addq lip index lip)
-      (inst addq lip index lip)
-      (inst addq lip index lip)
       (inst stt value-real
 	    (- (* vector-data-offset n-word-bytes) other-pointer-lowtag)
 	    lip)
@@ -535,7 +529,7 @@
     (let ((value-imag (complex-double-reg-imag-tn value))
 	  (result-imag (complex-double-reg-imag-tn result)))
       (inst stt value-imag
-	    (- (* (+ vector-data-offset 2) n-word-bytes) other-pointer-lowtag)
+	    (- (+ (* vector-data-offset n-word-bytes) 8) other-pointer-lowtag)
 	    lip)
       (unless (location= result-imag value-imag)
 	(inst fmove value-imag result-imag)))))

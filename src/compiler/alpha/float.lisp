@@ -636,7 +636,7 @@
 		      (double-stack res)
 		      (double-reg temp))))
       (inst stl hi-bits
-	    (* (1+ (tn-offset stack-tn)) n-word-bytes)
+	    (+ (* (tn-offset stack-tn) n-word-bytes) 4)
 	    (current-nfp-tn vop))
       (inst stl lo-bits
 	    (* (tn-offset stack-tn) n-word-bytes)
@@ -649,9 +649,7 @@
 (define-vop (single-float-bits)
   (:args (float :scs (single-reg descriptor-reg)
 		:load-if (not (sc-is float single-stack))))
-  (:results (bits :scs (signed-reg)
-		  :load-if (or (sc-is float descriptor-reg single-stack)
-			       (not (sc-is bits signed-stack)))))
+  (:results (bits :scs (signed-reg)))
   (:temporary (:scs (signed-stack)) stack-temp)
   (:arg-types single-float)
   (:result-types signed-num)
@@ -659,29 +657,20 @@
   (:policy :fast-safe)
   (:vop-var vop)
   (:generator 4
-    (sc-case bits
-      (signed-reg
-       (sc-case float
-	 (single-reg
-	  (inst sts float
-		(* (tn-offset stack-temp) n-word-bytes)
-		(current-nfp-tn vop))
-          (inst ldq bits
-		(* (tn-offset stack-temp) n-word-bytes)
-		(current-nfp-tn vop)))
-	 (single-stack
-          (inst ldq bits
-		(* (tn-offset float) n-word-bytes)
-		(current-nfp-tn vop)))
-	 (descriptor-reg
-	  (loadw bits float single-float-value-slot
-		 other-pointer-lowtag))))
-      (signed-stack
-       (sc-case float
-	 (single-reg
-	  (inst sts float
-		(* (tn-offset bits) n-word-bytes)
-		(current-nfp-tn vop))))))))
+    (sc-case float
+      (single-reg
+       (inst sts float (* (tn-offset stack-temp) n-word-bytes)
+             (current-nfp-tn vop))
+       (inst ldl bits (* (tn-offset stack-temp) n-word-bytes)
+             (current-nfp-tn vop)))
+      (single-stack
+       (inst ldl bits (* (tn-offset stack-temp) n-word-bytes)
+             (current-nfp-tn vop)))
+      (descriptor-reg
+       (loadl bits float single-float-value-slot other-pointer-lowtag)))
+    ;; KLUDGE: the SEXTL instruction macro isn't working; this cryptic
+    ;; instruction sign-extends the resutl.
+    (inst addl zero-tn bits bits)))
 
 (define-vop (double-float-high-bits)
   (:args (float :scs (double-reg descriptor-reg)
@@ -699,16 +688,19 @@
         (inst stt float
 	      (* (tn-offset stack-temp) n-word-bytes)
 	      (current-nfp-tn vop))
-        (inst ldq hi-bits
-	      (* (1+ (tn-offset stack-temp)) n-word-bytes)
+        (inst ldl hi-bits
+	      (+ (* (tn-offset stack-temp) n-word-bytes) 4)
 	      (current-nfp-tn vop)))
       (double-stack
-        (inst ldq hi-bits
-	      (* (1+ (tn-offset float)) n-word-bytes)
+        (inst ldl hi-bits
+	      (+ (* (tn-offset float) n-word-bytes) 4)
 	      (current-nfp-tn vop)))
       (descriptor-reg
-        (loadw hi-bits float (1+ double-float-value-slot)
-	       other-pointer-lowtag)))))
+        (loadl hi-bits float (1+ double-float-value-slot)
+	       (+ other-pointer-lowtag 4))))
+    ;; KLUDGE: the SEXTL instruction macro isn't working; this cryptic
+    ;; instruction sign-extends the resutl.
+    (inst addl zero-tn hi-bits hi-bits)))
 
 (define-vop (double-float-low-bits)
   (:args (float :scs (double-reg descriptor-reg)
@@ -726,17 +718,16 @@
         (inst stt float
 	      (* (tn-offset stack-temp) n-word-bytes)
 	      (current-nfp-tn vop))
-        (inst ldq lo-bits
+        (inst ldl lo-bits
 	      (* (tn-offset stack-temp) n-word-bytes)
 	      (current-nfp-tn vop)))
       (double-stack
-       (inst ldq lo-bits
+       (inst ldl lo-bits
 	     (* (tn-offset float) n-word-bytes)
 	     (current-nfp-tn vop)))
       (descriptor-reg
-       (loadw lo-bits float double-float-value-slot
-	      other-pointer-lowtag)))
-    (inst mskll lo-bits 4 lo-bits)))
+       (loadl lo-bits float double-float-value-slot
+	      other-pointer-lowtag)))))
 
 
 ;;;; float mode hackery has moved to alpha-vm.lisp
