@@ -25,7 +25,16 @@
   nil)
 
 (defun fixup-code-object (code offset value kind)
-  (unless (zerop (rem offset n-word-bytes))
+  ;; If you examine other RISCy backends for SBCL, you'll notice that
+  ;; most of them use `n-word-bytes' instead of `4' here.  What they're
+  ;; really trying to say is that instructions should only occur on
+  ;; 4-byte boundaries and n-word-bytes happens to be a convenient
+  ;; constant close at hand.  Alpha, however, has 32-bit instructions with
+  ;; 64-bit words, so we have to use the bare `4' here.  There was some
+  ;; talk on IRC about defining n-instruction-alignment-bytes, but the
+  ;; quick KLUDGE is to hardwire this for Alpha (since it's the only
+  ;; architecture which needs this at present).  --njf, 2004-09-02
+  (unless (zerop (rem offset 4))
     (error "Unaligned instruction?  offset=#x~X." offset))
   (sb!sys:without-gcing
    (let ((sap (truly-the system-area-pointer

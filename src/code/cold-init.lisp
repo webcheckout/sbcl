@@ -316,20 +316,21 @@ UNIX-like systems, UNIX-STATUS is used as the status code."
 #!+sb-show
 (defun hexstr (thing)
   (/noshow0 "entering HEXSTR")
-  (let ((addr (get-lisp-obj-address thing))
-	(str (make-string 10 :element-type 'base-char)))
+  (let* ((n-nibbles (* sb!vm:n-word-bytes 2))
+         (addr (get-lisp-obj-address thing))
+         (str (make-string (+ 2 n-nibbles) :element-type 'base-char)))
     (/noshow0 "ADDR and STR calculated")
     (setf (char str 0) #\0
 	  (char str 1) #\x)
     (/noshow0 "CHARs 0 and 1 set")
-    (dotimes (i 8)
+    (dotimes (i n-nibbles)
       (/noshow0 "at head of DOTIMES loop")
       (let* ((nibble (ldb (byte 4 0) addr))
 	     (chr (char "0123456789abcdef" nibble)))
 	(declare (type (unsigned-byte 4) nibble)
 		 (base-char chr))
 	(/noshow0 "NIBBLE and CHR calculated")
-	(setf (char str (- 9 i)) chr
+	(setf (char str (- (1+ n-nibbles) i)) chr
 	      addr (ash addr -4))))
     str))
 
