@@ -118,6 +118,12 @@
    "Object is not of type (SIGNED-BYTE 32).")
   (object-not-unsigned-byte-32
    "Object is not of type (UNSIGNED-BYTE 32).")
+  #!+#.(cl:if (cl:= 64 sb!vm:n-word-bits) '(and) '(or))
+  (object-not-signed-byte-64
+   "Object is not of type (SIGNED-BYTE 64).")
+  #!+#.(cl:if (cl:= 64 sb!vm:n-word-bits) '(and) '(or))
+  (object-not-unsigned-byte-64
+   "Object is not of type (UNSIGNED-BYTE 64).")
   (object-not-complex
    "Object is not of type COMPLEX.")
   (object-not-complex-rational

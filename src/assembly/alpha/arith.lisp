@@ -32,7 +32,6 @@
 
 			  (:temp temp non-descriptor-reg nl0-offset)
 			  (:temp temp2 non-descriptor-reg nl1-offset)
-                          (:temp temp3 non-descriptor-reg nl2-offset)
 			  (:temp lip interior-reg lip-offset)
 			  (:temp lra descriptor-reg lra-offset)
 			  (:temp nargs any-reg nargs-offset)
@@ -42,7 +41,7 @@
   (inst and temp fixnum-tag-mask temp)
   (inst bne temp DO-STATIC-FUN)
 
-  (inst move x temp3)                    ; save a copy of x
+  (inst move x temp2)                    ; save a copy of x
   (inst addq x y res)
 
   ;; check for overflow.  this is a long and complicated process because
@@ -50,18 +49,16 @@
   ;; prefering instead to provide instructions which trap to the OS on
   ;; overflow.  trapping to the OS would cause all sorts of problems, I
   ;; think, so we do things the long way.
-  (inst xor temp3 y temp)		; combine x and y's sign bit
-  (inst srl temp 63 temp)
-  (inst bne temp DONE)                 ; they were not equal, get out of here
+  (inst xor temp2 y temp)		; combine x and y's sign bit
+  (inst blt temp DONE)                  ; they were not equal, get out of here
 
   ;; even if the sign bits were equal, the addition might not have
   ;; overflowed.  check the sign bit of the result.
-  (inst xor res temp3 temp)		; combine res and x's sign bit
-  (inst srl temp 63 temp)
-  (inst beq temp DONE)			; they were equal, get out of here
+  (inst xor res temp2 temp)		; combine res and x's sign bit
+  (inst bge temp DONE)			; they were equal, get out of here
   
   ;; do the add the proper way
-  (inst sra temp3 n-fixnum-tag-bits temp)
+  (inst sra temp2 n-fixnum-tag-bits temp)
   (inst sra y n-fixnum-tag-bits temp2)
   (inst addq temp temp2 temp)
 
@@ -89,7 +86,6 @@
 
 			  (:temp temp non-descriptor-reg nl0-offset)
                           (:temp temp2 non-descriptor-reg nl1-offset)
-                          (:temp temp3 non-descriptor-reg nl2-offset)
 			  (:temp lip interior-reg lip-offset)
 			  (:temp lra descriptor-reg lra-offset)
 			  (:temp nargs any-reg nargs-offset)
@@ -99,21 +95,19 @@
   (inst and temp fixnum-tag-mask temp)
   (inst bne temp DO-STATIC-FUN)
 
-  (inst move x temp3)
+  (inst move x temp2)
   (inst subq x y res)
 
   ;; check for overflow
-  (inst xor y temp3 temp)               ; combine sign bits
-  (inst srl temp 63 temp)
-  (inst beq temp DONE)                  ; they were equal, get out of here
+  (inst xor y temp2 temp)               ; combine sign bits
+  (inst bge temp DONE)                  ; they were equal, get out of here
 
   ;; check the sign bit of the result
-  (inst xor res temp3 temp)		; combine sign bits
-  (inst srl temp 63 temp)
-  (inst beq temp DONE)			; they were equal, get out of here
+  (inst xor res temp2 temp)		; combine sign bits
+  (inst bge temp DONE)			; they were equal, get out of here
 
   ;; do the subtract the proper way
-  (inst sra temp3 n-fixnum-tag-bits temp)
+  (inst sra temp2 n-fixnum-tag-bits temp)
   (inst sra y n-fixnum-tag-bits temp2)
   (inst subq temp temp2 temp)
 

@@ -187,7 +187,7 @@ call_into_c:
 	stq	reg_CFP, current_control_frame_pointer
 
 	/* Mark us as in C land. */
-	stl	reg_CSP, foreign_function_call_active
+	stq	reg_CSP, foreign_function_call_active
 
 	/* Were we interrupted? */
 	subq	reg_ALLOC,1,reg_ALLOC

@@ -282,6 +282,18 @@
 	 :datum object
 	 :expected-type '(unsigned-byte 32)))
 
+#!+#.(cl:if (cl:= 64 sb!vm:n-word-bits) '(and) '(or))
+(deferr object-not-signed-byte-64-error (object)
+  (error 'type-error
+	 :datum object
+	 :expected-type '(signed-byte 64)))
+
+#!+#.(cl:if (cl:= 64 sb!vm:n-word-bits) '(and) '(or))
+(deferr object-not-unsigned-byte-64-error (object)
+  (error 'type-error
+	 :datum object
+	 :expected-type '(unsigned-byte 64)))
+
 (macrolet
     ((define-simple-array-internal-errors ()
 	 `(progn
