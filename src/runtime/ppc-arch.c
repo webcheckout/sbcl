@@ -31,6 +31,18 @@
 #define PT_DSISR	42
 #endif
 
+void 
+arch_set_pseudo_atomic_interrupted(os_context_t *context)
+{
+#ifdef LISP_FEATURE_GENCGC
+    dynamic_space_free_pointer =
+	((int) dynamic_space_free_pointer) + PSEUDO_ATOMIC_INTERRUPTED_BIAS;
+#else    
+    *os_context_register_addr(context,reg_NL3) 
+	+= PSEUDO_ATOMIC_INTERRUPTED_BIAS;
+#endif
+}
+
 void arch_init() {
 }
 
@@ -72,16 +84,11 @@ arch_internal_error_arguments(os_context_t *context)
 boolean 
 arch_pseudo_atomic_atomic(os_context_t *context)
 {
+#ifdef LISP_FEATURE_GENCGC
+    return ((unsigned long) dynamic_space_free_pointer & 4);
+#else
     return ((*os_context_register_addr(context,reg_ALLOC)) & 4);
-}
-
-#define PSEUDO_ATOMIC_INTERRUPTED_BIAS 0x7f000000
-
-void 
-arch_set_pseudo_atomic_interrupted(os_context_t *context)
-{
-    *os_context_register_addr(context,reg_NL3) 
-	+= PSEUDO_ATOMIC_INTERRUPTED_BIAS;
+#endif
 }
 
 unsigned long 
@@ -254,3 +261,107 @@ ppc_flush_icache(os_vm_address_t address, os_vm_size_t length)
     address += 32;
   }
 }
+
+#ifdef GENCGC
+/*
+ * Return non-zero if the instruction is a trap 31 instruction
+ */
+
+boolean allocation_trap_p(struct sigcontext *context)
+{
+    int result;
+    unsigned int* pc;
+    unsigned int or_inst;
+    int trapno;
+  
+    result = 0;
+  
+    /*
+     * Make sure this is a trap 31 instruction preceeded by an OR
+     * instruction.
+     */
+
+    pc = os_context_pc_addr(context);
+  
+    if (trap_inst_p(pc, &trapno) && (trapno == 31)) {
+	/* Got the trap.  Is it preceeded by an ORI instruction? */
+	or_inst = pc[-1];
+	if (or_inst >> 26 == 24) {
+	    result = 1;
+	} else {
+	    fprintf(stderr, "Whoa!!! Got an allocation trap not preceeded by an OR inst: 0x%08x!\n",
+		    or_inst);
+	}
+    }
+
+    return result;
+}
+#endif
+
+#ifdef GENCGC
+void handle_allocation_trap(struct sigcontext *context)
+{
+    unsigned int* pc;
+    unsigned int or_inst;
+    int ra;
+    int size;
+    int immed;
+    int context_index;
+    boolean were_in_lisp;
+    char* memory;
+      
+    pc = (unsigned int*) os_context_pc_addr(context);
+    or_inst = pc[-1];
+
+    /*
+     * The instruction before this trap instruction had better be an OR
+     * instruction!
+     */
+
+    /*
+     * An OR instruction.  RA is the register we want to allocate to.
+     * If the immediate is 0, the size is in RS, otherwise it's in the
+     * immediate (FIXME: so we're limited to 64k fixed size
+     * allocations, is that a problem?)
+     */
+
+    ra = (or_inst >> 16) & 0x1f;
+      
+    immed = or_inst & 0xffff;
+
+    if (immed != 0) {
+	size = or_inst & 0xffff;
+    } else {
+	size = (or_inst >> 21) & 0x1f;
+	size = *os_context_register_addr(context, size);
+    }
+
+    /*
+     * I don't think it's possible for us NOT to be in lisp when we get
+     * here.  Remove this later?
+     */
+    were_in_lisp = !foreign_function_call_active;
+  
+    if (were_in_lisp) {
+	fake_foreign_function_call(context);
+    } else {
+	fprintf(stderr, "**** Whoa! allocation trap and we weren't in lisp!\n");
+    }
+  
+    /*
+     * Allocate some memory, store the memory address in RA.
+     */
+
+#if 0
+    fprintf(stderr, "Alloc %d to %s\n", size, lisp_register_names[rs1]);
+#endif
+  
+    memory = alloc(size);
+    *os_context_register_addr(context, ra) = memory;
+
+    if (were_in_lisp) {
+	undo_fake_foreign_function_call(context);
+    }
+  
+}
+#endif

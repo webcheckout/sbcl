@@ -45,11 +45,11 @@ pa_alloc(int bytes)
 {
     lispobj *result=0;
     struct thread *th=arch_os_get_current_thread();
-    SetSymbolValue(PSEUDO_ATOMIC_INTERRUPTED, make_fixnum(0),th);
-    SetSymbolValue(PSEUDO_ATOMIC_ATOMIC, make_fixnum(1),th);
+    clr_pseudo_atomic_interrupted(th);
+    set_pseudo_atomic_atomic(th);
     result=alloc(bytes);
-    SetSymbolValue(PSEUDO_ATOMIC_ATOMIC, make_fixnum(0),th);
-    if (SymbolValue(PSEUDO_ATOMIC_INTERRUPTED,th)) 
+    clr_pseudo_atomic_atomic(th);
+    if (get_pseudo_atomic_interrupted(th)) 
 	/* even if we gc at this point, the new allocation will be
 	 * protected from being moved, because result is on the c stack
 	 * and points to it */

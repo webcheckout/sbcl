@@ -1,10 +1,10 @@
 # -*- makefile -*-
-CFLAGS = -DDARWIN -Dppc -g -Wall -O3 -no-cpp-precomp
+CFLAGS = -DDARWIN -Dppc -g -Wall -no-cpp-precomp
 OS_SRC = bsd-os.c os-common.c ppc-darwin-os.c ppc-darwin-dlshim.c
 OS_LIBS = -lSystem -lc -lm
 
 # Avoid the dreaded gcc 3.3 prerelease tarpit of death!
-CC = gcc3
+CC = gcc
 
 ASSEM_SRC = ppc-assem.S ldso-stubs.S
 ARCH_SRC = ppc-arch.c
@@ -13,5 +13,5 @@ CPP = cpp -no-cpp-precomp
 
 OS_LINK_FLAGS = -dynamic -L$(HOME)/local/lib -L/sw/lib -L/opt/local/lib -L/usr/local/lib
 
-GC_SRC= cheneygc.c
+GC_SRC= gencgc.c
 

@@ -121,4 +121,36 @@ static inline void SetSymbolValue(u32 sym, lispobj val, void *thread);
  * a few more compiler warnings. -- WHN 2000-10-21 */
 typedef volatile void never_returns;
 
+/*
+ * Hide away the differences between x86 and other ports with regards
+ * to how to access allocation pointer, pseudo_atomic and binding
+ * stack.
+ */
+#if defined(LISP_FEATURE_X86)
+#define set_alloc_pointer(value)  SetSymbolValue(ALLOCATION_POINTER, value)
+#define get_alloc_pointer()       SymbolValue(ALLOCATION_POINTER)
+#define get_binding_stack_pointer(thread)     SymbolValue(BINDING_STACK_POINTER, thread)
+#define get_pseudo_atomic_atomic(thread)      SymbolValue(PSEUDO_ATOMIC_ATOMIC, thread)
+#define set_pseudo_atomic_atomic(thread)      SetSymbolValue(PSEUDO_ATOMIC_ATOMIC, make_fixnum(0), thread);
+#define clr_pseudo_atomic_atomic(thread)      SetSymbolValue(PSEUDO_ATOMIC_ATOMIC, make_fixnum(1));
+#define get_pseudo_atomic_interrupted(thread) SymbolValue(PSEUDO_ATOMIC_INTERRUPTED)
+#define clr_pseudo_atomic_interrupted(thread) SetSymbolValue(PSEUDO_ATOMIC_INTERRUPTED, make_fixnum(0))
+#else
+#define set_alloc_pointer(value)  (dynamic_space_free_pointer = (value))
+#define get_alloc_pointer()       (dynamic_space_free_pointer)
+#define get_binding_stack_pointer(thread)     (current_binding_stack_pointer)
+#define get_pseudo_atomic_atomic(thread) \
+     ((unsigned long)dynamic_space_free_pointer & 4)
+#define set_pseudo_atomic_atomic(thread) \
+     (dynamic_space_free_pointer \
+       = (lispobj*) ((unsigned long)dynamic_space_free_pointer | 4))
+#define clr_pseudo_atomic_atomic(thread) \
+     (dynamic_space_free_pointer \
+       = (lispobj*) ((unsigned long) dynamic_space_free_pointer & ~4))
+#define get_pseudo_atomic_interrupted(thread) ((unsigned long) dynamic_space_free_pointer & 1)
+#define clr_pseudo_atomic_interrupted(thread) \
+     (dynamic_space_free_pointer \
+       = (lispobj*) ((unsigned long) dynamic_space_free_pointer & ~1))
+#endif
+
 #endif /* _SBCL_RUNTIME_H_ */

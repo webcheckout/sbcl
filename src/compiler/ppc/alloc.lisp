@@ -36,7 +36,7 @@
 	     (let* ((cons-cells (if star (1- num) num))
 		    (alloc (* (pad-data-block cons-size) cons-cells)))
 	       (pseudo-atomic (pa-flag)
-		 (allocation res alloc list-pointer-lowtag)
+		 (allocation res alloc list-pointer-lowtag :temp-tn temp)
 		 (move ptr res)
 		 (dotimes (i (1- cons-cells))
 		   (storew (maybe-load (tn-ref-tn things)) ptr
@@ -83,7 +83,7 @@
       ;; pseudo-atomic, because oring in other-pointer-lowtag just adds
       ;; it right back.
       (inst add size boxed unboxed)
-      (allocation result size other-pointer-lowtag)
+      (allocation result size other-pointer-lowtag :temp-tn ndescr)
       (inst slwi ndescr boxed (- n-widetag-bits word-shift))
       (inst ori ndescr ndescr code-header-widetag)
       (storew ndescr result 0 other-pointer-lowtag)
@@ -116,7 +116,7 @@
     (let ((size (+ length closure-info-offset)))
       (pseudo-atomic (pa-flag)
 	(allocation result (pad-data-block size)
-		    fun-pointer-lowtag)
+		    fun-pointer-lowtag :temp-tn temp)
 	(inst lr temp (logior (ash (1- size) n-widetag-bits) closure-header-widetag))
 	(storew temp result 0 fun-pointer-lowtag)))
     ;(inst lis temp (ash 18 10))
@@ -154,7 +154,7 @@
   (:temporary (:sc non-descriptor-reg :offset nl3-offset) pa-flag)
   (:generator 4
     (pseudo-atomic (pa-flag)
-      (allocation result (pad-data-block words) lowtag)
+      (allocation result (pad-data-block words) lowtag :temp-tn temp)
       (when type
 	(inst lr temp (logior (ash (1- words) n-widetag-bits) type))
 	(storew temp result 0 lowtag)))))
@@ -166,6 +166,7 @@
   (:ignore name)
   (:results (result :scs (descriptor-reg)))
   (:temporary (:scs (any-reg)) bytes header)
+  (:temporary (:sc non-descriptor-reg) temp)
   (:temporary (:sc non-descriptor-reg :offset nl3-offset) pa-flag)
   (:generator 6
     (inst addi bytes extra (* (1+ words) n-word-bytes))
@@ -173,5 +174,5 @@
     (inst addi header header (+ (ash -2 n-widetag-bits) type))
     (inst clrrwi bytes bytes n-lowtag-bits)
     (pseudo-atomic (pa-flag)
-      (allocation result bytes lowtag)
+      (allocation result bytes lowtag :temp-tn temp)
       (storew header result 0 lowtag))))

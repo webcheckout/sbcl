@@ -453,6 +453,7 @@ maybe_defer_handler(void *handler, struct interrupt_data *data,
     }
     return 0;
 }
+
 static void
 store_signal_data_for_later (struct interrupt_data *data, void *handler,
 			     int signal, 

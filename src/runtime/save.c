@@ -144,17 +144,19 @@ save(char *filename, lispobj init_function)
 		 STATIC_CORE_SPACE_ID,
 		 (lispobj *)STATIC_SPACE_START,
 		 (lispobj *)SymbolValue(STATIC_SPACE_FREE_POINTER,0));
+
+#ifdef LISP_FEATURE_GENCGC
+    /* Flush the current_region, updating the tables. */
+    gc_alloc_update_all_page_tables();
+    update_dynamic_space_free_pointer();
+#endif
+
 #ifdef reg_ALLOC
     output_space(file,
 		 DYNAMIC_CORE_SPACE_ID,
 		 (lispobj *)current_dynamic_space,
 		 dynamic_space_free_pointer);
 #else
-#ifdef LISP_FEATURE_GENCGC
-    /* Flush the current_region, updating the tables. */
-    gc_alloc_update_all_page_tables();
-    update_x86_dynamic_space_free_pointer();
-#endif
     output_space(file,
 		 DYNAMIC_CORE_SPACE_ID,
 		 (lispobj *)DYNAMIC_SPACE_START,

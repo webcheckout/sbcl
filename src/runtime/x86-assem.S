@@ -348,10 +348,10 @@ GNAME(do_pending_interrupt):
 /* FIXME whether this is still faster than using the OS's bzero or
  * equivalent, we don't know */
 	.text
-	.globl	GNAME(i586_bzero)
-	.type	GNAME(i586_bzero),@function
+	.globl	GNAME(fast_bzero)
+	.type	GNAME(fast_bzero),@function
 	.align	align_4byte,0x90
-GNAME(i586_bzero):
+GNAME(fast_bzero):
 	movl	4(%esp),%edx	# Load the start address.
 	movl	8(%esp),%eax	# Load the number of bytes.
 	fldz
@@ -361,7 +361,7 @@ l1:	fstl	0(%edx)
 	jnz	l1
 	fstp	%st(0)
 	ret
-	.size	GNAME(i586_bzero),.-GNAME(i586_bzero)
+	.size	GNAME(fast_bzero),.-GNAME(fast_bzero)
 #endif	
 
 

@@ -1,11 +1,13 @@
 #if defined DARWIN
 #if defined LANGUAGE_ASSEMBLY
 #define REG(num) r##num
+#define FPREG(num) f##num
 #else
 #define REG(num) num
 #endif
 #else
 #define REG(num) num
+#define FPREG(num) num
 #endif
 
 #define NREGS 32

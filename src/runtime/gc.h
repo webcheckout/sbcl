@@ -27,6 +27,10 @@ extern void gc_init_tables(void);
 extern void set_auto_gc_trigger(os_vm_size_t usage);
 extern void clear_auto_gc_trigger(void);
 
+#ifndef LISP_FEATURE_X86
+void scavenge_interrupt_contexts(void);
+#endif
+
 extern int maybe_gc_pending;
 extern int gc_thread_pid;
 #endif /* _GC_H_ */

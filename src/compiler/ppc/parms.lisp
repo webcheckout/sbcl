@@ -133,6 +133,8 @@
   list
   instance)
 
+(defconstant allocation-trap 31)
+
 (defenum (:prefix trace-table-)
   normal
   call-site
@@ -182,6 +184,13 @@
     sb!unix::*interrupts-enabled*
     sb!unix::*interrupt-pending*
 
+    ;; Gencgc
+    #+gencgc
+    *current-region-free-pointer*
+    #+gencgc
+    *current-region-end-addr*
+    #+gencgc
+    *scavenge-read-only-space*
 
     ))
 

@@ -648,7 +648,7 @@ apply_code_fixups_during_purify(struct code *old_code, struct code *new_code)
     if ((fixups==0) ||
 	(fixups==UNBOUND_MARKER_WIDETAG) ||
 	!is_lisp_pointer(fixups)) {
-#ifdef LISP_FEATURE_GENCGC
+#ifdef LISP_FEATURE_X86
 	/* Check for a possible errors. */
 	sniff_code_object(new_code,displacement);
 #endif
@@ -696,7 +696,7 @@ apply_code_fixups_during_purify(struct code *old_code, struct code *new_code)
     /* No longer need the fixups. */
     new_code->constants[0] = 0;
 
-#ifdef LISP_FEATURE_GENCGC
+#ifdef LISP_FEATURE_X86
     /* Check for possible errors. */
     sniff_code_object(new_code,displacement);
 #endif
@@ -1347,7 +1347,7 @@ purify(lispobj static_roots, lispobj read_only_roots)
 
 #if defined(LISP_FEATURE_X86)
     dynamic_space_free_pointer =
-      (lispobj*)SymbolValue(ALLOCATION_POINTER,0);
+	(lispobj*)get_alloc_pointer();
 #endif
 
     read_only_end = read_only_free =
@@ -1404,7 +1404,7 @@ purify(lispobj static_roots, lispobj read_only_roots)
 	  all_threads->control_stack_start,
 	  0);
 #else
-#ifdef LISP_FEATURE_GENCGC
+#ifdef LISP_FEATURE_X86
     pscav_i386_stack();
 #endif
 #endif
@@ -1421,7 +1421,7 @@ purify(lispobj static_roots, lispobj read_only_roots)
 #else
     for_each_thread(thread) {
 	pscav( (lispobj *)thread->binding_stack_start,
-	       (lispobj *)SymbolValue(BINDING_STACK_POINTER,thread) -
+	       (lispobj *)get_binding_stack_pointer(thread) -
 	       (lispobj *)thread->binding_stack_start,
 	  0);
 	pscav( (lispobj *) (thread+1),
@@ -1505,15 +1505,13 @@ purify(lispobj static_roots, lispobj read_only_roots)
     SetSymbolValue(READ_ONLY_SPACE_FREE_POINTER, (lispobj)read_only_free,0);
     SetSymbolValue(STATIC_SPACE_FREE_POINTER, (lispobj)static_free,0);
 
-#if !defined(LISP_FEATURE_X86)
-    dynamic_space_free_pointer = current_dynamic_space;
+#if !defined(LISP_FEATURE_GENCGC)
     set_auto_gc_trigger(bytes_consed_between_gcs);
 #else
-#if defined LISP_FEATURE_GENCGC
+#ifndef LISP_FEATURE_X86
+    dynamic_space_free_pointer = current_dynamic_space;
+#endif    
     gc_free_heap();
-#else
-#error unsupported case /* in CMU CL, was "ibmrt using GC" */
-#endif
 #endif
 
 #ifdef PRINTNOISE

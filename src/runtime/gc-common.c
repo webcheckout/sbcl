@@ -340,7 +340,7 @@ trans_code(struct code *code)
     }
     os_flush_icache((os_vm_address_t) (((int *)new_code) + nheader_words),
 		    ncode_words * sizeof(int));
-#ifdef LISP_FEATURE_GENCGC
+#ifdef LISP_FEATURE_X86
     gencgc_apply_code_fixups(code, new_code);
 #endif
     return new_code;
@@ -1442,8 +1442,135 @@ void scan_weak_pointers(void)
 	}
     }
 }
+#ifndef LISP_FEATURE_X86
+/* scavenging interrupt contexts */
+
+extern struct interrupt_data * global_interrupt_data;
+
+static int boxed_registers[] = BOXED_REGISTERS;
+
+void
+scavenge_interrupt_context(os_context_t *context)
+{
+    int i;
+#ifdef reg_LIP
+    unsigned long lip;
+    unsigned long lip_offset;
+    int lip_register_pair;
+#endif
+    unsigned long pc_code_offset;
+#ifdef ARCH_HAS_LINK_REGISTER
+    unsigned long lr_code_offset;
+#endif
+#ifdef ARCH_HAS_NPC_REGISTER
+    unsigned long npc_code_offset;
+#endif
+#ifdef DEBUG_SCAVENGE_VERBOSE
+    fprintf(stderr, "Scavenging interrupt context at 0x%x\n",context);
+#endif
+    /* Find the LIP's register pair and calculate its offset */
+    /* before we scavenge the context. */
+#ifdef reg_LIP
+    lip = *os_context_register_addr(context, reg_LIP);
+    /*  0x7FFFFFFF or 0x7FFFFFFFFFFFFFFF ? */
+    lip_offset = 0x7FFFFFFF;
+    lip_register_pair = -1;
+    for (i = 0; i < (sizeof(boxed_registers) / sizeof(int)); i++) {
+	unsigned long reg;
+	long offset;
+	int index;
+
+	index = boxed_registers[i];
+	reg = *os_context_register_addr(context, index);
+	/* would be using PTR if not for integer length issues */
+	if ((reg & ~((1L<<N_LOWTAG_BITS)-1)) <= lip) {
+	    offset = lip - reg;
+	    if (offset < lip_offset) {
+		lip_offset = offset;
+		lip_register_pair = index;
+	    }
+	}
+    }
+#endif /* reg_LIP */
+
+    /* Compute the PC's offset from the start of the CODE */
+    /* register. */
+    pc_code_offset =
+	*os_context_pc_addr(context) - 
+	*os_context_register_addr(context, reg_CODE);
+#ifdef ARCH_HAS_NPC_REGISTER
+    npc_code_offset =
+	*os_context_npc_addr(context) - 
+	*os_context_register_addr(context, reg_CODE);
+#endif 
+#ifdef ARCH_HAS_LINK_REGISTER
+    lr_code_offset =
+	*os_context_lr_addr(context) - 
+	*os_context_register_addr(context, reg_CODE);
+#endif
+	       
+    /* Scavenge all boxed registers in the context. */
+    for (i = 0; i < (sizeof(boxed_registers) / sizeof(int)); i++) {
+	int index;
+	lispobj foo;
+		
+	index = boxed_registers[i];
+	foo = *os_context_register_addr(context,index);
+	scavenge((lispobj *) &foo, 1);
+	*os_context_register_addr(context,index) = foo;
+
+	/* this is unlikely to work as intended on bigendian
+	 * 64 bit platforms */
+
+	scavenge((lispobj *)
+		 os_context_register_addr(context, index), 1);
+    }
+
+#ifdef reg_LIP
+    /* Fix the LIP */
+    *os_context_register_addr(context, reg_LIP) =
+	*os_context_register_addr(context, lip_register_pair) + lip_offset;
+#endif /* reg_LIP */
+	
+    /* Fix the PC if it was in from space */
+    if (from_space_p(*os_context_pc_addr(context)))
+	*os_context_pc_addr(context) = 
+	    *os_context_register_addr(context, reg_CODE) + pc_code_offset;
+#ifdef ARCH_HAS_LINK_REGISTER
+    /* Fix the LR ditto; important if we're being called from 
+     * an assembly routine that expects to return using blr, otherwise
+     * harmless */
+    if (from_space_p(*os_context_lr_addr(context)))
+	*os_context_lr_addr(context) = 
+	    *os_context_register_addr(context, reg_CODE) + lr_code_offset;
+#endif
+
+#ifdef ARCH_HAS_NPC_REGISTER
+    if (from_space_p(*os_context_npc_addr(context)))
+	*os_context_npc_addr(context) = 
+	    *os_context_register_addr(context, reg_CODE) + npc_code_offset;
+#endif
+}
+
+void scavenge_interrupt_contexts(void)
+{
+    int i, index;
+    os_context_t *context;
+
+    struct thread *th=arch_os_get_current_thread();
+
+    index = fixnum_value(SymbolValue(FREE_INTERRUPT_CONTEXT_INDEX,0));
 
 
+#ifdef DEBUG_SCAVENGE_VERBOSE
+    fprintf(stderr, "%d interrupt contexts to scan\n",index);
+#endif
+    for (i = 0; i < index; i++) {
+	context = th->interrupt_contexts[i];
+	scavenge_interrupt_context(context); 
+    }
+}
+#endif
 
 /*
  * initialization
@@ -1588,7 +1715,7 @@ gc_init_tables(void)
     scavtab[COMPLEX_VECTOR_WIDETAG] = scav_boxed;
     scavtab[COMPLEX_ARRAY_WIDETAG] = scav_boxed;
     scavtab[CODE_HEADER_WIDETAG] = scav_code_header;
-#ifndef LISP_FEATURE_GENCGC	/* FIXME ..._X86 ? */
+#ifndef LISP_FEATURE_X86	/* FIXME ..._X86 ? */
     scavtab[SIMPLE_FUN_HEADER_WIDETAG] = scav_fun_header;
     scavtab[CLOSURE_FUN_HEADER_WIDETAG] = scav_fun_header;
     scavtab[RETURN_PC_HEADER_WIDETAG] = scav_return_pc_header;

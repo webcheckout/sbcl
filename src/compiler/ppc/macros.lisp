@@ -158,18 +158,67 @@
   ;; then or in the lowtag.
   ;; Normal allocation to the heap.
   `(let ((size ,size))
+     #-gencgc
      (if (logbitp (1- n-lowtag-bits) ,lowtag)
-	      (progn
-		(inst ori ,result-tn alloc-tn ,lowtag)
-		(if (numberp size)
-		    (inst addi alloc-tn alloc-tn size)
-		  (inst add alloc-tn alloc-tn size)))
-	      (progn
-		(inst clrrwi ,result-tn alloc-tn n-lowtag-bits)
-		(inst ori ,result-tn ,result-tn ,lowtag)
-		(if (numberp size)
-		    (inst addi alloc-tn alloc-tn size)
-		  (inst add alloc-tn alloc-tn size))))))
+	 (progn
+	   (inst ori ,result-tn alloc-tn ,lowtag)
+	   (if (numberp size)
+	       (inst addi alloc-tn alloc-tn size)
+	     (inst add alloc-tn alloc-tn size)))
+       (progn
+	 (inst clrrwi ,result-tn alloc-tn n-lowtag-bits)
+	 (inst ori ,result-tn ,result-tn ,lowtag)
+	 (if (numberp size)
+	     (inst addi alloc-tn alloc-tn size)
+	   (inst add alloc-tn alloc-tn size))))
+	 #+gencgc
+	  ;; The OR instruction MUST come just before the TRAP
+	  ;; instruction, because the C code depends on this to figure
+	  ;; out what to do.
+	  (without-scheduling ()
+	    (let ((done (gen-label))
+		  (full-alloc (gen-label)))
+	      ;; See if we can do an inline allocation.  The updated
+	      ;; free pointer should not point past the end of the
+	      ;; current region.  If it does, a full alloc needs to be
+	      ;; done.
+	      (load-symbol-value ,result-tn *current-region-free-pointer*)
+	      (load-symbol-value ,temp-tn *current-region-end-addr*)
+	      (if (numberp size)
+		  (inst addi ,result-tn ,size)
+		(inst add ,result-tn ,size))
+	      ;; Do we need to round up?  I hope not because result-tn
+	      ;; is descriptor!
+	      
+	      ;;(inst add ,result-tn vm:lowtag-mask)
+	      ;;(inst andn ,result-tn vm:lowtag-mask)
+	      
+	      ;; result-tn points to the new end of region.  Did we go
+	      ;; past the actual end of the region?  If so, we need a
+	      ;; full alloc.
+	      (inst cmpw ,result-tn ,temp-tn)
+	      (inst b :gt full-alloc)
+
+	      ;; Inline allocation worked, so update the free pointer
+	      ;; and go.  Should really do a swap instruction here to
+	      ;; swap memory with a register.
+	      (load-symbol-value ,temp-tn *current-region-free-pointer*)
+	      (store-symbol-value ,result-tn *current-region-free-pointer*)
+	      (move ,result-tn ,temp-tn)
+	      (inst b done)
+
+	      (emit-label full-alloc)
+	      ;; Full alloc via trap to the C allocator.  Tell the
+	      ;; allocator what the result-tn and size are, using the
+	      ;; OR instruction.  Then trap to the allocator.
+	      (if (numberp size)
+		  (inst ori ,result-tn zero-tn ,size)
+		(inst ori ,result-tn ,size 0))
+	      (inst t :t allocation-trap)
+	      
+	      (emit-label done)
+	      ;; Set lowtag appropriately
+	      (inst ori ,result-tn ,lowtag)))))
 
 (defmacro with-fixed-allocation ((result-tn flag-tn temp-tn type-code size)
 				 &body body)
@@ -181,7 +230,8 @@
   (once-only ((result-tn result-tn) (temp-tn temp-tn) (flag-tn flag-tn)
 	      (type-code type-code) (size size))
     `(pseudo-atomic (,flag-tn)
-       (allocation ,result-tn (pad-data-block ,size) other-pointer-lowtag)
+       (allocation ,result-tn (pad-data-block ,size) other-pointer-lowtag
+		   :temp-tn temp)
        (when ,type-code
 	 (inst lr ,temp-tn (logior (ash (1- ,size) n-widetag-bits) ,type-code))
 	 (storew ,temp-tn ,result-tn 0 other-pointer-lowtag))

@@ -86,9 +86,11 @@ extern struct page page_table[NUM_PAGES];
 
 void  gencgc_pickup_dynamic(void);
 
+#ifdef LISP_FEATURE_X86
 void sniff_code_object(struct code *code, unsigned displacement);
+#endif
 
-int  update_x86_dynamic_space_free_pointer(void);
+int  update_dynamic_space_free_pointer(void);
 void  gc_alloc_update_page_tables(int unboxed,
 				  struct alloc_region *alloc_region);
 void gc_alloc_update_all_page_tables(void);

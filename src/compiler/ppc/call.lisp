@@ -1123,7 +1123,7 @@ default-value-8
       (assemble ()
 	;; Allocate a cons (2 words) for each item.
 	(inst slwi temp count 1)
-	(allocation result temp list-pointer-lowtag)
+	(allocation result temp list-pointer-lowtag :temp-tn dst)
 	(move dst result)
 	(inst b enter)
 

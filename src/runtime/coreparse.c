@@ -21,6 +21,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <string.h>
 
 #ifdef irix
 #include <fcntl.h>
@@ -89,14 +90,8 @@ process_directory(int fd, u32 *ptr, int count)
 		lose("warning: core/runtime address mismatch: DYNAMIC_SPACE_START");
 	    }
 #endif
-/* FIXME: Should the conditional here be reg_ALLOC instead of
- *   defined(LISP_FEATURE_X86)
- * ? */
-#if defined(LISP_FEATURE_X86)
-	    SetSymbolValue(ALLOCATION_POINTER, (lispobj)free_pointer,0);
-#else
-	    dynamic_space_free_pointer = free_pointer;
-#endif
+	    set_alloc_pointer(free_pointer);
+
 	    /* For stop-and-copy GC, this will be whatever the GC was
 	     * using at the time. With GENCGC, this will always be
 	     * space 0. (We checked above that for GENCGC,

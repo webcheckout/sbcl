@@ -62,7 +62,7 @@ extern void undoably_install_low_level_interrupt_handler (int signal,
 extern unsigned long install_handler(int signal,
 				     void handler(int, siginfo_t*, void*));
 
-extern union interrupt_handler interrupt_handlers[NSIG];
+extern struct interrupt_data * global_interrupt_data;
 
 /* Set all blockable signals into *s. */
 void sigaddset_blockable(sigset_t *s);

@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <signal.h>
 #include <errno.h>
+#include <string.h>
 #include "runtime.h"
 #include "sbcl.h"
 #include "os.h"
@@ -87,7 +88,7 @@ boolean gencgc_unmap_zero = 1;
 #endif
 
 /* the minimum size (in bytes) for a large object*/
-unsigned large_object_size = 4 * 4096;
+unsigned large_object_size = 4 * PAGE_BYTES;
 
 /*
  * debugging
@@ -145,12 +146,6 @@ int from_space;
 int new_space;
 
 
-/* FIXME: It would be nice to use this symbolic constant instead of
- * bare 4096 almost everywhere. We could also use an assertion that
- * it's equal to getpagesize(). */
-
-#define PAGE_BYTES 4096
-
 /* An array of page structures is statically allocated.
  * This helps quickly map between an address its page structure.
  * NUM_PAGES is set from the size of the dynamic space. */
@@ -165,7 +160,7 @@ static void *heap_base = NULL;
 inline void *
 page_address(int page_num)
 {
-    return (heap_base + (page_num * 4096));
+    return (heap_base + (page_num * PAGE_BYTES));
 }
 
 /* Find the page index within the page_table for the given
@@ -176,7 +171,7 @@ find_page_index(void *addr)
     int index = addr-heap_base;
 
     if (index >= 0) {
-	index = ((unsigned int)index)/4096;
+	index = ((unsigned int)index)/PAGE_BYTES;
 	if (index < NUM_PAGES)
 	    return (index);
     }
@@ -352,7 +347,18 @@ static void
 print_generation_stats(int verbose) /* FIXME: should take FILE argument */
 {
     int i, gens;
-    int fpu_state[27];
+#ifdef LISP_FEATURE_X86
+#define FPU_STATE_SIZE 27
+  int fpu_state[FPU_STATE_SIZE];
+#elif defined(LISP_FEATURE_PPC)
+  /*
+   * 32 double precision FP registers, and the FP state register
+   * (which is actually only 32 bits wide, but we can afford another
+   * word on the stack, I hope...).
+   */
+#define FPU_STATE_SIZE (32 + 1)
+  double fpu_state[FPU_STATE_SIZE];
+#endif
 
     /* This code uses the FP instructions which may be set up for Lisp
      * so they need to be saved and reset for C. */
@@ -404,7 +410,7 @@ print_generation_stats(int verbose) /* FIXME: should take FILE argument */
 		i,
 		boxed_cnt, unboxed_cnt, large_boxed_cnt, large_unboxed_cnt,
 		generations[i].bytes_allocated,
-		(count_generation_pages(i)*4096
+		(count_generation_pages(i)*PAGE_BYTES
 		 - generations[i].bytes_allocated),
 		generations[i].gc_trigger,
 		count_write_protect_generation_pages(i),
@@ -495,7 +501,7 @@ static int gc_alloc_generation;
  * from space can be recognized. Therefore the generation of pages in
  * the region are set to gc_alloc_generation. To prevent another
  * allocation call using the same pages, all the pages in the region
- * are allocated, although they will initially be empty.
+ * Are allocated, although they will initially be empty.
  */
 static void
 gc_alloc_new_region(int nbytes, int unboxed, struct alloc_region *alloc_region)
@@ -524,8 +530,8 @@ gc_alloc_new_region(int nbytes, int unboxed, struct alloc_region *alloc_region)
 	    generations[gc_alloc_generation].alloc_start_page;
     }
     last_page=gc_find_freeish_pages(&first_page,nbytes,unboxed,alloc_region);
-    bytes_found=(4096 - page_table[first_page].bytes_used)
-	    + 4096*(last_page-first_page);
+    bytes_found=(PAGE_BYTES - page_table[first_page].bytes_used)
+	    + PAGE_BYTES*(last_page-first_page);
 
     /* Set up the alloc_region. */
     alloc_region->first_page = first_page;
@@ -573,9 +579,8 @@ gc_alloc_new_region(int nbytes, int unboxed, struct alloc_region *alloc_region)
     /* Bump up last_free_page. */
     if (last_page+1 > last_free_page) {
 	last_free_page = last_page+1;
-	SetSymbolValue(ALLOCATION_POINTER,
-		       (lispobj)(((char *)heap_base) + last_free_page*4096),
-		       0);
+	set_alloc_pointer(
+	    (lispobj)(((char *)heap_base) + last_free_page*PAGE_BYTES));
     }
     release_spinlock(&free_pages_lock);
     
@@ -591,8 +596,8 @@ gc_alloc_new_region(int nbytes, int unboxed, struct alloc_region *alloc_region)
 		 * word sizes. -- WHN 19991129 */
 		lose("The new region at %x is not zero.", p);
 	    }
+	}
     }
-}
 
 }
 
@@ -647,13 +652,13 @@ add_new_area(int first_page, int offset, int size)
 	gc_abort();
     }
 
-    new_area_start = 4096*first_page + offset;
+    new_area_start = PAGE_BYTES*first_page + offset;
 
     /* Search backwards for a prior area that this follows from. If
        found this will save adding a new area. */
     for (i = new_areas_index-1, c = 0; (i >= 0) && (c < 8); i--, c++) {
 	unsigned area_end =
-	    4096*((*new_areas)[i].page)
+	    PAGE_BYTES*((*new_areas)[i].page)
 	    + (*new_areas)[i].offset
 	    + (*new_areas)[i].size;
 	/*FSHOW((stderr,
@@ -748,8 +753,8 @@ gc_alloc_update_page_tables(int unboxed, struct alloc_region *alloc_region)
 	/* Calculate the number of bytes used in this page. This is not
 	 * always the number of new bytes, unless it was free. */
 	more = 0;
-	if ((bytes_used = (alloc_region->free_pointer - page_address(first_page)))>4096) {
-	    bytes_used = 4096;
+	if ((bytes_used = (alloc_region->free_pointer - page_address(first_page)))>PAGE_BYTES) {
+	    bytes_used = PAGE_BYTES;
 	    more = 1;
 	}
 	page_table[first_page].bytes_used = bytes_used;
@@ -775,8 +780,8 @@ gc_alloc_update_page_tables(int unboxed, struct alloc_region *alloc_region)
 	    /* Calculate the number of bytes used in this page. */
 	    more = 0;
 	    if ((bytes_used = (alloc_region->free_pointer
-			       - page_address(next_page)))>4096) {
-		bytes_used = 4096;
+			       - page_address(next_page)))>PAGE_BYTES) {
+		bytes_used = PAGE_BYTES;
 		more = 1;
 	    }
 	    page_table[next_page].bytes_used = bytes_used;
@@ -914,8 +919,8 @@ gc_alloc_large(int nbytes, int unboxed, struct alloc_region *alloc_region)
     /* Calc. the number of bytes used in this page. This is not
      * always the number of new bytes, unless it was free. */
     more = 0;
-    if ((bytes_used = nbytes+orig_first_page_bytes_used) > 4096) {
-	bytes_used = 4096;
+    if ((bytes_used = nbytes+orig_first_page_bytes_used) > PAGE_BYTES) {
+	bytes_used = PAGE_BYTES;
 	more = 1;
     }
     page_table[first_page].bytes_used = bytes_used;
@@ -937,12 +942,13 @@ gc_alloc_large(int nbytes, int unboxed, struct alloc_region *alloc_region)
 	page_table[next_page].large_object = large;
 
 	page_table[next_page].first_object_offset =
-	    orig_first_page_bytes_used - 4096*(next_page-first_page);
+	    orig_first_page_bytes_used - PAGE_BYTES*(next_page-first_page);
 
 	/* Calculate the number of bytes used in this page. */
 	more = 0;
-	if ((bytes_used=(nbytes+orig_first_page_bytes_used)-byte_cnt) > 4096) {
-	    bytes_used = 4096;
+	if ((bytes_used=(nbytes+orig_first_page_bytes_used)-byte_cnt) >
+	    PAGE_BYTES) {
+	    bytes_used = PAGE_BYTES;
 	    more = 1;
 	}
 	page_table[next_page].bytes_used = bytes_used;
@@ -963,8 +969,8 @@ gc_alloc_large(int nbytes, int unboxed, struct alloc_region *alloc_region)
     /* Bump up last_free_page */
     if (last_page+1 > last_free_page) {
 	last_free_page = last_page+1;
-	SetSymbolValue(ALLOCATION_POINTER,
-		       (lispobj)(((char *)heap_base) + last_free_page*4096),0);
+	set_alloc_pointer(
+	    (lispobj)(((char *)heap_base) + last_free_page*PAGE_BYTES));
     }
     release_spinlock(&free_pages_lock);
 
@@ -1013,7 +1019,7 @@ gc_find_freeish_pages(int *restart_page_ptr, int nbytes, int unboxed, struct all
 		   (page_table[first_page].large_object == 0) &&
 		   (gc_alloc_generation == 0) &&
 		   (page_table[first_page].gen == gc_alloc_generation) &&
-		   (page_table[first_page].bytes_used < (4096-32)) &&
+		   (page_table[first_page].bytes_used < (PAGE_BYTES-32)) &&
 		   (page_table[first_page].write_protected == 0) &&
 		   (page_table[first_page].dont_move == 0))
 		    break;
@@ -1031,7 +1037,7 @@ gc_find_freeish_pages(int *restart_page_ptr, int nbytes, int unboxed, struct all
 	gc_assert(page_table[first_page].write_protected == 0);
 
 	last_page = first_page;
-	bytes_found = 4096 - page_table[first_page].bytes_used;
+	bytes_found = PAGE_BYTES - page_table[first_page].bytes_used;
 	num_pages = 1;
 	while (((bytes_found < nbytes) 
 		|| (alloc_region && (num_pages < 2)))
@@ -1039,12 +1045,12 @@ gc_find_freeish_pages(int *restart_page_ptr, int nbytes, int unboxed, struct all
 	       && (page_table[last_page+1].allocated == FREE_PAGE)) {
 	    last_page++;
 	    num_pages++;
-	    bytes_found += 4096;
+	    bytes_found += PAGE_BYTES;
 	    gc_assert(page_table[last_page].write_protected == 0);
 	}
 
-	region_size = (4096 - page_table[first_page].bytes_used)
-	    + 4096*(last_page-first_page);
+	region_size = (PAGE_BYTES - page_table[first_page].bytes_used)
+	    + PAGE_BYTES*(last_page-first_page);
 
 	gc_assert(bytes_found == region_size);
 	restart_page = last_page + 1;
@@ -1258,23 +1264,24 @@ copy_large_object(lispobj object, int nwords)
 
 	next_page = first_page;
 	remaining_bytes = nwords*4;
-	while (remaining_bytes > 4096) {
+	while (remaining_bytes > PAGE_BYTES) {
 	    gc_assert(page_table[next_page].gen == from_space);
 	    gc_assert(page_table[next_page].allocated == BOXED_PAGE);
 	    gc_assert(page_table[next_page].large_object);
 	    gc_assert(page_table[next_page].first_object_offset==
-		      -4096*(next_page-first_page));
-	    gc_assert(page_table[next_page].bytes_used == 4096);
+		      -PAGE_BYTES*(next_page-first_page));
+	    gc_assert(page_table[next_page].bytes_used == PAGE_BYTES);
 
 	    page_table[next_page].gen = new_space;
 
 	    /* Remove any write-protection. We should be able to rely
 	     * on the write-protect flag to avoid redundant calls. */
 	    if (page_table[next_page].write_protected) {
-		os_protect(page_address(next_page), 4096, OS_VM_PROT_ALL);
+		os_protect(page_address(next_page), PAGE_BYTES,
+			   OS_VM_PROT_ALL);
 		page_table[next_page].write_protected = 0;
 	    }
-	    remaining_bytes -= 4096;
+	    remaining_bytes -= PAGE_BYTES;
 	    next_page++;
 	}
 
@@ -1295,12 +1302,12 @@ copy_large_object(lispobj object, int nwords)
 
 	/* Free any remaining pages; needs care. */
 	next_page++;
-	while ((old_bytes_used == 4096) &&
+	while ((old_bytes_used == PAGE_BYTES) &&
 	       (page_table[next_page].gen == from_space) &&
 	       (page_table[next_page].allocated == BOXED_PAGE) &&
 	       page_table[next_page].large_object &&
 	       (page_table[next_page].first_object_offset ==
-		-(next_page - first_page)*4096)) {
+		-(next_page - first_page)*PAGE_BYTES)) {
 	    /* Checks out OK, free the page. Don't need to bother zeroing
 	     * pages as this should have been done before shrinking the
 	     * object. These pages shouldn't be write-protected as they
@@ -1423,18 +1430,18 @@ copy_large_unboxed_object(lispobj object, int nwords)
 
 	next_page = first_page;
 	remaining_bytes = nwords*4;
-	while (remaining_bytes > 4096) {
+	while (remaining_bytes > PAGE_BYTES) {
 	    gc_assert(page_table[next_page].gen == from_space);
 	    gc_assert((page_table[next_page].allocated == UNBOXED_PAGE)
 		      || (page_table[next_page].allocated == BOXED_PAGE));
 	    gc_assert(page_table[next_page].large_object);
 	    gc_assert(page_table[next_page].first_object_offset==
-		      -4096*(next_page-first_page));
-	    gc_assert(page_table[next_page].bytes_used == 4096);
+		      -PAGE_BYTES*(next_page-first_page));
+	    gc_assert(page_table[next_page].bytes_used == PAGE_BYTES);
 
 	    page_table[next_page].gen = new_space;
 	    page_table[next_page].allocated = UNBOXED_PAGE;
-	    remaining_bytes -= 4096;
+	    remaining_bytes -= PAGE_BYTES;
 	    next_page++;
 	}
 
@@ -1455,13 +1462,13 @@ copy_large_unboxed_object(lispobj object, int nwords)
 
 	/* Free any remaining pages; needs care. */
 	next_page++;
-	while ((old_bytes_used == 4096) &&
+	while ((old_bytes_used == PAGE_BYTES) &&
 	       (page_table[next_page].gen == from_space) &&
 	       ((page_table[next_page].allocated == UNBOXED_PAGE)
 		|| (page_table[next_page].allocated == BOXED_PAGE)) &&
 	       page_table[next_page].large_object &&
 	       (page_table[next_page].first_object_offset ==
-		-(next_page - first_page)*4096)) {
+		-(next_page - first_page)*PAGE_BYTES)) {
 	    /* Checks out OK, free the page. Don't need to both zeroing
 	     * pages as this should have been done before shrinking the
 	     * object. These pages shouldn't be write-protected, even if
@@ -1738,9 +1745,11 @@ gencgc_apply_code_fixups(struct code *old_code, struct code *new_code)
      * will be an other pointer if it is valid. */
     if ((fixups == 0) || (fixups == UNBOUND_MARKER_WIDETAG) ||
 	!is_lisp_pointer(fixups)) {
+#ifdef LISP_FEATURE_X86
 	/* Check for possible errors. */
 	if (check_code_fixups)
 	    sniff_code_object(new_code, displacement);
+#endif
 
 	/*fprintf(stderr,"Fixups for code object not found!?\n");
 	  fprintf(stderr,"*** Compiled code object at %x: header_words=%d code_words=%d .\n",
@@ -1838,7 +1847,13 @@ trans_unboxed_large(lispobj object)
 
 
 /* FIXME: What does this mean? */
-int gencgc_hash = 1;
+/* And why should it be off on PPC but on on x86? */
+int gencgc_hash =
+#ifdef LISP_FEATURE_PPC
+    0;
+#else
+    1;
+#endif
 
 static int
 scav_vector(lispobj *where, lispobj object)
@@ -1879,10 +1894,17 @@ scav_vector(lispobj *where, lispobj object)
     }
     hash_table = (lispobj *)native_pointer(where[2]);
     /*FSHOW((stderr,"/hash_table = %x\n", hash_table));*/
-    if (widetag_of(hash_table[0]) != INSTANCE_HEADER_WIDETAG) {
+    /* FIXME: I have absolutely no idea why this can be a forwarding
+     * pointer on PPC but not x86, nor do I know whether this is
+     * PPC-specific or a non-x86 thing. - Patrik */
+    if (widetag_of(hash_table[0]) != INSTANCE_HEADER_WIDETAG
+#ifndef LISP_FEATURE_PPC
+	&& !forwarding_pointer_p((lispobj *)hash_table[0]))
+#endif
+	)
+    {
 	lose("hash table not instance (%x at %x)", hash_table[0], hash_table);
     }
-
     /* Scavenge element 1, which should be some internal symbol that
      * the hash table code reserves for marking empty slots. */
     scavenge(where+3, 1);
@@ -1891,8 +1913,15 @@ scav_vector(lispobj *where, lispobj object)
     }
     empty_symbol = where[3];
     /* fprintf(stderr,"* empty_symbol = %x\n", empty_symbol);*/
+    /* Again, I have no idea why this can be a forwarding pointer on
+     * PPC but not on x86, but that's the way it is. - Patrik*/
     if (widetag_of(*(lispobj *)native_pointer(empty_symbol)) !=
-	SYMBOL_HEADER_WIDETAG) {
+	SYMBOL_HEADER_WIDETAG
+#ifndef LISP_FEATURE_PPC
+	&& !forwarding_pointer_p((lispobj *)hash_table[0]))
+#endif
+	)
+    {
 	lose("not a symbol where empty-hash-table-slot symbol expected: %x",
 	     *(lispobj *)native_pointer(empty_symbol));
     }
@@ -1902,9 +1931,14 @@ scav_vector(lispobj *where, lispobj object)
     scavenge(hash_table, 16);
 
     /* Cross-check the kv_vector. */
+    /* Here we go again... I'm beginning to suspect this whole
+     * function is broken on PPC. - Patrik
+     */
+#ifndef LISP_FEATURE_PPC
     if (where != (lispobj *)native_pointer(hash_table[9])) {
 	lose("hash_table table!=this table %x", hash_table[9]);
     }
+#endif
 
     /* WEAK-P */
     weak_p_obj = hash_table[10];
@@ -2474,21 +2508,21 @@ maybe_adjust_large_object(lispobj *where)
 
     next_page = first_page;
     remaining_bytes = nwords*4;
-    while (remaining_bytes > 4096) {
+    while (remaining_bytes > PAGE_BYTES) {
 	gc_assert(page_table[next_page].gen == from_space);
 	gc_assert((page_table[next_page].allocated == BOXED_PAGE)
 		  || (page_table[next_page].allocated == UNBOXED_PAGE));
 	gc_assert(page_table[next_page].large_object);
 	gc_assert(page_table[next_page].first_object_offset ==
-		  -4096*(next_page-first_page));
-	gc_assert(page_table[next_page].bytes_used == 4096);
+		  -PAGE_BYTES*(next_page-first_page));
+	gc_assert(page_table[next_page].bytes_used == PAGE_BYTES);
 
 	page_table[next_page].allocated = boxed;
 
 	/* Shouldn't be write-protected at this stage. Essential that the
 	 * pages aren't. */
 	gc_assert(!page_table[next_page].write_protected);
-	remaining_bytes -= 4096;
+	remaining_bytes -= PAGE_BYTES;
 	next_page++;
     }
 
@@ -2510,13 +2544,13 @@ maybe_adjust_large_object(lispobj *where)
 
     /* Free any remaining pages; needs care. */
     next_page++;
-    while ((old_bytes_used == 4096) &&
+    while ((old_bytes_used == PAGE_BYTES) &&
 	   (page_table[next_page].gen == from_space) &&
 	   ((page_table[next_page].allocated == UNBOXED_PAGE)
 	    || (page_table[next_page].allocated == BOXED_PAGE)) &&
 	   page_table[next_page].large_object &&
 	   (page_table[next_page].first_object_offset ==
-	    -(next_page - first_page)*4096)) {
+	    -(next_page - first_page)*PAGE_BYTES)) {
 	/* It checks out OK, free the page. We don't need to both zeroing
 	 * pages as this should have been done before shrinking the
 	 * object. These pages shouldn't be write protected as they
@@ -2542,6 +2576,7 @@ maybe_adjust_large_object(lispobj *where)
     return;
 }
 
+#ifdef LISP_FEATURE_X86
 /* Take a possible pointer to a Lisp object and mark its page in the
  * page_table so that it will not be relocated during a GC.
  *
@@ -2609,7 +2644,7 @@ preserve_pointer(void *addr)
     while (page_table[first_page].first_object_offset != 0) {
 	--first_page;
 	/* Do some checks. */
-	gc_assert(page_table[first_page].bytes_used == 4096);
+	gc_assert(page_table[first_page].bytes_used == PAGE_BYTES);
 	gc_assert(page_table[first_page].gen == from_space);
 	gc_assert(page_table[first_page].allocated == region_allocation);
     }
@@ -2659,8 +2694,8 @@ preserve_pointer(void *addr)
 	gc_assert(!page_table[i].write_protected);
 
 	/* Check whether this is the last page in this contiguous block.. */
-	if ((page_table[i].bytes_used < 4096)
-	    /* ..or it is 4096 and is the last in the block */
+	if ((page_table[i].bytes_used < PAGE_BYTES)
+	    /* ..or it is full and is the last in the block */
 	    || (page_table[i+1].allocated == FREE_PAGE)
 	    || (page_table[i+1].bytes_used == 0) /* next page free */
 	    || (page_table[i+1].gen != from_space) /* diff. gen */
@@ -2671,6 +2706,7 @@ preserve_pointer(void *addr)
     /* Check that the page is now static. */
     gc_assert(page_table[addr_page_index].dont_move != 0);
 }
+#endif
 
 /* If the given page is not write-protected, then scan it for pointers
  * to younger generations or the top temp. generation, if no
@@ -2734,7 +2770,7 @@ update_page_write_prot(int page)
 	/*FSHOW((stderr, "/write-protecting page %d gen %d\n", page, gen));*/
 
 	os_protect((void *)page_addr,
-		   4096,
+		   PAGE_BYTES,
 		   OS_VM_PROT_READ|OS_VM_PROT_EXECUTE);
 
 	/* Note the page as protected in the page tables. */
@@ -2806,8 +2842,8 @@ scavenge_generation(int generation)
 	    for (last_page = i; ; last_page++)
 		/* Check whether this is the last page in this contiguous
 		 * block. */
-		if ((page_table[last_page].bytes_used < 4096)
-		    /* Or it is 4096 and is the last in the block */
+		if ((page_table[last_page].bytes_used < PAGE_BYTES)
+		    /* Or it is full and is the last in the block */
 		    || (!(page_table[last_page+1].allocated & BOXED_PAGE))
 		    || (page_table[last_page+1].bytes_used == 0)
 		    || (page_table[last_page+1].gen != generation)
@@ -2828,7 +2864,7 @@ scavenge_generation(int generation)
 #endif
 		    {
 			scavenge(page_address(i), (page_table[last_page].bytes_used
-						   + (last_page-i)*4096)/4);
+						   + (last_page-i)*PAGE_BYTES)/4);
 
 			/* Now scan the pages and write protect those
 			 * that don't have pointers to younger
@@ -2928,8 +2964,8 @@ scavenge_newspace_generation_one_scan(int generation)
 	    for (last_page = i; ;last_page++) {
 		/* Check whether this is the last page in this
 		 * contiguous block */
-		if ((page_table[last_page].bytes_used < 4096)
-		    /* Or it is 4096 and is the last in the block */
+		if ((page_table[last_page].bytes_used < PAGE_BYTES)
+		    /* Or it is full and is the last in the block */
 		    || (!(page_table[last_page+1].allocated & BOXED_PAGE))
 		    || (page_table[last_page+1].bytes_used == 0)
 		    || (page_table[last_page+1].gen != generation)
@@ -2958,7 +2994,7 @@ scavenge_newspace_generation_one_scan(int generation)
 				- page_table[i].first_object_offset)/4;
 		    else
 			size = (page_table[last_page].bytes_used
-				+ (last_page-i)*4096
+				+ (last_page-i)*PAGE_BYTES
 				- page_table[i].first_object_offset)/4;
 		    
 		    {
@@ -3125,7 +3161,7 @@ unprotect_oldspace(void)
 	    /* Remove any write-protection. We should be able to rely
 	     * on the write-protect flag to avoid redundant calls. */
 	    if (page_table[i].write_protected) {
-		os_protect(page_start, 4096, OS_VM_PROT_ALL);
+		os_protect(page_start, PAGE_BYTES, OS_VM_PROT_ALL);
 		page_table[i].write_protected = 0;
 	    }
 	}
@@ -3136,7 +3172,12 @@ unprotect_oldspace(void)
  * assumes that all objects have been copied or promoted to an older
  * generation. Bytes_allocated and the generation bytes_allocated
  * counter are updated. The number of bytes freed is returned. */
-extern void i586_bzero(void *addr, int nbytes);
+#ifdef LISP_FEATURE_X86
+extern void fast_bzero(void *addr, int nbytes);
+#else
+#define fast_bzero(addr, nbytes)	memset(addr, 0, nbytes)
+#endif
+
 static int
 free_oldspace(void)
 {
@@ -3173,7 +3214,7 @@ free_oldspace(void)
 		void  *page_start = (void *)page_address(last_page);
 	
 		if (page_table[last_page].write_protected) {
-		    os_protect(page_start, 4096, OS_VM_PROT_ALL);
+		    os_protect(page_start, PAGE_BYTES, OS_VM_PROT_ALL);
 		    page_table[last_page].write_protected = 0;
 		}
 	    }
@@ -3194,8 +3235,8 @@ free_oldspace(void)
 
 	    page_start = (void *)page_address(first_page);
 
-	    os_invalidate(page_start, 4096*(last_page-first_page));
-	    addr = os_validate(page_start, 4096*(last_page-first_page));
+	    os_invalidate(page_start, PAGE_BYTES*(last_page-first_page));
+	    addr = os_validate(page_start, PAGE_BYTES*(last_page-first_page));
 	    if (addr == NULL || addr != page_start) {
 		/* Is this an error condition? I couldn't really tell from
 		 * the old CMU CL code, which fprintf'ed a message with
@@ -3205,7 +3246,7 @@ free_oldspace(void)
 		 * (The same condition is also tested for in gc_free_heap.)
 		 *
 		 * -- WHN 19991129 */
-		lose("i586_bzero: page moved, 0x%08x ==> 0x%08x",
+		lose("fast_bzero: page moved, 0x%08x ==> 0x%08x",
 		     page_start,
 		     addr);
 	    }
@@ -3213,7 +3254,7 @@ free_oldspace(void)
 	    int *page_start;
 
 	    page_start = (int *)page_address(first_page);
-	    i586_bzero(page_start, 4096*(last_page-first_page));
+	    fast_bzero(page_start, PAGE_BYTES*(last_page-first_page));
 	}
 
 	first_page = last_page;
@@ -3483,7 +3524,7 @@ verify_gc(void)
     struct thread *th;
     for_each_thread(th) {
     int binding_stack_size =
-	    (lispobj*)SymbolValue(BINDING_STACK_POINTER,th)
+	    (lispobj*)get_binding_stack_pointer(th)
 	    - (lispobj*)th->binding_stack_start;
 	verify_space(th->binding_stack_start, binding_stack_size);
     }
@@ -3514,8 +3555,8 @@ verify_generation(int  generation)
 	    for (last_page = i; ;last_page++)
 		/* Check whether this is the last page in this contiguous
 		 * block. */
-		if ((page_table[last_page].bytes_used < 4096)
-		    /* Or it is 4096 and is the last in the block */
+		if ((page_table[last_page].bytes_used < PAGE_BYTES)
+		    /* Or it is full and is the last in the block */
 		    || (page_table[last_page+1].allocated != region_allocation)
 		    || (page_table[last_page+1].bytes_used == 0)
 		    || (page_table[last_page+1].gen != generation)
@@ -3523,7 +3564,7 @@ verify_generation(int  generation)
 		    break;
 
 	    verify_space(page_address(i), (page_table[last_page].bytes_used
-					   + (last_page-i)*4096)/4);
+					   + (last_page-i)*PAGE_BYTES)/4);
 	    i = last_page;
 	}
     }
@@ -3547,7 +3588,7 @@ verify_zero_fill(void)
 		}
 	    }
 	} else {
-	    int free_bytes = 4096 - page_table[page].bytes_used;
+	    int free_bytes = PAGE_BYTES - page_table[page].bytes_used;
 	    if (free_bytes > 0) {
 		int *start_addr = (int *)((unsigned)page_address(page)
 					  + page_table[page].bytes_used);
@@ -3603,7 +3644,7 @@ write_protect_generation_pages(int generation)
 	    page_start = (void *)page_address(i);
 
 	    os_protect(page_start,
-		       4096,
+		       PAGE_BYTES,
 		       OS_VM_PROT_READ | OS_VM_PROT_EXECUTE);
 
 	    /* Note the page as protected in the page tables. */
@@ -3628,6 +3669,12 @@ garbage_collect_generation(int generation, int raise)
     unsigned long i;
     unsigned long static_space_size;
     struct thread *th;
+#ifndef LISP_FEATURE_X86
+    th = arch_os_get_current_thread();
+    struct interrupt_data *data=
+	th ? th->interrupt_data : global_interrupt_data;
+#endif
+
     gc_assert(generation <= (NUM_GENERATIONS-1));
 
     /* The oldest generation can't be raised. */
@@ -3670,6 +3717,7 @@ garbage_collect_generation(int generation, int raise)
      * be un-protected anyway before unmapping later. */
     unprotect_oldspace();
 
+#ifdef LISP_FEATURE_X86
     /* Scavenge the stacks' conservative roots. */
 
     /* there are potentially two stacks for each thread: the main
@@ -3713,19 +3761,59 @@ garbage_collect_generation(int generation, int raise)
 	    preserve_pointer(*ptr);
 	}
     }
+#endif
 
-#if QSHOW
+#if (defined QSHOW && defined LISP_FEATURE_X86)
     if (gencgc_verbose > 1) {
 	int num_dont_move_pages = count_dont_move_pages();
 	fprintf(stderr,
 		"/non-movable pages due to conservative pointers = %d (%d bytes)\n",
 		num_dont_move_pages,
-		/* FIXME: 4096 should be symbolic constant here and
+		/* FIXME: full should be symbolic constant here and
 		 * prob'ly elsewhere too. */
-		num_dont_move_pages * 4096);
+		num_dont_move_pages * PAGE_BYTES);
     }
 #endif
 
+#ifndef LISP_FEATURE_X86
+    /*
+     * If not x86 (i.e. non-conservative, with Lisp stack separate
+     * from C stack), scavenge the interrupt context(s) and the
+     * control stack.
+     */
+#ifdef PRINTNOISE
+    printf("Scavenging interrupt contexts ...\n");
+#endif
+    scavenge_interrupt_contexts();
+
+#ifdef PRINTNOISE
+    printf("Scavenging interrupt handlers (%d bytes) ...\n",
+	   sizeof(data->interrupt_handlers));
+#endif
+    scavenge((lispobj *) data->interrupt_handlers,
+	     sizeof(data->interrupt_handlers) / sizeof(lispobj));
+  
+    {
+	unsigned long control_stack_size;
+	/* FIXME: what if we are threaded but not x86? Not terribly
+	 * relevant right now, but at some point... */
+	lispobj *control_stack =
+	    (lispobj *)(th->control_stack_start);
+	
+	control_stack_size =
+	    current_control_stack_pointer -
+	    control_stack;
+#ifdef PRINTNOISE
+	printf("Scavenging the control stack (%d bytes) ...\n",
+	       control_stack_size * sizeof(lispobj));
+#endif
+	scavenge(control_stack, control_stack_size);
+#ifdef PRINTNOISE
+	printf("Done scavenging the control stack.\n");
+#endif
+    }
+#else /* x86 */
+    
     /* Scavenge all the rest of the roots. */
 
     /* Scavenge the Lisp functions of the interrupt handlers, taking
@@ -3740,11 +3828,12 @@ garbage_collect_generation(int generation, int raise)
 	    }
 	}
     }
+#endif
     /* Scavenge the binding stacks. */
  {
      struct thread *th;
      for_each_thread(th) {
-	 long len= (lispobj *)SymbolValue(BINDING_STACK_POINTER,th) -
+	 long len= (lispobj *)get_binding_stack_pointer(th) -
 	     th->binding_stack_start;
 	 scavenge((lispobj *) th->binding_stack_start,len);
 #ifdef LISP_FEATURE_SB_THREAD
@@ -3873,9 +3962,9 @@ garbage_collect_generation(int generation, int raise)
 	++generations[generation].num_gc;
 }
 
-/* Update last_free_page, then SymbolValue(ALLOCATION_POINTER). */
+/* Update last_free_page, then allocation pointer. */
 int
-update_x86_dynamic_space_free_pointer(void)
+update_dynamic_space_free_pointer(void)
 {
     int last_page = -1;
     int i;
@@ -3887,8 +3976,8 @@ update_x86_dynamic_space_free_pointer(void)
 
     last_free_page = last_page+1;
 
-    SetSymbolValue(ALLOCATION_POINTER,
-		   (lispobj)(((char *)heap_base) + last_free_page*4096),0);
+    set_alloc_pointer((lispobj)(((char *)heap_base) +
+				last_free_page*PAGE_BYTES));
     return 0; /* dummy value: return something ... */
 }
 
@@ -4009,7 +4098,7 @@ collect_garbage(unsigned last_gen)
     gc_assert((boxed_region.free_pointer - boxed_region.start_addr) == 0);
     gc_alloc_generation = 0;
 
-    update_x86_dynamic_space_free_pointer();
+    update_dynamic_space_free_pointer();
     auto_gc_trigger = bytes_allocated + bytes_consed_between_gcs;
     if(gencgc_verbose)
 	fprintf(stderr,"Next gc when %ld bytes have been consed\n",
@@ -4047,11 +4136,11 @@ gc_free_heap(void)
 	    page_start = (void *)page_address(page);
 
 	    /* First, remove any write-protection. */
-	    os_protect(page_start, 4096, OS_VM_PROT_ALL);
+	    os_protect(page_start, PAGE_BYTES, OS_VM_PROT_ALL);
 	    page_table[page].write_protected = 0;
 
-	    os_invalidate(page_start,4096);
-	    addr = os_validate(page_start,4096);
+	    os_invalidate(page_start,PAGE_BYTES);
+	    addr = os_validate(page_start,PAGE_BYTES);
 	    if (addr == NULL || addr != page_start) {
 		lose("gc_free_heap: page moved, 0x%08x ==> 0x%08x",
 		     page_start,
@@ -4095,7 +4184,7 @@ gc_free_heap(void)
     gc_set_region_empty(&unboxed_region);
 
     last_free_page = 0;
-    SetSymbolValue(ALLOCATION_POINTER, (lispobj)((char *)heap_base),0);
+    set_alloc_pointer((lispobj)((char *)heap_base));
 
     if (verify_after_free_heap) {
 	/* Check whether purify has left any bad pointers. */
@@ -4166,22 +4255,22 @@ gencgc_pickup_dynamic(void)
 {
     int page = 0;
     int addr = DYNAMIC_SPACE_START;
-    int alloc_ptr = SymbolValue(ALLOCATION_POINTER,0);
+    int alloc_ptr = get_alloc_pointer();
 
     /* Initialize the first region. */
     do {
 	page_table[page].allocated = BOXED_PAGE;
 	page_table[page].gen = 0;
-	page_table[page].bytes_used = 4096;
+	page_table[page].bytes_used = PAGE_BYTES;
 	page_table[page].large_object = 0;
 	page_table[page].first_object_offset =
 	    (void *)DYNAMIC_SPACE_START - page_address(page);
-	addr += 4096;
+	addr += PAGE_BYTES;
 	page++;
     } while (addr < alloc_ptr);
 
-    generations[0].bytes_allocated = 4096*page;
-    bytes_allocated = 4096*page;
+    generations[0].bytes_allocated = PAGE_BYTES*page;
+    bytes_allocated = PAGE_BYTES*page;
 
 }
 
@@ -4223,7 +4312,7 @@ alloc(int nbytes)
 	 * heap before Lisp starts.  This is before interrupts are enabled,
 	 * so we don't need to check for pseudo-atomic */
 #ifdef LISP_FEATURE_SB_THREAD
-	if(!SymbolValue(PSEUDO_ATOMIC_ATOMIC,th)) {
+	if(!get_pseudo_atomic_atomic(th)) {
 	    register u32 fs;
 	    fprintf(stderr, "fatal error in thread 0x%x, pid=%d\n",
 		    th,getpid());
@@ -4233,7 +4322,7 @@ alloc(int nbytes)
 	    lose("If you see this message before 2003.12.01, mail details to sbcl-devel\n");
 	}
 #else
-    gc_assert(SymbolValue(PSEUDO_ATOMIC_ATOMIC,th));
+    gc_assert(get_pseudo_atomic_atomic(th));
 #endif
     
     /* maybe we can do this quickly ... */
@@ -4354,6 +4443,7 @@ void gc_alloc_update_all_page_tables(void)
     gc_alloc_update_page_tables(1, &unboxed_region);
     gc_alloc_update_page_tables(0, &boxed_region);
 }
+
 void 
 gc_set_region_empty(struct alloc_region *region)
 {
