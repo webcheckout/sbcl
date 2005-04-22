@@ -210,7 +210,7 @@
 		     (format s "~S is a function." x))))
     (format s "~@:_~@<Its associated name (as in ~S) is ~2I~_~S.~:>"
 	    'function-lambda-expression
-	    (%fun-name x))
+	    (nth-value 2 (function-lambda-expression x)))
     (case (widetag-of x)
       (#.sb-vm:closure-header-widetag
        (%describe-fun-compiled (%closure-fun x) s kind name)
