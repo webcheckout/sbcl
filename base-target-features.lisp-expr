@@ -172,6 +172,11 @@
  ;; the Unicode consortium, rather than the classical 8-bit ISO-8859-1
  ;; character set.
  :sb-unicode
+
+ ;; Support for a full evaluator that can execute all the CL special
+ ;; forms, as opposed to the traditional SBCL evaluator which called
+ ;; COMPILE for everything complicated.
+ :sb-eval
  
  ;; This affects the definition of a lot of things in bignum.lisp. It
  ;; doesn't seem to be documented anywhere what systems it might apply

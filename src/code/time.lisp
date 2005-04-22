@@ -293,10 +293,12 @@
    GET-INTERNAL-RUN-TIME)")
 (declaim (type index *gc-run-time*))
 
-(defmacro time (form)
+(defmacro time (form &key (compile t))
   #!+sb-doc
   "Execute FORM and print timing information on *TRACE-OUTPUT*."
-  `(%time (lambda () ,form)))
+  `(%time ,(if compile
+               `(compile nil (lambda () ,form))
+               `(lambda () ,form))))
 
 ;;; Return all the data that we want TIME to report.
 (defun time-get-sys-info ()
@@ -346,7 +348,9 @@
 	(old-run-utime old-run-stime old-page-faults old-bytes-consed)
       (time-get-sys-info))
     (setq old-real-time (get-internal-real-time))
-    (let ((start-gc-run-time *gc-run-time*))
+    (let ((start-gc-run-time *gc-run-time*)
+          #!+sb-eval (sb!eval:*eval-calls* 0))
+      (declare #!+sb-eval (special sb!eval:*eval-calls*))
     (multiple-value-prog1
 	;; Execute the form and return its values.
 	(funcall fun)
@@ -360,7 +364,8 @@
                  ~S second~:P of real time~%  ~
                  ~S second~:P of user run time~%  ~
                  ~S second~:P of system run time~%  ~
-~@[                 [Run times include ~S second~:P GC run time.]~%  ~]~
+              ~@[[Run times include ~S second~:P GC run time.]~%  ~]~
+              ~@[~S call~:P to %EVAL~%  ~]~
                  ~S page fault~:P and~%  ~
                  ~:D bytes consed.~%"
 		(max (/ (- new-real-time old-real-time)
@@ -371,5 +376,6 @@
 		(unless (zerop gc-run-time)
 		  (/ (float gc-run-time)
 		     (float sb!xc:internal-time-units-per-second)))
+                #!+sb-eval sb!eval:*eval-calls* #!-sb-eval nil
 		(max (- new-page-faults old-page-faults) 0)
 		(max (- new-bytes-consed old-bytes-consed) 0)))))))

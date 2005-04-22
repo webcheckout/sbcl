@@ -54,10 +54,10 @@
 
 ;;; Now that CLOS is working, we can replace our old temporary placeholder code
 ;;; for writing funcallable instances with permanent code:
-(defun sb-impl::printed-as-funcallable-standard-class (object stream)
-  (when (funcallable-standard-class-p (class-of object))
-    (print-object object stream)
-    t))
+;;(defun sb-impl::printed-as-funcallable-standard-class (object stream)
+;;  (when (funcallable-standard-class-p (class-of object))
+;;    (print-object object stream)
+;;    t))
 
 ;;;; PRINT-OBJECT methods for objects from PCL classes
 ;;;;

@@ -995,6 +995,7 @@ retained, possibly temporariliy, because it might be used internally."
 	       "LOOKS-LIKE-NAME-OF-SPECIAL-VAR-P"
 	       "POSITIVE-PRIMEP"
 	       "EVAL-IN-LEXENV"
+	       "OLD-EVAL-IN-LEXENV"
 	       "DEBUG-NAMIFY"
 	       "FORCE" "DELAY" "PROMISE-READY-P"
 	       "FIND-RESTART-OR-CONTROL-ERROR"
@@ -2268,4 +2269,21 @@ structure representations"
 	       ;; These were exported from the original PCL version of this 
 	       ;; package, but aren't used in SBCL.
 	       ;;"NESTED-WALK-FORM" "MACROEXPAND-ALL"
-	       )))
+	       ))
+
+   #!+sb-eval
+   #s(sb-cold:package-data
+      :name "SB!EVAL"
+      :doc "internal: the evaluator implementation used to execute code
+without compiling it."
+      :use ("CL")
+      :export ("INTERPRETED-FUNCTION"
+               "INTERPRETED-FUNCTION-P"
+               "EVAL-IN-ENVIRONMENT"
+               "MAKE-NULL-ENVIRONMENT"
+               "EVAL-IN-NATIVE-ENVIRONMENT"
+               "PREPARE-FOR-COMPILE"
+               "COUNT-EVAL-CALLS"
+               "*EVAL-LEVEL*"
+               "*EVAL-CALLS*"
+               "*USE-OLD-EVAL*")))
