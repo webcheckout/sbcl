@@ -709,13 +709,8 @@
 			 (and ra (compute-calling-frame ofp ra frame)))
 			#!-(or x86 x86-64)
 		       (compute-calling-frame
-			#!-alpha
 			(sap-ref-sap fp (* ocfp-save-offset
 					   sb!vm:n-word-bytes))
-			#!+alpha
-			(int-sap
-			 (sap-ref-32 fp (* ocfp-save-offset
-					   sb!vm:n-word-bytes)))
 
 			(stack-ref fp lra-save-offset)
 
@@ -1088,15 +1083,9 @@ register."
 	  finally (return (nreverse reversed-result))
 	  do
 	  (when (sap= fp
-		      #!-alpha
 		      (sap-ref-sap catch
 				   (* sb!vm:catch-block-current-cont-slot
-				      sb!vm:n-word-bytes))
-		      #!+alpha
-		      (int-sap
-		       (sap-ref-32 catch
-				   (* sb!vm:catch-block-current-cont-slot
-				      sb!vm:n-word-bytes))))
+				      sb!vm:n-word-bytes)))
 	    (let* (#!-(or x86 x86-64)
 		   (lra (stack-ref catch sb!vm:catch-block-entry-pc-slot))
 		   #!+(or x86 x86-64)
@@ -1129,15 +1118,9 @@ register."
 			   offset (frame-debug-fun frame)))
 		    reversed-result)))
 	  (setf catch
-		#!-alpha
 		(sap-ref-sap catch
 			     (* sb!vm:catch-block-previous-catch-slot
-				sb!vm:n-word-bytes))
-		#!+alpha
-		(int-sap
-		 (sap-ref-32 catch
-			     (* sb!vm:catch-block-previous-catch-slot
-				sb!vm:n-word-bytes)))))))
+				sb!vm:n-word-bytes))))))
 
 ;;;; operations on DEBUG-FUNs
 
@@ -2032,13 +2015,8 @@ register."
                                 (sb!sys:int-sap
                                  (sb!vm:context-register escaped
                                                          sb!vm::nfp-offset))
-                                #!-alpha
                                 (sb!sys:sap-ref-sap fp (* nfp-save-offset
-                                                          sb!vm:n-word-bytes))
-                                #!+alpha
-                                (sb!vm::make-number-stack-pointer
-                                 (sb!sys:sap-ref-32 fp (* nfp-save-offset
-                                                          sb!vm:n-word-bytes))))))
+                                                          sb!vm:n-word-bytes)))))
                   ,@body)))
     (ecase (sb!c:sc-offset-scn sc-offset)
       ((#.sb!vm:any-reg-sc-number
@@ -2143,11 +2121,11 @@ register."
                                               sb!vm:n-word-bytes)))))
       (#.sb!vm:unsigned-stack-sc-number
        (with-nfp (nfp)
-         (sb!sys:sap-ref-32 nfp (* (sb!c:sc-offset-offset sc-offset)
+         (sb!sys:sap-ref-word nfp (* (sb!c:sc-offset-offset sc-offset)
                                    sb!vm:n-word-bytes))))
       (#.sb!vm:signed-stack-sc-number
        (with-nfp (nfp)
-         (sb!sys:signed-sap-ref-32 nfp (* (sb!c:sc-offset-offset sc-offset)
+         (sb!sys:signed-sap-ref-word nfp (* (sb!c:sc-offset-offset sc-offset)
                                           sb!vm:n-word-bytes))))
       (#.sb!vm:sap-stack-sc-number
        (with-nfp (nfp)
@@ -2305,15 +2283,9 @@ register."
 				(int-sap
 				 (sb!vm:context-register escaped
 							 sb!vm::nfp-offset))
-				#!-alpha
 				(sap-ref-sap fp
 					     (* nfp-save-offset
-						sb!vm:n-word-bytes))
-				#!+alpha
-				(sb!vm::make-number-stack-pointer
-				 (sap-ref-32 fp
-					     (* nfp-save-offset
-						sb!vm:n-word-bytes))))))
+						sb!vm:n-word-bytes)))))
 		  ,@body)))
     (ecase (sb!c:sc-offset-scn sc-offset)
       ((#.sb!vm:any-reg-sc-number
@@ -2428,14 +2400,14 @@ register."
 	       (char-code (the character value)))))
       (#.sb!vm:unsigned-stack-sc-number
        (with-nfp (nfp)
-	 (setf (sap-ref-32 nfp (* (sb!c:sc-offset-offset sc-offset)
+	 (setf (sap-ref-word nfp (* (sb!c:sc-offset-offset sc-offset)
 				  sb!vm:n-word-bytes))
-	       (the (unsigned-byte 32) value))))
+	       (the sb!vm:word value))))
       (#.sb!vm:signed-stack-sc-number
        (with-nfp (nfp)
-	 (setf (signed-sap-ref-32 nfp (* (sb!c:sc-offset-offset sc-offset)
+	 (setf (signed-sap-ref-word nfp (* (sb!c:sc-offset-offset sc-offset)
 					 sb!vm:n-word-bytes))
-	       (the (signed-byte 32) value))))
+	       (the (signed-byte #.sb-vm:n-word-bits) value))))
       (#.sb!vm:sap-stack-sc-number
        (with-nfp (nfp)
 	 (setf (sap-ref-sap nfp (* (sb!c:sc-offset-offset sc-offset)

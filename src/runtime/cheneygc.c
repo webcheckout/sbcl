@@ -90,19 +90,19 @@ zero_stack(void)
 
 
 void *
-gc_general_alloc(int bytes, int unboxed_p, int quick_p) {
+gc_general_alloc(long bytes, int unboxed_p, int quick_p) {
     lispobj *new=new_space_free_pointer;
     new_space_free_pointer+=(bytes/N_WORD_BYTES);
     return new;
 }
 
-lispobj  copy_large_unboxed_object(lispobj object, int nwords) {
+lispobj  copy_large_unboxed_object(lispobj object, long nwords) {
     return copy_object(object,nwords);
 }
-lispobj  copy_unboxed_object(lispobj object, int nwords) {
+lispobj  copy_unboxed_object(lispobj object, long nwords) {
     return copy_object(object,nwords);
 }
-lispobj  copy_large_object(lispobj object, int nwords) {
+lispobj  copy_large_object(lispobj object, long nwords) {
     return copy_object(object,nwords);
 }
 
@@ -182,7 +182,7 @@ collect_garbage(unsigned ignore)
     scavenge((lispobj *) data->interrupt_handlers,
 	     sizeof(data->interrupt_handlers) / sizeof(lispobj));
 	
-    /* _size quantities are in units of sizeof(lispobj) - i.e. 4 */
+    /* _size quantities are in units of sizeof(lispobj) - i.e. N_WORD_BYTES */
     control_stack_size = 
 	current_control_stack_pointer-
 	(lispobj *)th->control_stack_start;
@@ -535,7 +535,7 @@ scav_fdefn(lispobj *where, lispobj object)
 
 /* vector-like objects */
 
-static int
+static long
 scav_vector(lispobj *where, lispobj object)
 {
     if (HeaderValue(object) == subtype_VectorValidHashing) {
@@ -552,7 +552,7 @@ scav_vector(lispobj *where, lispobj object)
 #define WEAK_POINTER_NWORDS \
 	CEILING((sizeof(struct weak_pointer) / sizeof(lispobj)), 2)
 
-static int
+static long
 scav_weak_pointer(lispobj *where, lispobj object)
 {
     /* Do not let GC scavenge the value slot of the weak pointer */

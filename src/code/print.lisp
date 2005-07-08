@@ -1118,9 +1118,47 @@
     (bisect n (truncate (log n base)))))
 
 (defun %output-integer-in-base (integer base stream)
+  (when (zerop integer)
+    (write-char #\0 stream)
+    (return-from %output-integer-in-base))
   (when (minusp integer)
     (write-char #\- stream)
     (setf integer (- integer)))
+  (let ((power (make-array '(10) :adjustable t :fill-pointer 0))
+        (size (make-array '(10) :adjustable t :fill-pointer 0)))
+    (do ((p base (* p p))
+         (s 1 (* 2 s)))
+        ((> p integer))
+      (vector-push-extend p power)
+      (vector-push-extend s size))
+    ;; Now (aref size k) equals (expt 2 k)
+    ;; and (aref power k) equals (expt base (expt 2 k))
+    (labels ((bisect (n k z)
+               ;; Print nonnegative integer n to stream s in the given base.
+               ;; If z is nil, print just the digits of n
+               ;; if z is non-nil, print enough leading zeros
+               ;; so the total width is (expt 2 k) .
+               ;; On entry, n is smaller than (expt base (ekpt 2 k))
+               (cond
+                 ((zerop n)
+                  (when z
+                    (dotimes (k (aref size k))
+                      (write-char #\0 stream))))
+                 ((zerop k)
+                  (write-char
+                   (aref "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ" n)
+                   stream))
+                 (t
+                  (setf k (1- k))
+                  (multiple-value-bind (q r) (truncate n (aref power k))
+                    (bisect q k z)
+                    (bisect r k (or z (plusp q))))))))
+      (bisect integer (fill-pointer power) nil)))
+  #+nil
+  (when (minusp integer)
+    (write-char #\- stream)
+    (setf integer (- integer)))
+  #+nil
   (if (fixnump integer)
       (%output-fixnum-in-base integer base stream)
       (%output-bignum-in-base integer base stream)))

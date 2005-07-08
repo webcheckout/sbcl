@@ -149,22 +149,40 @@
   ;; Remove the tag from one arg so that the result will have the
   ;; correct fixnum tag.
   (inst sra x n-fixnum-tag-bits temp)
-  (inst mulq temp y res)
-  (inst umulh temp y hi)
 
-  ;; check to see if the result will fit in a fixnum (i.e. the high word
-  ;; is just 64 copies of the sign bit of the low word).
+  ;; The Alpha is a little bit interesting because the 'umulh'
+  ;; instruction, which generates the upper 64 bits of a 64x64 multiply,
+  ;; does a *unsigned* multiplication.  This means that if you multiply
+  ;; an appropriate negative number by an appropriate positive number,
+  ;; the upper bits will *not* all be ones, as you might expect.  We use
+  ;; a method from _Hacker's Delight_, page 133, by Henry S. Warren to
+  ;; convert the unsigned multiplication into a signed multiplication.
+  (inst mulq temp y res)                ; low-order bits
+  (inst umulh temp y hi)                ; high-order bits
+  (inst sra temp 63 lo)                 ; compute 't1' in Warren's algorithm
+  (inst and lo y lo)
+  (inst sra y 63 temp2)                 ; compute 't2' in Warren's algorithm
+  (inst and temp2 temp temp2)
+  (inst subq hi lo hi)                  ; compute 'p' in Warren's algorithm
+  (inst subq hi temp2 hi)
+
+  ;; 'hi' now contains the high bits of a signed 64x64 multiplication.
+  ;; We may now proceed to see whether the multiplication overflowed as
+  ;; in the MIPS version of this routine.
+
+  ;; Check to see if the result will fit in a fixnum.  (i.e. the high
+  ;; word is just 64 copies of the sign bit of the low word.)
   (inst sra res 63 temp)
   (inst xor temp hi temp)
   (inst beq temp DONE)
 
-  ;; Shift the double word hi:res down three bits into hi:low to get rid
+  ;; No go.  Shift the double word hi:res down three bits into hi:lo to get rid
   ;; of the fixnum tag.
   (inst srl res n-fixnum-tag-bits lo)
   (inst sll hi (- n-word-bits n-fixnum-tag-bits) temp)
   (inst or lo temp lo)
   (inst sra hi n-fixnum-tag-bits hi)
-
+ 
   ;; Do we need one word or two?  Assume two.
   (inst li (logior (ash 2 n-widetag-bits) bignum-widetag) temp2)
   (inst sra lo 63 temp)

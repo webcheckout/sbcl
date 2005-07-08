@@ -13,9 +13,8 @@
 
 ;;; (def-assembler-params :scheduler-p nil)
 
-;;; ../x86/insts contains the invocation
-;;; (setf sb!disassem:*disassem-inst-alignment-bytes* 1)
-;;; which apparently was another use of def-assembler-params
+;;; Alpha instructions are four bytes wide, not eight.
+(setf sb!disassem:*disassem-inst-alignment-bytes* 4)
 
 ;;;; utility functions
 
@@ -40,9 +39,6 @@
      (tn-offset tn))))
 
 ;;;; initial disassembler setup
-
-;; XXX find out what this was supposed to do
-;; (sb!disassem:set-disassem-params :instruction-alignment 32)
 
 (defvar *disassem-use-lisp-reg-names* t)
 
