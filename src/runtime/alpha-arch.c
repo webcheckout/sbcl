@@ -15,6 +15,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <assert.h>
 
 #include "sbcl.h"
 #include "runtime.h"
@@ -79,7 +80,7 @@ arch_get_bad_addr (int sig, siginfo_t *code, os_context_t *context)
 	  pc >= current_dynamic_space + DYNAMIC_SPACE_SIZE))
 	return NULL;
 
-    return context->uc_mcontext.sc_traparg_a0;
+    return (os_vm_address_t) context->uc_mcontext.sc_traparg_a0;
 }
 
 void
@@ -131,19 +132,21 @@ void arch_remove_breakpoint(void *pc, unsigned long orig_inst)
 {
     /* was (unsigned int) but gcc complains.  Changed to mirror
      * install_breakpoint() above */
-    unsigned long *ptr=(unsigned long *)pc;
-    *ptr = orig_inst;
+    unsigned int *ptr = (unsigned int *)pc;
+
+    /* ensure we're not flushing useful information */
+    assert((orig_inst >> 32) == 0);
+
+    *ptr = (unsigned int)orig_inst;
     os_flush_icache((os_vm_address_t)pc, sizeof(unsigned long));
 }
 
-static unsigned int *skipped_break_addr, displaced_after_inst,
-     after_breakpoint;
+static unsigned int *skipped_break_addr, displaced_after_inst, after_breakpoint;
 
 
-/* This returns a PC value.  Lisp code is all in the 32-bit-addressable
- * space, so we should be ok with an unsigned int. */
-unsigned int
-emulate_branch(os_context_t *context,unsigned long orig_inst)
+/* This returns a 64-bit PC value. */
+unsigned long
+emulate_branch(os_context_t *context, unsigned int orig_inst)
 {
     int op = orig_inst >> 26;
     int reg_a = (orig_inst >> 21) & 0x1f;
@@ -152,7 +155,7 @@ emulate_branch(os_context_t *context,unsigned long orig_inst)
 	(orig_inst&(1<<20)) ?
 	orig_inst | (-1 << 21) :
 	orig_inst&0x1fffff;
-    int next_pc = *os_context_pc_addr(context);
+    unsigned long next_pc = (unsigned long) *os_context_pc_addr(context);
     int branch = 0; /* was NULL;	       */
 
     switch(op) {
@@ -249,7 +252,7 @@ void arch_do_displaced_inst(os_context_t *context,unsigned int orig_inst)
      * at the BPT instruction itself.  This is good, because this is
      * where we want to restart execution when we do that */
 
-    unsigned int *pc=(unsigned int *)(*os_context_pc_addr(context));
+    unsigned int *pc=(unsigned long *)(*os_context_pc_addr(context));
     unsigned int *next_pc;
     int op = orig_inst >> 26;;
 
@@ -259,12 +262,12 @@ void arch_do_displaced_inst(os_context_t *context,unsigned int orig_inst)
     /* Put the original instruction back. */
     *pc = orig_inst;
     os_flush_icache((os_vm_address_t)pc, sizeof(unsigned long));
-    skipped_break_addr = pc;
+    skipped_break_addr = (unsigned int *) pc;
 
     /* Figure out where we will end up after running the displaced 
      * instruction */
     if (op == 0x1a || (op&0xf) == 0x30) /* a branch */
-	/* The cast to long is just to shut gcc up. */
+	/* The cast is just to shut gcc up. */
 	next_pc = (unsigned int *)((long)emulate_branch(context,orig_inst));
     else
 	next_pc = pc+1;
@@ -277,8 +280,9 @@ void arch_do_displaced_inst(os_context_t *context,unsigned int orig_inst)
 }
 
 static void
-sigtrap_handler(int signal, siginfo_t *siginfo, os_context_t *context)
+sigtrap_handler(int signal, siginfo_t *siginfo, void *ctx)
 {
+    os_context_t *context = (os_context_t *)ctx;
     unsigned long code;
     sigset_t *mask;
 #ifdef LISP_FEATURE_LINUX
@@ -318,7 +322,7 @@ sigtrap_handler(int signal, siginfo_t *siginfo, os_context_t *context)
         }
     } else {
 	/* a "system service" */
-        code=*os_context_pc_addr(context);
+        code = *((unsigned int *)*os_context_pc_addr(context));
     }
     
     switch (code) {

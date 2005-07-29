@@ -313,6 +313,34 @@
     (inst srl shift 1 shift)
     (inst bne shift loop)))
 
+(define-vop (signed-byte-64-len)
+  (:translate integer-length)
+  (:note "inline (signed-byte 64) integer-length")
+  (:args (arg :scs (signed-reg)))
+  (:arg-types signed-num)
+  (:results (res :scs (unsigned-reg) :from (:argument 0)))
+  (:result-types unsigned-num)
+  (:guard (member :cix *backend-subfeatures*))
+  (:generator 2
+    (move arg res)
+    (inst bge res NONNEG)
+    (inst not res res)
+    NONNEG
+    (inst ctlz res zero-tn res)
+    (inst subq res 64 res)))
+
+(define-vop (unsigned-byte-64-len)
+  (:translate integer-length)
+  (:note "inline (unsigned-byte 64) integer-length")
+  (:args (arg :scs (unsigned-reg)))
+  (:arg-types unsigned-num)
+  (:results (res :scs (unsigned-reg) :from (:argument 0)))
+  (:result-types unsigned-num)
+  (:guard (member :cix *backend-subfeatures*))
+  (:generator 2
+    (inst ctlz arg zero-tn res)
+    (inst subq res 64 res)))
+
 (define-vop (unsigned-byte-64-count)
   (:translate logcount)
   (:note "inline (unsigned-byte 64) logcount")
@@ -736,7 +764,7 @@
       (emit-label done)
       (move res result))))
 
-;; probably correct --njf
+;; correct --njf
 (define-vop (bignum-mult-and-add-3-arg)
   (:translate sb!bignum:%multiply-and-add)
   (:policy :fast-safe)
@@ -745,8 +773,8 @@
 	 (carry-in :scs (unsigned-reg) :to :save))
   (:arg-types unsigned-num unsigned-num unsigned-num)
   (:temporary (:sc unsigned-reg) temp)
-  (:results (hi :scs (unsigned-reg))
-	    (lo :scs (unsigned-reg)))
+  (:results (hi :scs (unsigned-reg) :from (:argument 0))
+	    (lo :scs (unsigned-reg) :from (:argument 0)))
   (:result-types unsigned-num unsigned-num)
   (:generator 6
     (inst mulq x y lo)
@@ -755,7 +783,7 @@
     (inst cmpult lo carry-in temp)
     (inst addq temp hi hi)))
 
-;; needs some work --njf
+;; correct --njf
 (define-vop (bignum-mult-and-add-4-arg)
   (:translate sb!bignum:%multiply-and-add)
   (:policy :fast-safe)
@@ -765,18 +793,19 @@
 	 (carry-in :scs (unsigned-reg) :to :save))
   (:arg-types unsigned-num unsigned-num unsigned-num unsigned-num)
   (:temporary (:sc unsigned-reg) temp)
-  (:results (hi :scs (unsigned-reg))
-	    (lo :scs (unsigned-reg)))
+  (:temporary (:sc unsigned-reg) carry)
+  (:results (hi :scs (unsigned-reg) :from (:argument 0))
+	    (lo :scs (unsigned-reg) :from (:argument 0)))
   (:result-types unsigned-num unsigned-num)
   (:generator 9
-    (inst mulq x y lo)
+    (inst mulq x y lo)                  ; multiply
     (inst umulh x y hi)
-    (inst addq prev carry-in temp)
-    (inst addq lo temp lo)
-    (inst cmpult temp carry-in temp)
-    (inst addq hi temp hi)
-    (inst cmpult temp lo temp)
-    (inst addq temp hi hi)))
+    (inst addq prev carry-in temp)      ; do first addition and determine carry
+    (inst cmpult temp carry-in carry)
+    (inst addq carry hi hi)
+    (inst addq lo temp lo)              ; add result and determine carry
+    (inst cmpult lo temp carry)
+    (inst addq carry hi hi)))
 
 ;; correct --njf
 (define-vop (bignum-mult)
@@ -785,8 +814,8 @@
   (:args (x :scs (unsigned-reg))
 	 (y :scs (unsigned-reg)))
   (:arg-types unsigned-num unsigned-num)
-  (:results (hi :scs (unsigned-reg))
-	    (lo :scs (unsigned-reg)))
+  (:results (hi :scs (unsigned-reg) :from (:argument 0))
+	    (lo :scs (unsigned-reg) :from (:argument 0)))
   (:result-types unsigned-num unsigned-num)
   (:generator 2
     (inst mulq x y lo)
