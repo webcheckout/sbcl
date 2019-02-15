@@ -434,7 +434,16 @@ grab_sigs_cmd(char __attribute__((unused)) **ptr)
 static void
 sub_monitor(void)
 {
-    struct cmd *cmd, *found;
+#ifndef SBCL_ORIGINAL_LDB
+  void lisp_backtrace(int frames);
+
+  lisp_backtrace(100);
+#endif
+
+
+
+#ifdef SBCL_ORIGINAL_LDB
+  struct cmd *cmd, *found;
     char buf[256];
     char *line, *ptr, *token;
     int ambig;
@@ -486,6 +495,7 @@ sub_monitor(void)
             (*found->fn)(&ptr);
         }
     }
+#endif
 }
 
 void
