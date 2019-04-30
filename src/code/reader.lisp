@@ -130,7 +130,7 @@
 
 ;;; predicates for testing character attributes
 
-#!-sb-fluid
+#-sb-fluid
 (progn
   (declaim (inline whitespace[1]p whitespace[2]p))
   (declaim (inline constituentp terminating-macrop))
@@ -171,7 +171,8 @@
 ;;; FIXME: this initform is considered too hairy to assign (a constant array, really?)
 ;;; if changed to DEFCONSTANT-EQX, which makes this file unslammable as-is. Oh well.
 (defconstant +constituent-trait-table+
-  #.(let ((a (!make-specialized-array base-char-code-limit '(unsigned-byte 8))))
+  #.(let ((a (sb-xc:make-array base-char-code-limit
+                               :element-type '(unsigned-byte 8))))
       (fill a +char-attr-constituent+)
       (flet ((!set-constituent-trait (char trait)
                (aver (typep char 'base-char))
@@ -189,11 +190,13 @@
         (!set-constituent-trait #\D +char-attr-constituent-expt+)
         (!set-constituent-trait #\S +char-attr-constituent-expt+)
         (!set-constituent-trait #\L +char-attr-constituent-expt+)
+        (!set-constituent-trait #\R +char-attr-constituent-expt+) ; extension
         (!set-constituent-trait #\e +char-attr-constituent-expt+)
         (!set-constituent-trait #\f +char-attr-constituent-expt+)
         (!set-constituent-trait #\d +char-attr-constituent-expt+)
         (!set-constituent-trait #\s +char-attr-constituent-expt+)
         (!set-constituent-trait #\l +char-attr-constituent-expt+)
+        (!set-constituent-trait #\r +char-attr-constituent-expt+) ; extension
         (!set-constituent-trait #\Space +char-attr-invalid+)
         (!set-constituent-trait #\Newline +char-attr-invalid+)
         (dolist (c (list backspace-char-code tab-char-code form-feed-char-code
@@ -925,7 +928,7 @@ standard Lisp readtable when NIL."
                                   buf (make-array lim :element-type 'character)))
                           (setq ptr 0))
                         (setf (schar buf ptr) (truly-the character char))
-                        #!+sb-unicode ; BASE-CHAR-P does not exist if not
+                        #+sb-unicode ; BASE-CHAR-P does not exist if not
                         (unless (base-char-p char) (setq only-base-chars nil))
                         (incf ptr)))))
     (let* ((token-buf *read-buffer*)
@@ -1085,7 +1088,7 @@ standard Lisp readtable when NIL."
                      +char-attr-constituent-digit+)
                  +char-attr-constituent-decimal-digit+))
             ((= att +char-attr-invalid+)
-             (simple-reader-error stream "invalid constituent"))
+             (simple-reader-error stream "invalid constituent: ~s" char))
             (t att))))))
 
 ;;;; token fetching
@@ -1185,20 +1188,27 @@ standard Lisp readtable when NIL."
 (declaim (type (or null package) *reader-package*)
          (always-bound *reader-package*))
 
-(defun reader-find-package (package-designator stream)
+(defun reader-find-package (package-designator stream restarts)
   (if (%instancep package-designator)
       package-designator
-      (let ((package (find-package package-designator)))
-        (cond (package
-               ;; Release the token-buf that was used for the designator
-               (release-token-buf (shiftf (token-buf-next *read-buffer*) nil))
-               package)
-              (t
-               (error 'simple-reader-package-error
-                      :package package-designator
-                      :stream stream
-                      :format-control "Package ~A does not exist."
-                      :format-arguments (list package-designator)))))))
+      (block nil
+        (tagbody retry
+           (let ((package (find-package package-designator)))
+             (cond (package
+                    ;; Release the token-buf that was used for the designator
+                    (release-token-buf (shiftf (token-buf-next *read-buffer*) nil))
+                    (return (values package nil)))
+                   (t
+                    (macrolet ((err ()
+                                 `(error 'simple-reader-package-error
+                                         :package package-designator
+                                         :stream stream
+                                         :format-control "Package ~A does not exist."
+                                         :format-arguments (list package-designator))))
+                      (if restarts
+                          (find-package-restarts (package-designator t)
+                            (err))
+                          (err))))))))))
 
 (defun read-token (stream firstchar)
   "Default readmacro function. Handles numbers, symbols, and SBCL's
@@ -1243,7 +1253,7 @@ extended <package-name>::<form-in-package> syntax."
         (#.+char-attr-package-delimiter+ (go COLON))
         (#.+char-attr-multiple-escape+ (go MULT-ESCAPE))
         (#.+char-attr-invalid+ (simple-reader-error stream
-                                                    "invalid constituent"))
+                                                    "invalid constituent: ~s" char))
         ;; can't have eof, whitespace, or terminating macro as first char!
         (t (go SYMBOL)))
      SIGN ; saw "sign"
@@ -1527,7 +1537,7 @@ extended <package-name>::<form-in-package> syntax."
          (unread-char char stream)
          (if package-designator
              (let* ((*reader-package*
-                     (reader-find-package package-designator stream)))
+                     (reader-find-package package-designator stream nil)))
                (return (read stream t nil t)))
              (simple-reader-error stream
                                   "illegal terminating character after a double-colon: ~S"
@@ -1540,32 +1550,38 @@ extended <package-name>::<form-in-package> syntax."
                               package-designator))
         (t (go SYMBOL)))
       RETURN-SYMBOL
-      (setf buf (normalize-read-buffer buf))
-      (casify-read-buffer buf)
-      (let* ((pkg (if package-designator
-                      (reader-find-package package-designator stream)
-                      (or *reader-package* (sane-package))))
-             (intern-p (or (/= colons 1) (eq pkg *keyword-package*))))
-        (unless intern-p ; Try %FIND-SYMBOL
-          (multiple-value-bind (symbol accessibility)
-              (%find-symbol (token-buf-string buf) (token-buf-fill-ptr buf) pkg)
-            (when (eq accessibility :external) (return symbol))
-            (with-simple-restart (continue "Use symbol anyway.")
-              (error 'simple-reader-package-error
-                     :package pkg
-                     :stream stream
-                     :format-arguments
-                     (list (copy-token-buf-string buf) (package-name pkg))
-                     :format-control
-                     (if accessibility
-                         "The symbol ~S is not external in the ~A package."
-                         "Symbol ~S not found in the ~A package.")))))
-        (return (%intern (token-buf-string buf)
-                         (token-buf-fill-ptr buf)
-                         pkg
-                         (if (token-buf-only-base-chars buf)
-                             (%readtable-symbol-preference rt)
-                             'character))))))))
+        (setf buf (normalize-read-buffer buf))
+        (casify-read-buffer buf)
+        (multiple-value-bind (pkg restart-kind)
+            (if package-designator
+                (reader-find-package package-designator stream t)
+                (or *reader-package* (sane-package)))
+          (if (eq restart-kind :uninterned)
+              (return (make-symbol (copy-token-buf-string buf)))
+              (let* ((intern-p (or (/= colons 1)
+                                   (eq pkg *keyword-package*)
+                                   (eq restart-kind :current))))
+                (unless intern-p        ; Try %FIND-SYMBOL
+                  (multiple-value-bind (symbol accessibility)
+                      (%find-symbol (token-buf-string buf) (token-buf-fill-ptr buf) pkg)
+                    (when (eq accessibility :external) (return symbol))
+                    (with-simple-restart (continue "Use symbol anyway.")
+                      (error 'simple-reader-package-error
+                             :package pkg
+                             :stream stream
+                             :format-arguments
+                             (list (copy-token-buf-string buf) (package-name pkg))
+                             :format-control
+                             (if accessibility
+                                 "The symbol ~S is not external in the ~A package."
+                                 "Symbol ~S not found in the ~A package.")))))
+                (return (%intern (token-buf-string buf)
+                                 (token-buf-fill-ptr buf)
+                                 pkg
+                                 (if (token-buf-only-base-chars buf)
+                                     (%readtable-symbol-preference rt)
+                                     'character)
+                                 nil)))))))))
 
 ;;; For semi-external use: Return 3 values: the token-buf,
 ;;; a flag for whether there was an escape char, and the position of
@@ -1633,8 +1649,8 @@ extended <package-name>::<form-in-package> syntax."
            (inline token-buf-getchar)) ; makes for smaller code
   (let* ((fixnum-max-digits
           (macrolet ((maxdigits ()
-                       (!coerce-to-specialized  (integer-reader-safe-digits)
-                                                '(unsigned-byte 8))))
+                       (sb-xc:coerce (integer-reader-safe-digits)
+                                     '(vector (unsigned-byte 8)))))
             (aref (maxdigits) (- base 2))))
          (base-power
           (macrolet ((base-powers ()
@@ -1672,16 +1688,16 @@ extended <package-name>::<form-in-package> syntax."
   ;; Use the least positive float, because denormalized exponent
   ;; can be larger than normalized.
   (let* ((max-exponent
-          #!-long-float
+          #-long-float
           (+ sb-vm:double-float-digits sb-vm:double-float-bias))
          (number-magnitude (integer-length number))
          (divisor-magnitude (1- (integer-length divisor)))
          (magnitude (- number-magnitude divisor-magnitude)))
     (if (minusp exponent)
         (max exponent (ceiling (- (+ max-exponent magnitude))
-                               #.(floor (log 10 2))))
+                               #.(cl:floor (cl:log 10 2))))
         (min exponent (floor (- max-exponent magnitude)
-                             #.(floor (log 10 2)))))))
+                             #.(cl:floor (cl:log 10 2)))))))
 
 (defun make-float (stream)
   ;; Assume that the contents of *read-buffer* are a legal float, with nothing
@@ -1729,7 +1745,8 @@ extended <package-name>::<form-in-package> syntax."
                                   (#\S 'short-float)
                                   (#\F 'single-float)
                                   (#\D 'double-float)
-                                  (#\L 'long-float)))
+                                  (#\L 'long-float)
+                                  (#\R 'rational)))
                   (exponent (truncate-exponent exponent number divisor))
                   (result (make-float-aux (* (expt 10 exponent) number)
                                           divisor float-format stream)))
@@ -1779,6 +1796,14 @@ extended <package-name>::<form-in-package> syntax."
   (declare (optimize allow-non-returning-tail-call))
   (declare (ignore ignore))
   (if *read-suppress*
+      ;; This seems dubious. For comparison's sake, other implementations
+      ;; will signal an error if the character is not a defined macro.
+      ;; Test case: (read-from-string "#+nope (#!+(or feat) a) b") => B and 25
+      ;; CLISP:
+      ;; *** - READ from #<INPUT STRING-INPUT-STREAM>: After #\# is #\! an undefined dispatch macro character
+      ;; CCL:
+      ;; Error: Reader error on #<STRING-INPUT-STREAM  #x3020004913AD>, near position 10, within "#+nope (#!+(or feat)":
+      ;;        Undefined character #\! in a #\# dispatch macro.
       (values)
       (simple-reader-error stream
                            "no dispatch function defined for ~S"

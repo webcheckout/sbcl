@@ -13,7 +13,8 @@
 
 (with-test (:name :aprof-smoketest-struct
             ;; reverse-engineering the allocation instructions fails but should not
-            :fails-on (or (not :immobile-space) :sb-safepoint))
+            :fails-on (or (not :immobile-space)
+                          :sb-safepoint))
   (let ((nbytes
          (sb-aprof:aprof-run
             (checked-compile
@@ -100,8 +101,76 @@ sb-vm::
   (declare (optimize sb-c::instrument-consing))
   (list* (load-time-value(gensym)) :if-exists x))
 
-(with-test (:name :aprof-list-length-2 :fails-on :win32)
+#-win32
+(with-test (:name :aprof-list-length-2)
+  ;; Rather than figuring out how to get some minimal piece of Lisp code to
+  ;; compile into exactly these instruction encodings below which caused aprof
+  ;; to fail, just check the assembled code directly.
+  ;; (This special case for 2 conses caused aprof not to recognize the pattern)
+  (let ((bytes
+         (test-util:assemble
+          ;; our reader extension is semi-useless in that you can't read
+          ;; a symbol that didn't exist in the designated package, which is why
+          ;; some mnemonics below are spelled using string quotes.
+          sb-vm::
+          `(("INC" :qword ,(ea 1024 temp-reg-tn) :lock)
+            (mov ,(ea (* thread-pseudo-atomic-bits-slot 8) thread-base-tn) ,rbp-tn)
+            (mov ,r10-tn ,(ea (* thread-alloc-region-slot 8) thread-base-tn))
+            ("LEA" ,temp-reg-tn ,(ea (* 2 cons-size n-word-bytes) r10-tn))
+            (cmp ,temp-reg-tn ,(ea (* (1+ thread-alloc-region-slot) 8) thread-base-tn))
+            (jmp :a label)
+            (mov ,(ea (* thread-alloc-region-slot 8) thread-base-tn) ,temp-reg-tn)
+            (mov ,r9-tn ,(ea -56 rbp-tn)) ; arbitrary load
+            (mov ,(ea r10-tn) ,r9-tn)     ; store to newly allocated cons
+            ("LEA" ,r9-tn ,(ea (+ 16 list-pointer-lowtag) r10-tn))
+            (mov ,(ea 8 r10-tn) ,r9-tn)
+            (mov ,(ea 16 r10-tn) ,rsi-tn)
+            (mov :dword ,(ea 24 r10-tn) ,nil-value)
+            (or :byte ,r10-tn ,list-pointer-lowtag)))))
+    (sb-sys:with-pinned-objects (bytes)
+      (multiple-value-bind (type size)
+          (sb-aprof::infer-type (sb-sys:sap-int (sb-sys:vector-sap bytes)) bytes)
+        (assert (eq type 'list))
+        (assert (= size (* 2 sb-vm:cons-size sb-vm:n-word-bytes))))))
   (compile 'f1)
   (compile 'f2)
   (assert (= (sb-aprof:aprof-run #'f1 :stream nil) 32))
   (assert (= (sb-aprof:aprof-run #'f2 :stream nil) 32)))
+
+#-win32
+(with-test (:name :aprof-bignum)
+  (let ((bytes
+         (test-util:assemble
+          sb-vm::
+          `(("INC" :qword ,(ea 1024 temp-reg-tn) :lock)
+            (mov ,(ea (* thread-pseudo-atomic-bits-slot 8) thread-base-tn) ,rbp-tn)
+            (mov ,rcx-tn ,(ea (* thread-alloc-region-slot 8) thread-base-tn))
+            ("LEA" ,temp-reg-tn ,(ea (* 2 n-word-bytes) rcx-tn))
+            (cmp ,temp-reg-tn ,(ea (* (1+ thread-alloc-region-slot) 8) thread-base-tn))
+            (jmp :a label)
+            (mov ,(ea (* thread-alloc-region-slot 8) thread-base-tn) ,temp-reg-tn)
+            (mov :word ,(ea rcx-tn) ,(logior #x100 bignum-widetag))))))
+    (sb-sys:with-pinned-objects (bytes)
+      (multiple-value-bind (type size)
+          (sb-aprof::infer-type (sb-sys:sap-int (sb-sys:vector-sap bytes)) bytes)
+        (assert (eq type 'bignum))
+        (assert (= size (* 2 sb-vm:n-word-bytes)))))))
+
+(defstruct this-struct)
+(defstruct that-struct)
+(declaim (inline make-this-struct make-that-struct))
+(defun make-structs ()
+  (declare (optimize sb-c::instrument-consing))
+  (values (make-this-struct) (make-that-struct)))
+(compile 'make-structs)
+#-win32
+(with-test (:name :aprof-instance
+            :fails-on :sb-safepoint)
+  (let (seen-this seen-that)
+    (dolist (line (split-string
+                   (with-output-to-string (s)
+                     (sb-aprof:aprof-run #'make-structs :stream s))
+                   #\newline))
+      (when (search "THIS-STRUCT" line) (setq seen-this t))
+      (when (search "THAT-STRUCT" line) (setq seen-that t)))
+    (assert (and seen-this seen-that))))

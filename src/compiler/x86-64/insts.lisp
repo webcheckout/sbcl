@@ -19,11 +19,11 @@
             ea-p ea-base ea-index size-nbyte
             ea make-ea ea-disp rip-relative-ea) "SB-VM")
   ;; Imports from SB-VM into this package
-  #!+sb-simd-pack-256
+  #+sb-simd-pack-256
   (import '(sb-vm::int-avx2-reg sb-vm::double-avx2-reg sb-vm::single-avx2-reg))
   (import '(sb-vm::tn-reg sb-vm::reg-name
             sb-vm::frame-byte-offset sb-vm::rip-tn sb-vm::rbp-tn
-            #!+avx2 sb-vm::avx2-reg
+            #+avx2 sb-vm::avx2-reg
             sb-vm::registers sb-vm::float-registers sb-vm::stack))) ; SB names
 
 ;;; a REG object discards all information about a TN except its storage base
@@ -148,7 +148,7 @@
   :sign-extend t
   :use-label (lambda (value dstate) (+ (dstate-next-addr dstate) value))
   :printer (lambda (value stream dstate)
-             (or #!+immobile-space
+             (or #+immobile-space
                  (and (integerp value) (maybe-note-lisp-callee value dstate))
                  (maybe-note-assembler-routine value nil dstate))
              (print-label value stream dstate)))
@@ -1143,7 +1143,7 @@
                                   sb-vm::+byte-register-names+)
                           t)
                          (gpr-id-size-class id)))
-                 #!+avx2
+                 #+avx2
                  ((is-avx2-id-p id)
                   #.(coerce (loop for i below 16 collect (format nil "YMM~D" i))
                             'vector))
@@ -1224,7 +1224,7 @@
                    operand)
                   ((eq (sb-name (sc-sb (tn-sc operand))) 'registers)
                    (tn-reg operand))
-                  #!+avx2
+                  #+avx2
                   ((memq (sc-name (tn-sc operand))
                          '(avx2-reg
                            int-avx2-reg
@@ -1382,7 +1382,7 @@
     (emit-byte segment #x66))
   (ecase lock
     ((nil))
-    (:lock (emit-byte segment #xf0))) ; even if #!-sb-thread
+    (:lock (emit-byte segment #xf0))) ; even if #-sb-thread
   (let ((ea-p (ea-p thing)))
     (emit-rex-if-needed segment
                         (eq operand-size :qword) ; REX.W
@@ -1543,7 +1543,7 @@
                   ((and (fixup-p src)
                         (member (fixup-flavor src)
                                 '(:named-call :static-call :assembly-routine
-                                  :layout :immobile-object :foreign)))
+                                  :layout :immobile-symbol :foreign)))
                    (emit-prefixes segment dst nil :dword)
                    (emit-byte+reg segment #xB8 dst)
                    (emit-absolute-fixup segment src))
@@ -1578,7 +1578,7 @@
             ;; low enough addresses that this works.
             (aver (member (fixup-flavor src)
                           '(:foreign :foreign-dataref :symbol-tls-index
-                            :assembly-routine :layout :immobile-object)))
+                            :assembly-routine :layout :immobile-symbol)))
             (emit-prefixes segment dst nil size)
             (emit-byte segment #xC7)
             (emit-ea segment dst #b000)
@@ -1846,7 +1846,7 @@
              (emit-byte segment it))
             ((or (integerp src)
                  (and (fixup-p src)
-                      (memq (fixup-flavor src) '(:layout :immobile-object))))
+                      (memq (fixup-flavor src) '(:layout :immobile-symbol))))
              (emit-prefixes segment dst nil size :lock lockp)
              (cond ((accumulator-p dst)
                     (emit-byte segment
@@ -2399,17 +2399,17 @@
 ;;;; interrupt instructions
 
 (define-instruction break (segment &optional (code nil codep))
-  #!-ud2-breakpoints (:printer byte-imm ((op (or #!+int4-breakpoints #xCE #xCC)))
+  #-ud2-breakpoints (:printer byte-imm ((op (or #+int4-breakpoints #xCE #xCC)))
                                '(:name :tab code) :control #'break-control)
-  #!+ud2-breakpoints (:printer word-imm ((op #x0B0F))
+  #+ud2-breakpoints (:printer word-imm ((op #x0B0F))
                                '(:name :tab code) :control #'break-control)
   (:emitter
-   #!-ud2-breakpoints (emit-byte segment (or #!+int4-breakpoints #xCE #xCC))
+   #-ud2-breakpoints (emit-byte segment (or #+int4-breakpoints #xCE #xCC))
    ;; On darwin, trap handling via SIGTRAP is unreliable, therefore we
    ;; throw a sigill with 0x0b0f instead and check for this in the
    ;; SIGILL handler and pass it on to the sigtrap handler if
    ;; appropriate
-   #!+ud2-breakpoints (emit-word segment #x0B0F)
+   #+ud2-breakpoints (emit-word segment #x0B0F)
    (when codep (emit-byte segment (the (unsigned-byte 8) code)))))
 
 (define-instruction int (segment number)
@@ -2440,7 +2440,7 @@
   (declare (type sb-assem:segment segment)
            (type index amount))
   ;; Pack all instructions into one byte vector to save space.
-  (let* ((bytes #.(!coerce-to-specialized
+  (let* ((bytes #.(sb-xc:coerce
                           #(#x90
                             #x66 #x90
                             #x0f #x1f #x00
@@ -2450,7 +2450,7 @@
                             #x0f #x1f #x80 #x00 #x00 #x00 #x00
                             #x0f #x1f #x84 #x00 #x00 #x00 #x00 #x00
                             #x66 #x0f #x1f #x84 #x00 #x00 #x00 #x00 #x00)
-                          '(unsigned-byte 8)))
+                          '(vector (unsigned-byte 8))))
          (max-length (isqrt (* 2 (length bytes)))))
     (loop
       (let* ((count (min amount max-length))
@@ -2487,11 +2487,7 @@
 
 (define-instruction simple-fun-header-word (segment)
   (:emitter
-   (emit-header-data segment
-                     (logior simple-fun-widetag
-                             #!+(and compact-instance-header (host-feature sb-xc-host))
-                             (ash function-layout 32)))))
-
+   (emit-header-data segment simple-fun-widetag)))
 
 ;;;; Instructions required to do floating point operations using SSE
 
@@ -3369,36 +3365,29 @@
     (typecase first
       (single-float (setf constant (list :single-float first)))
       (double-float (setf constant (list :double-float first)))
-      .
-      #+sb-xc-host
-      ((complex
-        ;; It's an error (perhaps) on the host to use simd-pack type.
-        ;; [and btw it's disconcerting that this isn't an ETYPECASE.]
-        (error "xc-host can't reference complex float")))
-      #-sb-xc-host
-      (((complex single-float)
-        (setf constant (list :complex-single-float first)))
-       ((complex double-float)
-        (setf constant (list :complex-double-float first)))
-       #!+sb-simd-pack
-       (simd-pack
-        (setq constant
-              (list :sse (logior (%simd-pack-low first)
-                                 (ash (%simd-pack-high first) 64)))))
-       #!+sb-simd-pack-256
-       (simd-pack-256
-        (setq constant
-              (list :avx2 (logior (%simd-pack-256-0 first)
-                                  (ash (%simd-pack-256-1 first) 64)
-                                  (ash (%simd-pack-256-2 first) 128)
-                                  (ash (%simd-pack-256-3 first) 192))))))))
+      ((complex single-float)
+       (setf constant (list :complex-single-float first)))
+      ((complex double-float)
+       (setf constant (list :complex-double-float first)))
+      #+(and sb-simd-pack (not sb-xc-host))
+      (simd-pack
+       (setq constant
+             (list :sse (logior (%simd-pack-low first)
+                                (ash (%simd-pack-high first) 64)))))
+      #+(and sb-simd-pack-256 (not sb-xc-host))
+      (simd-pack-256
+       (setq constant
+             (list :avx2 (logior (%simd-pack-256-0 first)
+                                 (ash (%simd-pack-256-1 first) 64)
+                                 (ash (%simd-pack-256-2 first) 128)
+                                 (ash (%simd-pack-256-3 first) 192)))))))
   (destructuring-bind (type value) constant
     (ecase type
       ((:byte :word :dword :qword)
        (aver (integerp value))
        (cons type value))
       ((:base-char)
-       #!+sb-unicode (aver (typep value 'base-char))
+       #+sb-unicode (aver (typep value 'base-char))
        (cons :byte (char-code value)))
       ((:character)
        (aver (characterp value))

@@ -3,14 +3,20 @@
   (:export #:with-test #:report-test-status #:*failures*
            #:really-invoke-debugger
            #:*break-on-failure* #:*break-on-expected-failure*
+           #:*elapsed-times*
 
            ;; type tools
+           #:random-type
            #:type-evidently-=
            #:ctype=
            #:assert-tri-eq
+           #:random-type
 
            ;; thread tools
            #:make-kill-thread #:make-join-thread
+           #:wait-for-threads
+           #:process-all-interrupts
+           #:test-interrupt
            ;; cause tests to run in multiple threads
            #:enable-test-parallelism
 
@@ -22,7 +28,11 @@
            #:checked-compile #:checked-compile-and-assert
            #:checked-compile-capturing-source-paths
            #:checked-compile-condition-source-paths
+           #:assemble
 
+           #:scratch-file-name
+           #:with-scratch-file
+           #:opaque-identity
            #:runtime #:split-string #:integer-sequence #:shuffle))
 
 (in-package :test-util)
@@ -36,14 +46,32 @@
 (defvar *threads-to-kill*)
 (defvar *threads-to-join*)
 
-(eval-when (:compile-toplevel :load-toplevel :execute)
-  (require :sb-posix))
+(defun setenv (name value)
+  #-win32
+  (let ((r (sb-alien:alien-funcall
+            (sb-alien:extern-alien
+             "setenv" (function sb-alien:int (sb-alien:c-string :not-null t)
+                                (sb-alien:c-string :not-null t) sb-alien:int))
+                          name value 1)))
+    (if (minusp r)
+        (error "setenv: ~a" (sb-int:strerror))
+        r))
+  #+win32
+  (let ((r (sb-alien:alien-funcall
+            (sb-alien:extern-alien "_putenv" (function sb-alien:int (sb-alien:c-string :not-null t)))
+                          (format nil "~A=~A" name value))))
+    (if (minusp r)
+        (error "putenv: ~a" (sb-int:strerror))
+        r)))
 
-(sb-posix:putenv (format nil "SBCL_MACHINE_TYPE=~A" (machine-type)))
-(sb-posix:putenv (format nil "SBCL_SOFTWARE_TYPE=~A" (software-type)))
+(setenv "SBCL_MACHINE_TYPE" (machine-type))
+(setenv "SBCL_SOFTWARE_TYPE" (software-type))
 
 
 ;;; Type tools
+
+(defun random-type (n)
+  `(integer ,(random n) ,(+ n (random n))))
 
 (defun type-evidently-= (x y)
   (and (subtypep x y) (subtypep y x)))
@@ -67,8 +95,9 @@
 
 ;;; Thread tools
 
-#+sb-thread
 (defun make-kill-thread (&rest args)
+  #-sb-thread (error "can't make-kill-thread ~s" args)
+  #+sb-thread
   (let ((thread (apply #'sb-thread:make-thread args)))
     #-win32 ;; poor thread interruption on safepoints
     (when (boundp '*threads-to-kill*)
@@ -82,6 +111,23 @@
       (push thread *threads-to-join*))
     thread))
 
+(defun wait-for-threads (threads)
+  (mapc (lambda (thread) (sb-thread:join-thread thread :default nil)) threads)
+  (assert (not (some #'sb-thread:thread-alive-p threads))))
+
+(defun process-all-interrupts (&optional (thread sb-thread:*current-thread*))
+  (sb-ext:wait-for (null (sb-thread::thread-interruptions thread))))
+
+(defun test-interrupt (function-to-interrupt &optional quit-p)
+  (let ((child  (make-kill-thread function-to-interrupt)))
+    (format t "interrupting child ~A~%" child)
+    (sb-thread:interrupt-thread child
+     (lambda ()
+       (format t "child pid ~A~%" sb-thread:*current-thread*)
+       (when quit-p (sb-thread:abort-thread))))
+    (process-all-interrupts child)
+    child))
+
 (defun log-msg (stream &rest args)
   (prog1 (apply #'format stream "~&::: ~@?~%" args)
     (force-output stream)))
@@ -90,7 +136,15 @@
   (let ((*print-pretty* nil))
     (apply #'log-msg stream args)))
 
-(defun run-test (test-function name fails-on)
+(defvar *elapsed-times*)
+(defun record-test-elapsed-time (test-name start-time)
+  (let ((et (- (get-internal-real-time) start-time)))
+    ;; ATOMIC in case we have within-file test concurrency
+    ;; (not sure if it actually works, but it looks right anyway)
+    (sb-ext:atomic-push (cons et test-name) *elapsed-times*)))
+
+(defun run-test (test-function name fails-on
+                 &aux (start-time (get-internal-real-time)))
   (start-test)
   (let (#+sb-thread (threads (sb-thread:list-all-threads))
         (*threads-to-join* nil)
@@ -131,7 +185,8 @@
       (if (expected-failure-p fails-on)
           (fail-test :unexpected-success name nil)
           ;; Non-pretty is for cases like (with-test (:name (let ...)) ...
-          (log-msg/non-pretty *trace-output* "Success ~S" name)))))
+          (log-msg/non-pretty *trace-output* "Success ~S" name))))
+  (record-test-elapsed-time name start-time))
 
 ;;; Like RUN-TEST but do not perform any of the automated thread management.
 ;;; Since multiple threads are executing tests, there is no reason to kill
@@ -171,9 +226,9 @@
            (typecase x
              (symbol (let ((package (symbol-package x)))
                        (or (null package)
+                           (sb-int:system-package-p package)
                            (eql package (find-package "CL"))
-                           (eql package (find-package "KEYWORD"))
-                           (eql (mismatch "SB-" (package-name package)) 3))))
+                           (eql package (find-package "KEYWORD")))))
              (integer t))))
     (unless (tree-equal name name :test #'name-ok)
       (error "test name must be all-keywords: ~S" name)))
@@ -186,7 +241,10 @@
      `(progn
         (start-test)
         (fail-test :skipped-disabled ',name "Test disabled for this combination of platform and features")))
-    ((and (boundp '*deferred-test-forms*) (not fails-on) (not serial))
+    ((and (boundp '*deferred-test-forms*)
+          (not serial)
+          (or (not fails-on)
+              (not (expected-failure-p fails-on))))
      ;; To effectively parallelize calls to COMPILE, we must defer compilation
      ;; until a worker thread has picked off the test from shared worklist.
      ;; Thus we push only the form to be compiled, not a lambda.
@@ -757,6 +815,10 @@
 (defmacro runtime (form &key (repetitions 5) (precision 30))
   `(runtime* (lambda () ,form) ,repetitions ,precision))
 
+(declaim (notinline opaque-identity))
+(defun opaque-identity (x) x)
+(compile 'opaque-identity) ; in case this file was loaded as interpreted code
+
 (defun split-string (string delimiter)
   (loop for begin = 0 then (1+ end)
         for end = (position delimiter string) then (position delimiter string :start begin)
@@ -777,3 +839,53 @@
              unless (= chosen lim)
              do (rotatef (aref vector chosen) (aref vector lim)))
        vector))))
+
+;;; Return a random file name to avoid writing into the source tree.
+;;; We can't use any of the interfaces provided in libc because those are inadequate
+;;; for purposes of COMPILE-FILE. This is not trying to be robust against attacks.
+(defun scratch-file-name (&optional extension)
+  (let ((a (make-array 10 :element-type 'character)))
+    (dotimes (i 10)
+      (setf (aref a i) (code-char (+ (char-code #\a) (random 26)))))
+    ;; not sure where to write files on win32. this is no worse than what it was
+    #+win32 (format nil "~a~@[.~a~]" a extension)
+    #-win32 (let ((dir (posix-getenv "TMPDIR"))
+                  (file (format nil "sbcl~d~a~@[.~a~]"
+                                (sb-unix:unix-getpid) a extension)))
+              (if dir
+                  (namestring
+                   (merge-pathnames
+                    file (parse-native-namestring dir nil *default-pathname-defaults*
+                                                  :as-directory t)))
+                  (concatenate 'string "/tmp/" file)))))
+
+(defmacro with-scratch-file ((var &optional extension) &body forms)
+  (sb-int:with-unique-names (tempname)
+    `(let ((,tempname (scratch-file-name ,extension)))
+       (unwind-protect
+            (let ((,var ,tempname)) ,@forms) ; rebind, as test might asssign into VAR
+         (ignore-errors (delete-file ,tempname))))))
+
+;;; Take a list of lists and assemble them as though they are
+;;; instructions inside the body of a vop. There is no need
+;;; to use the INST macro in front of each list.
+;;; As a special case, an atom is the symbol LABEL, it will be
+;;; changed to a generated label. At most one such atom may appear.
+(defun assemble (instructions)
+  (let ((segment (sb-assem:make-segment))
+        (label))
+    (sb-assem:assemble (segment 'nil)
+       (dolist (inst instructions)
+         (setq inst (copy-list inst))
+         (mapl (lambda (cell &aux (x (car cell)))
+                 (when (and (symbolp x) (string= x "LABEL"))
+                   (setq label (sb-assem:gen-label))
+                   (rplaca cell label)))
+               inst)
+         (apply #'sb-assem::%inst
+                (sb-assem::op-encoder-name (car inst))
+                (cdr inst)))
+       (when label
+         (sb-assem::%emit-label segment nil label)))
+    (sb-assem:segment-buffer
+     (sb-assem:finalize-segment segment))))

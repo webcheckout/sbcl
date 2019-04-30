@@ -59,8 +59,7 @@
 (defun instrument-alloc (size node)
   (when (policy node (> sb-c::instrument-consing 1))
     (let ((skip-instrumentation (gen-label)))
-      (inst mov temp-reg-tn
-            (ea (* n-word-bytes thread-profile-data-slot) thread-base-tn))
+      (inst mov temp-reg-tn (thread-slot-ea thread-profile-data-slot))
       (inst test temp-reg-tn temp-reg-tn)
       ;; This instruction is modified to "JMP :z" when profiling is
       ;; partially enabled. After the buffer is assigned, it becomes
@@ -99,13 +98,13 @@
   (aver (and (not (location= alloc-tn temp-reg-tn))
              (or (integerp size) (not (location= size temp-reg-tn)))))
 
-  #!+(and (not sb-thread) sb-dynamic-core)
+  #+(and (not sb-thread) sb-dynamic-core)
   ;; We'd need a spare reg in which to load boxed_region from the linkage table.
   ;; Could push/pop any random register on the stack and own it temporarily,
   ;; but seeing as nobody cared about this, just punt.
   (%alloc-tramp node alloc-tn size lowtag)
 
-  #!-(and (not sb-thread) sb-dynamic-core)
+  #-(and (not sb-thread) sb-dynamic-core)
   ;; Otherwise do the normal inline allocation thing
   (let ((NOT-INLINE (gen-label))
         (DONE (gen-label))
@@ -113,12 +112,12 @@
         (in-elsewhere (sb-assem::assembling-to-elsewhere-p))
         ;; thread->alloc_region.free_pointer
         (free-pointer
-         #!+sb-thread (thread-slot-ea thread-alloc-region-slot)
-         #!-sb-thread (ea (make-fixup "gc_alloc_region" :foreign)))
+         #+sb-thread (thread-slot-ea thread-alloc-region-slot)
+         #-sb-thread (ea (make-fixup "gc_alloc_region" :foreign)))
         ;; thread->alloc_region.end_addr
         (end-addr
-         #!+sb-thread (thread-slot-ea (1+ thread-alloc-region-slot))
-         #!-sb-thread (ea (make-fixup "gc_alloc_region" :foreign 8))))
+         #+sb-thread (thread-slot-ea (1+ thread-alloc-region-slot))
+         #-sb-thread (ea (make-fixup "gc_alloc_region" :foreign 8))))
 
     (cond ((or in-elsewhere
                ;; large objects will never be made in a per-thread region
@@ -361,7 +360,7 @@
         (when sb-c::*msan-unpoison*
           ;; Unpoison all DX vectors regardless of widetag.
           ;; Mark the header and length as valid, not just the payload.
-          #!+linux ; unimplemented for others
+          #+linux ; unimplemented for others
           (let ((words-savep
                  ;; 'words' might be co-located with any of the temps
                  (or (location= words rdi) (location= words rcx) (location= words rax))))
@@ -496,7 +495,7 @@
         (storew nil-value tail cons-cdr-slot list-pointer-lowtag))
       done)))
 
-#!-immobile-space
+#-immobile-space
 (define-vop (make-fdefn)
   (:policy :fast-safe)
   (:translate make-fdefn)
@@ -524,11 +523,11 @@
        (instrument-alloc bytes node))
      (pseudo-atomic (:elide-if stack-allocate-p)
        (allocation result bytes node stack-allocate-p fun-pointer-lowtag)
-       (storew* #!-immobile-space header ; write the widetag and size
-                #!+immobile-space        ; ... plus the layout pointer
+       (storew* #-immobile-space header ; write the widetag and size
+                #+immobile-space        ; ... plus the layout pointer
                 (progn (inst mov temp header)
-                       (inst or temp #!-sb-thread (static-symbol-value-ea 'function-layout)
-                                     #!+sb-thread
+                       (inst or temp #-sb-thread (static-symbol-value-ea 'function-layout)
+                                     #+sb-thread
                                      (thread-slot-ea thread-function-layout-slot))
                        temp)
                 result 0 fun-pointer-lowtag (not stack-allocate-p)))
@@ -570,29 +569,35 @@
   (:results (result :scs (descriptor-reg)))
   (:node-var node)
   (:generator 50
-   (let ((bytes (pad-data-block words)))
+   (let* ((instancep (typep type 'layout)) ; is this any instance?
+          (layoutp #+immobile-space
+                   (eq type #.(find-layout 'layout))) ; " a new LAYOUT instance?
+          (bytes (pad-data-block words)))
     (progn name) ; possibly not used
-    (unless stack-allocate-p
+    (unless (or stack-allocate-p layoutp)
       (instrument-alloc bytes node))
     (pseudo-atomic (:elide-if stack-allocate-p)
-     ;; If storing a header word, defer ORing in the lowtag until after
-     ;; the header is written so that displacement can be 0.
-     (allocation result bytes node stack-allocate-p (if type 0 lowtag))
-     (when type
-       (let* ((widetag (if (typep type 'layout) instance-widetag type))
-              (header (logior (ash (1- words) n-widetag-bits) widetag)))
-         (if (or #!+compact-instance-header
-                 (and (eq name '%make-structure-instance) stack-allocate-p))
-             ;; Write a :DWORD, not a :QWORD, because the high half will be
-             ;; filled in when the layout is stored. Can't use STOREW* though,
-             ;; because it tries to store as few bytes as possible,
-             ;; where this instruction must write exactly 4 bytes.
-             (inst mov :dword (ea 0 result) header)
-             (storew* header result 0 0 (not stack-allocate-p)))
-         (inst or :byte result lowtag))))
-    (when (typep type 'layout)
+     (cond (layoutp
+            (invoke-asm-routine 'call 'alloc-layout node)
+            (inst mov result r11-tn))
+           (t
+            ;; If storing a header word, defer ORing in the lowtag until after
+            ;; the header is written so that displacement can be 0.
+            (allocation result bytes node stack-allocate-p (if type 0 lowtag))
+            (when type
+              (let* ((widetag (if instancep instance-widetag type))
+                     (header (logior (ash (1- words) n-widetag-bits) widetag)))
+                (if (or #+compact-instance-header
+                        (and (eq name '%make-structure-instance) stack-allocate-p))
+                    ;; Write a :DWORD, not a :QWORD, because the high half will be
+                    ;; filled in when the layout is stored. Can't use STOREW* though,
+                    ;; because it tries to store as few bytes as possible,
+                    ;; where this instruction must write exactly 4 bytes.
+                    (inst mov :dword (ea 0 result) header)
+                    (storew* header result 0 0 (not stack-allocate-p)))
+                (inst or :byte result lowtag))))))
+    (when instancep ; store its layout
       (inst mov :dword (ea (+ 4 (- lowtag)) result)
-            ;; XXX: should layout fixups use a name, not a layout object?
             (make-fixup type :layout))))))
 
 ;;; Allocate a non-vector variable-length object.
@@ -634,7 +639,7 @@
                 (inst call (cond ((sb-c::code-immobile-p node) c-fun)
                                  (t (progn (inst mov temp-reg-tn c-fun)
                                            temp-reg-tn)))))))
-#!+immobile-space
+#+immobile-space
 (define-vop (alloc-immobile-fixedobj)
   (:info lowtag size header)
   (:temporary (:sc unsigned-reg :to :eval :offset rdi-offset) c-arg1)
@@ -652,23 +657,6 @@
    (pseudo-atomic ()
      (c-call "alloc_fixedobj")
      (inst lea result (ea lowtag c-result)))))
-
-#!+immobile-space
-(define-vop (alloc-immobile-layout)
-  (:args (slots :scs (descriptor-reg) :target c-arg1))
-  (:temporary (:sc unsigned-reg :from (:argument 0) :to :eval :offset rdi-offset)
-              c-arg1)
-  (:temporary (:sc unsigned-reg :from :eval :to (:result 0) :offset rax-offset)
-              c-result)
-  (:results (result :scs (descriptor-reg)))
-  (:node-var node)
-  (:generator 50
-   (move c-arg1 slots)
-   ;; RSP needn't be restored because the allocators all return immediately
-   ;; which has that effect
-   (inst and rsp-tn -16)
-   (pseudo-atomic () (c-call "alloc_layout"))
-   (move result c-result)))
 
 (define-vop (alloc-dynamic-space-code)
   (:args (total-words :scs (signed-reg) :target c-arg1))

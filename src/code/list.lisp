@@ -143,7 +143,8 @@
                       (y y (cdr y)))
                      ((or (atom x)
                           (atom y))
-                      (eql x y))
+                      (or (eql x y)
+                          (return-from tree-equal-eql)))
                    (cond ((consp (car x))
                           (when (atom (car y))
                             (return-from tree-equal-eql))
@@ -580,12 +581,6 @@
 (defun rplacd (cons x)
   "Change the CDR of CONS to X and return the CONS."
   (rplacd cons x))
-
-;;; The following are for use by SETF.
-
-(defun %rplaca (x val) (rplaca x val) val)
-
-(defun %rplacd (x val) (rplacd x val) val)
 
 ;;; Set the Nth element of LIST to NEWVAL.
 (defun %setnth (n list newval)

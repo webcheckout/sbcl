@@ -11,8 +11,6 @@
 ;;;; absolutely no warranty. See the COPYING and CREDITS files for
 ;;;; more information.
 
-(cl:in-package :cl-user)
-
 ;;; Until 0.7.7.21, (MAKE-CONDITION 'FILE-ERROR :PATHNAME "FOO")
 ;;; wasn't printable, because the REPORT function for FILE-ERROR
 ;;; referred to unbound slots. This was reported and fixed by Antonio
@@ -105,6 +103,18 @@
                                         :failed)))))
          (cerror (formatter "Continue from ~A") "bug ~A" :bug)))
      :passed))
+
+(with-test (:name :disallow-bogus-coerce-to-condition)
+  ;; COERCE-TO-CONDITION has an ftype which precludes passing junk
+  ;; if caught at compile-time.
+  ;; A non-constant non-condition-designator was able to sneak through.
+  (multiple-value-bind (c err)
+      (ignore-errors (sb-kernel::coerce-to-condition
+                      (opaque-identity #p"foo")
+                      'condition 'feep))
+    (declare (ignore c))
+    (assert (search "does not designate a condition"
+                    (write-to-string err :escape nil)))))
 
 (with-test (:name (handler-bind :smoke))
   (let ((called?))

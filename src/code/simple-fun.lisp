@@ -68,9 +68,9 @@
         ;; pass to %COPY-CLOSURE is 1 less than that, were it not for
         ;; the fact that we actually want to create 1 additional slot.
         ;; So in effect, asking for PAYLOAD-LEN does exactly the right thing.
-        (let ((copy #!-(or x86 x86-64)
+        (let ((copy #-(or x86 x86-64)
                     (sb-vm::%copy-closure payload-len (%closure-fun closure))
-                    #!+(or x86 x86-64)
+                    #+(or x86 x86-64)
                     (with-pinned-objects ((%closure-fun closure))
                       ;; %CLOSURE-CALLEE manifests as a fixnum which remains
                       ;; valid across GC due to %CLOSURE-FUN being pinned
@@ -85,10 +85,10 @@
                   do (setf (sap-ref-lispobj sap ofs) (%closure-index-ref closure i)))
             (setf (closure-header-word copy) ; Update the header
                   ;; Closure copy lost its high header bits, so OR them in again.
-                  (logior #!+(and immobile-space 64-bit sb-thread)
+                  (logior #+(and immobile-space 64-bit sb-thread)
                           (sap-int (sb-vm::current-thread-offset-sap
                                     sb-vm::thread-function-layout-slot))
-                          #!+(and immobile-space 64-bit (not sb-thread))
+                          #+(and immobile-space 64-bit (not sb-thread))
                           (get-lisp-obj-address sb-vm:function-layout)
                           (extendedp-bit)
                           (closure-header-word copy)))
@@ -194,12 +194,10 @@
        (generic-function
         (return-from %fun-name
           (sb-mop:generic-function-name function)))
-       #!+sb-eval
-       (sb-eval:interpreted-function
-        (return-from %fun-name (sb-eval:interpreted-function-debug-name function)))
-       #!+sb-fasteval
-       (sb-interpreter:interpreted-function
+       (interpreted-function
         (return-from %fun-name
+          #+sb-eval (sb-eval:interpreted-function-debug-name function)
+          #+sb-fasteval
           (let ((name (sb-interpreter:proto-fn-name (sb-interpreter:fun-proto-fn function))))
             (unless (eql name 0)
               name)))))))
@@ -215,35 +213,31 @@
      (typecase (truly-the funcallable-instance function)
        (generic-function
         (setf (sb-mop:generic-function-name function) new-value))
-       #!+sb-eval
-       (sb-eval:interpreted-function
-        (setf (sb-eval:interpreted-function-debug-name function) new-value))
-       #!+sb-fasteval
-       (sb-interpreter:interpreted-function
+       (interpreted-function
+        #+sb-eval
+        (setf (sb-eval:interpreted-function-debug-name function) new-value)
+        #+sb-fasteval
         (setf (sb-interpreter:proto-fn-name (sb-interpreter:fun-proto-fn function))
               new-value)))))
   new-value)
 
 (defun %fun-lambda-list (function)
   (typecase function
-    #!+sb-fasteval
-    (sb-interpreter:interpreted-function
-     (sb-interpreter:proto-fn-pretty-arglist
-      (sb-interpreter:fun-proto-fn function)))
-    #!+sb-eval
-    (sb-eval:interpreted-function
+    (interpreted-function
+     #+sb-fasteval
+     (sb-interpreter:proto-fn-pretty-arglist (sb-interpreter:fun-proto-fn function))
+     #+sb-eval
      (sb-eval:interpreted-function-debug-lambda-list function))
     (t
      (%simple-fun-arglist (%fun-fun function)))))
 
 (defun (setf %fun-lambda-list) (new-value function)
   (typecase function
-    #!+sb-fasteval
-    (sb-interpreter:interpreted-function
-     (setf (sb-interpreter:proto-fn-pretty-arglist
-            (sb-interpreter:fun-proto-fn function)) new-value))
-    #!+sb-eval
-    (sb-eval:interpreted-function
+    (interpreted-function
+     #+sb-fasteval
+     (setf (sb-interpreter:proto-fn-pretty-arglist (sb-interpreter:fun-proto-fn function))
+           new-value)
+     #+sb-eval
      (setf (sb-eval:interpreted-function-debug-lambda-list function) new-value))
     ;; FIXME: Eliding general funcallable-instances for now.
     ((or simple-fun closure)
@@ -260,10 +254,10 @@
 
 (defun %fun-type (function)
   (typecase function
-    #!+sb-fasteval
+    #+sb-fasteval
     ;; Obtain a list of the right shape, usually with T for each
     ;; arg type, but respecting local declarations if any.
-    (sb-interpreter:interpreted-function (sb-interpreter:%fun-type function))
+    (interpreted-function (sb-interpreter:%fun-type function))
     (t (%simple-fun-type (%fun-fun function)))))
 
 ;;; A FUN-SRC structure appears in %SIMPLE-FUN-INFO of any function for
@@ -369,7 +363,7 @@
   ;; and filler_obj_p() in the C code
   (eql (sb-vm::%code-boxed-size code-obj) 0))
 
-#!+(or sparc alpha hppa ppc64)
+#+(or sparc alpha hppa ppc64)
 (defun code-trailer-ref (code offset)
   (with-pinned-objects (code)
     (sap-ref-32 (int-sap (get-lisp-obj-address code))
@@ -383,8 +377,8 @@
       0
       (let ((word (code-trailer-ref code-obj -4)))
         ;; TRAILER-REF returns 4-byte quantities. Extract a two-byte quantity.
-        #!+little-endian (ldb (byte 16 16) word)
-        #!+big-endian    (ldb (byte 16  0) word))))
+        #+little-endian (ldb (byte 16 16) word)
+        #+big-endian    (ldb (byte 16  0) word))))
 
 ;;; The fun-table-count is a uint16_t immediately preceding the trailer length
 ;;; containing two subfields:
@@ -396,8 +390,8 @@
       0
       (let ((word (code-trailer-ref code-obj -4)))
         ;; TRAILER-REF returns 4-byte quantities. Extract a two-byte quantity.
-        #!+little-endian (ldb (byte 16  0) word)
-        #!+big-endian    (ldb (byte 16 16) word))))
+        #+little-endian (ldb (byte 16  0) word)
+        #+big-endian    (ldb (byte 16 16) word))))
 
 ;;; Return the number of simple-funs in CODE-OBJ
 ;;; Keep in sync with C function code_n_funs()
@@ -467,7 +461,7 @@
 ;;; FUN must be pinned.
 (declaim (inline sb-vm:simple-fun-entry-sap))
 (defun sb-vm:simple-fun-entry-sap (fun)
-  #!-(or x86 x86-64)
+  #-(or x86 x86-64)
   (int-sap (+ (get-lisp-obj-address fun)
               (- sb-vm:fun-pointer-lowtag)
               (ash sb-vm:simple-fun-code-offset sb-vm:word-shift)))
@@ -477,7 +471,7 @@
   ;; If that change is done, then you must indirect through the SELF pointer
   ;; in order to get the correct starting address.
   ;; (Such change would probably be confined to x86[-64])
-  #!+(or x86 x86-64)
+  #+(or x86 x86-64)
   (sap-ref-sap (int-sap (- (get-lisp-obj-address fun) sb-vm:fun-pointer-lowtag))
                (ash sb-vm:simple-fun-self-slot sb-vm:word-shift)))
 
@@ -536,34 +530,35 @@
 (defun sb-c::install-guard-function (symbol fun-name)
   ;; (SETF SYMBOL-FUNCTION) goes out of its way to disallow this closure,
   ;; but we can trivially replicate its low-level effect.
-  (let ((fdefn (find-or-create-fdefn symbol))
-        (closure
+  (let ((closure
          (set-closure-name
           (lambda (&rest args)
            (declare (ignore args))
            ;; ANSI specification of FUNCALL says that this should be
            ;; an error of type UNDEFINED-FUNCTION, not just SIMPLE-ERROR.
            ;; SPECIAL-FORM-FUNCTION is a subtype of UNDEFINED-FUNCTION.
-           (error (if (eq (info :function :kind symbol) :special-form)
+           (error (if (special-operator-p symbol)
                       'special-form-function
                       'undefined-function)
                   :name symbol))
           t
           fun-name)))
-    ;; For immobile-code, do something slightly different: fmakunbound,
-    ;; then assign the fdefn-fun slot to avoid consing a new closure trampoline.
-    #!+immobile-code
-    (progn (fdefn-makunbound fdefn)
-           ;; There is no :SET-TRANS for the primitive object's fdefn-fun slot,
-           ;; nor do we desire the full effect of %SET-FDEFN-FUN.
-           (setf (sap-ref-lispobj (int-sap (get-lisp-obj-address fdefn))
-                                  (- (ash sb-vm:fdefn-fun-slot sb-vm:word-shift)
-                                     sb-vm:other-pointer-lowtag))
-                 closure))
-    ;; The above would work, but there's no overhead when installing a closure
-    ;; the regular way, so just do that.
-    #!-immobile-code
-    (setf (fdefn-fun fdefn) closure)))
+    ;; In most cases, install the guard closure in the usual way.
+    #-immobile-code (setf (fdefn-fun (find-or-create-fdefn symbol)) closure)
+
+    ;; Do something slightly different for immobile code: fmakunbound, causing the FUN
+    ;; slot to become NIL, and RAW-ADDR to contain a call instruction; then overwrite
+    ;; NIL with the above closure. This is better than assigning a closure, because
+    ;; assigning a closure into an fdefn generally conses a new closure trampoline.
+    ;; (The CALL goes to undefined tramp which pops the stack to deduce the fdefn)
+    #+immobile-code
+    (let ((fdefn (find-or-create-fdefn symbol)))
+      (fdefn-makunbound fdefn)
+      (%primitive sb-vm::set-fdefn-fun ; This invokes TOUCH-GC-CARD
+                  fdefn closure
+                  (sap-ref-word (int-sap (get-lisp-obj-address fdefn))
+                                (- (ash sb-vm:fdefn-raw-addr-slot sb-vm:word-shift)
+                                   sb-vm:other-pointer-lowtag))))))
 
 ;;;; Iterating over closure values
 

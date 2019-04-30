@@ -251,6 +251,15 @@
                 (when (eq (block-start (first (block-succ (node-block node))))
                           (node-prev dest))
                   (return-from almost-immediately-used-p t))))))))
+
+;;; Check that all the uses are almost immediately used and look through CASTs,
+;;; as they can be freely deleted removing the immediateness
+(defun lvar-almost-immediately-used-p (lvar)
+  (do-uses (use lvar t)
+    (unless (and (almost-immediately-used-p lvar use)
+                 (or (not (cast-p use))
+                     (lvar-almost-immediately-used-p (cast-value use))))
+      (return))))
 
 ;;;; BLOCK UTILS
 
@@ -293,14 +302,13 @@
     (ref
      (update-lvar-dependencies new (lambda-var-ref-lvar old)))
     (lvar
-     (when (lvar-p new)
-       (do-uses (node old)
-         (when (exit-p node)
-           ;; Inlined functions will try to use the lvar in the lexenv
-           (loop for block in (lexenv-blocks (node-lexenv node))
-                 for block-lvar = (fourth block)
-                 when (eq old block-lvar)
-                 do (setf (fourth block) new)))))
+     (do-uses (node old)
+       (when (exit-p node)
+         ;; Inlined functions will try to use the lvar in the lexenv
+         (loop for block in (lexenv-blocks (node-lexenv node))
+               for block-lvar = (fourth block)
+               when (eq old block-lvar)
+               do (setf (fourth block) new))))
      (propagate-lvar-annotations new old))))
 
 ;;; In OLD's DEST, replace OLD with NEW. NEW's DEST must initially be
@@ -339,7 +347,9 @@
            (add-lvar-use node new))
          (reoptimize-lvar new)
          (propagate-lvar-dx new old propagate-dx))
-        (t (flush-dest old)))
+        (t
+         (update-lvar-dependencies new old)
+         (flush-dest old)))
 
   (values))
 
@@ -586,7 +596,7 @@
 (defun node-physenv (node)
   (lambda-physenv (node-home-lambda node)))
 
-#!-sb-fluid (declaim (inline node-stack-allocate-p))
+#-sb-fluid (declaim (inline node-stack-allocate-p))
 (defun node-stack-allocate-p (node)
   (awhen (node-lvar node)
     (lvar-dynamic-extent it)))
@@ -602,7 +612,7 @@
        (and info
             (ir1-attributep attributes flushable)
             (not (ir1-attributep attributes call))
-            (let ((type (proclaimed-ftype name)))
+            (let ((type (global-ftype name)))
               (or
                (not (fun-type-p type)) ;; Functions that accept anything, e.g. VALUES
                (multiple-value-bind (min max) (fun-type-arg-limits type)
@@ -725,7 +735,7 @@
   ;; It's just a distraction otherwise.
   (declare (ignorable lvar flush))
 
-  #!+(and (host-feature sb-xc-host)
+  #+(and sb-xc-host
           (not (and stack-allocatable-closures
                     stack-allocatable-vectors
                     stack-allocatable-lists
@@ -1079,7 +1089,7 @@
 (defun cast-single-value-p (cast)
   (not (values-type-p (cast-asserted-type cast))))
 
-#!-sb-fluid (declaim (inline lvar-single-value-p))
+#-sb-fluid (declaim (inline lvar-single-value-p))
 (defun lvar-single-value-p (lvar)
   (or (not lvar) (%lvar-single-value-p lvar)))
 (defun %lvar-single-value-p (lvar)
@@ -1160,7 +1170,7 @@
                ;; The evaluator will mark lexicals with :BOGUS when it
                ;; translates an interpreter lexenv to a compiler
                ;; lexenv.
-               ((or leaf #!+sb-eval (member :bogus)) nil)
+               ((or leaf #+sb-eval (member :bogus)) nil)
                (cons (aver (eq (car thing) 'macro))
                      t)
                (heap-alien-info nil)))))
@@ -1254,8 +1264,9 @@
 ;;; otherwise false.
 (defun join-successor-if-possible (block)
   (declare (type cblock block))
-  (let ((next (first (block-succ block))))
-    (when (block-start next)  ; NEXT is not an END-OF-COMPONENT marker
+  (let* ((next (first (block-succ block)))
+        (start (block-start next)))
+    (when start  ; NEXT is not an END-OF-COMPONENT marker
       (cond ( ;; We cannot combine with a successor block if:
              (or
               ;; the successor has more than one predecessor;
@@ -1289,7 +1300,10 @@
                         (and (consp (lvar-uses it))
                              (not (lvar-single-value-p it)))))))
               (neq (block-type-check block)
-                   (block-type-check next)))
+                   (block-type-check next))
+              ;; This ctran is a destination of an EXIT,
+              ;; a later inlined function may want to use it.
+              (ctran-entries start))
              nil)
             (t
              (join-blocks block next)
@@ -1890,7 +1904,7 @@
   (unless (block-component block)
     ;; Already deleted
     (return-from delete-block))
-  #!+high-security (aver (not (memq block (component-delete-blocks (block-component block)))))
+  #+high-security (aver (not (memq block (component-delete-blocks (block-component block)))))
   (unless silent
     (note-block-deletion block))
   (setf (block-delete-p block) t)
@@ -2120,31 +2134,38 @@
            (aver (eq prev-kind :block-start))
            (aver (eq node last))
            (let* ((succ (block-succ block))
-                  (next (first succ)))
+                  (next (first succ))
+                  (next-ctran (block-start next)))
              (aver (singleton-p succ))
+             ;; Update the ctran used by EXITs from BLOCKs.
+             (when next-ctran
+               (loop for entry in (ctran-entries prev)
+                     do (setf (second entry) next-ctran))
+               (setf (ctran-entries next-ctran)
+                     (ctran-entries prev)))
              (cond
-              ((eq block (first succ))
-               (with-ir1-environment-from-node node
-                 (let ((exit (make-exit)))
-                   (setf (ctran-next prev) nil)
-                   (link-node-to-previous-ctran exit prev)
-                   (setf (block-last block) exit)))
-               (setf (node-prev node) nil)
-               nil)
-              (t
-               (aver (eq (block-start-cleanup block)
-                         (block-end-cleanup block)))
-               (unlink-blocks block next)
-               (dolist (pred (block-pred block))
-                 (change-block-successor pred block next))
-               (when (block-delete-p block)
-                 (let ((component (block-component block)))
-                   (setf (component-delete-blocks component)
-                         (delq1 block (component-delete-blocks component)))))
-               (remove-from-dfo block)
-               (setf (block-delete-p block) t)
-               (setf (node-prev node) nil)
-               t)))))))
+               ((eq block (first succ))
+                (with-ir1-environment-from-node node
+                  (let ((exit (make-exit)))
+                    (setf (ctran-next prev) nil)
+                    (link-node-to-previous-ctran exit prev)
+                    (setf (block-last block) exit)))
+                (setf (node-prev node) nil)
+                nil)
+               (t
+                (aver (eq (block-start-cleanup block)
+                          (block-end-cleanup block)))
+                (unlink-blocks block next)
+                (dolist (pred (block-pred block))
+                  (change-block-successor pred block next))
+                (when (block-delete-p block)
+                  (let ((component (block-component block)))
+                    (setf (component-delete-blocks component)
+                          (delq1 block (component-delete-blocks component)))))
+                (remove-from-dfo block)
+                (setf (block-delete-p block) t)
+                (setf (node-prev node) nil)
+                t)))))))
 
 ;;; Return true if CTRAN has been deleted, false if it is still a valid
 ;;; part of IR1.
@@ -2346,23 +2367,24 @@ is :ANY, the function name is not checked."
 ;;; We are allowed to coalesce things like EQUAL strings and bit-vectors
 ;;; when file-compiling, but not when using COMPILE.
 (defun find-constant (object &optional (name nil namep))
+  ;; Pick off some objects that aren't actually constants in user code.
+  ;; These things appear as literals in forms such as `(%POP-VALUES ,x)
+  ;; acting as a magic mechanism for passing data along.
+  (when (opaque-box-p object) ; quote an object without examining it
+    (return-from find-constant (make-constant (opaque-box-value object))))
+  (when (typep object '(or lvar nlx-info restart-location))
+    ;; implicitly opaque-boxed
+    (return-from find-constant (make-constant object)))
+  ;; Note that we haven't picked off LAYOUT yet for two reasons:
+  ;;  1. layouts go in the hash-table so that a code component references
+  ;;     any given layout at most once
+  ;;  2. STANDARD-OBJECT layouts use MAKE-LOAD-FORM
   (let ((faslp (producing-fasl-file)))
-    (labels ((make-it ()
-               (when faslp
-                 (if namep
-                     (maybe-emit-make-load-forms object name)
-                     (maybe-emit-make-load-forms object)))
-               (make-constant object))
-             (core-coalesce-p (x)
+    (labels ((core-coalesce-p (x)
                ;; True for things which retain their identity under EQUAL,
                ;; so we can safely share the same CONSTANT leaf between
                ;; multiple references.
-               (or (typep x '(or symbol number character))
-                   ;; Amusingly enough, we see CLAMBDAs --among other things--
-                   ;; here, from compiling things like %ALLOCATE-CLOSUREs forms.
-                   ;; No point in stuffing them in the hash-table.
-                   (and (typep x 'instance)
-                        (not (or (leaf-p x) (node-p x))))))
+               (typep x '(or symbol number character instance)))
              (cons-coalesce-p (x)
                (if (eq +code-coverage-unmarked+ (cdr x))
                    ;; These are already coalesced, and the CAR should
@@ -2407,9 +2429,7 @@ is :ANY, the function name is not checked."
                ;; other things when file-compiling.
                (if (consp x)
                    (cons-coalesce-p x)
-                   (atom-colesce-p x)))
-             (coalescep (x)
-               (if faslp (file-coalesce-p x) (core-coalesce-p x))))
+                   (atom-colesce-p x))))
       ;; When compiling to core we don't coalesce strings, because
       ;;  "The functions eval and compile are required to ensure that literal objects
       ;;   referenced within the resulting interpreted or compiled code objects are
@@ -2424,9 +2444,20 @@ is :ANY, the function name is not checked."
       #-sb-xc-host
       (when (and (not faslp) (simple-string-p object))
         (logically-readonlyize object nil))
-      (if (and (boundp '*constants*) (coalescep object))
-          (ensure-gethash object *constants* (make-it))
-          (make-it)))))
+      (let ((hashp (and (boundp '*constants*)
+                        (if faslp
+                            (file-coalesce-p object)
+                            (core-coalesce-p object)))))
+        (awhen (and hashp (gethash object *constants*))
+          (return-from find-constant it))
+        (when (and faslp (not (sb-fasl:dumpable-layout-p object)))
+          (if namep
+              (maybe-emit-make-load-forms object name)
+              (maybe-emit-make-load-forms object)))
+        (let ((new (make-constant object)))
+          (when hashp
+            (setf (gethash object *constants*) new))
+          new)))))
 
 ;;; Return true if X and Y are lvars whose only use is a
 ;;; reference to the same leaf, and the value of the leaf cannot
@@ -2700,6 +2731,12 @@ is :ANY, the function name is not checked."
                           (values list boolean))
                 careful-call))
 (defun careful-call (function args node warn-fun context)
+  (declare (ignorable node warn-fun context))
+  ;; When cross-compiling, being "careful" is the wrong thing - our code should
+  ;; not allowed malformed or out-of-order definitions to proceed as if all is well.
+  #+sb-xc-host
+  (values (multiple-value-list (apply function args)) t)
+  #-sb-xc-host
   (values
    (multiple-value-list
     (handler-case (apply function args)

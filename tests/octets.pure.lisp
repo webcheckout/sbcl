@@ -11,8 +11,6 @@
 ;;;; absolutely no warranty. See the COPYING and CREDITS files for
 ;;;; more information.
 
-(cl:in-package :cl-user)
-
 (locally
     (declare (optimize debug (speed 0)))
 
@@ -410,6 +408,7 @@
         (assert (string= (read-line f1) (read-line f2))))))
   (flet ((compile-and-load (file encoding main-fun)
            (let ((fasl (compile-file file
+                                     :output-file (scratch-file-name "fasl")
                                      :external-format encoding
                                      :print nil :verbose nil)))
              (load fasl)

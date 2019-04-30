@@ -94,12 +94,6 @@
     (16 (sign-extend x size))
     (32 (sign-extend x size))))
 
-#+sb-xc-host
-(defun sign-extend (x size)
-  (if (logbitp (1- size) x)
-      (dpb x (byte size 0) -1)
-      x))
-
 (define-alien-type-method (integer :naturalize-gen) (type alien)
   (if (<= (alien-type-bits type) 32)
       (if (alien-integer-type-signed type)
@@ -162,7 +156,7 @@
   (:generator 2
     (load-inline-constant res `(:fixup ,foreign-symbol :foreign) lip)))
 
-#!+linkage-table
+#+linkage-table
 (define-vop (foreign-symbol-dataref-sap)
   (:translate foreign-symbol-dataref-sap)
   (:policy :fast-safe)
@@ -384,8 +378,8 @@
 
         ;; Call
         (load-immediate-word r4-tn (foreign-symbol-address
-                                    #!-sb-thread "funcall3"
-                                    #!+sb-thread "callback_wrapper_trampoline"))
+                                    #-sb-thread "funcall3"
+                                    #+sb-thread "callback_wrapper_trampoline"))
         (inst blr r4-tn)
 
         ;; Result now on top of stack, put it in the right register

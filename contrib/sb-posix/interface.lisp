@@ -186,7 +186,6 @@
   (define-call "sync" void never-fails)
   (define-call ("truncate" :options :largefile)
       int minusp (pathname filename) (length off-t))
-  #-win32
   (macrolet ((def-mk*temp (lisp-name c-name result-type errorp dirp values)
                (declare (ignore dirp))
                (if (sb-sys:find-foreign-symbol-address c-name)
@@ -346,7 +345,9 @@ not supported."
          #+sb-thread
          (sb-impl::finalizer-thread-stop)
          (sb-thread::with-all-threads-lock
-           (when (cdr sb-thread::*all-threads*)
+           (when (let ((avltree sb-thread::*all-threads*))
+                   (or (sb-thread::avlnode-left avltree)
+                       (sb-thread::avlnode-right avltree)))
              (go :error))
            (let ((pid (posix-fork)))
              #+darwin
@@ -469,16 +470,15 @@ not supported."
 (progn
  (define-call ("mmap" :options :largefile) sb-sys:system-area-pointer
    (lambda (res)
-     (= (sb-sys:sap-int res) #.(1- (expt 2 sb-vm::n-machine-word-bits))))
+     (= (sb-sys:sap-int res) #.(1- (expt 2 sb-vm:n-machine-word-bits))))
    (addr sap-or-nil) (length size-t) (prot unsigned)
    (flags unsigned) (fd file-descriptor) (offset off-t))
 
  (define-call "munmap" int minusp
    (start sb-sys:system-area-pointer) (length unsigned))
 
-#-win32
-(define-call "msync" int minusp
-  (addr sb-sys:system-area-pointer) (length unsigned) (flags int)))
+ (define-call "msync" int minusp
+   (addr sb-sys:system-area-pointer) (length unsigned) (flags int)))
 #+win32
 (progn
   ;; No attempt is made to offer a full mmap-like interface on Windows.

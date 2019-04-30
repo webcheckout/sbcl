@@ -11,10 +11,7 @@
 ;;;; absoluely no warranty. See the COPYING and CREDITS files for
 ;;;; more information.
 
-(cl:defpackage #:thread-test
-  (:use #:cl #:sb-thread #:sb-ext #:test-util #:assertoid))
-
-(cl:in-package #:thread-test)
+(use-package '("SB-EXT" "SB-THREAD"))
 
 (with-test (:name atomic-update
             :skipped-on (not :sb-thread))
@@ -200,17 +197,10 @@
                                (loop while running
                                      do (setf * (make-array 1024))
                                      ;; Busy-wait a bit so we don't TOTALLY flood the
-                                     ;; system with GCs: a GC occurring in the middle of
-                                     ;; S-V-I-T causes it to start over -- we want that
-                                     ;; to occur occasionally, but not _all_ the time.
+                                     ;; system with GCs.
                                         (loop repeat (random 128)
                                               do (setf ** *)))))))
-    (write-string "; ")
-    (dotimes (i #+(or win32 openbsd) 2000
-                #-(or win32 openbsd) 15000)
-      (when (zerop (mod i 200))
-        (write-char #\.)
-        (force-output))
+    (dotimes (i 500)
       (let* ((mom-mark (cons t t))
              (kid-mark (cons t t))
              (child (make-thread
@@ -416,13 +406,6 @@
     (assert (and (null value)
                  error))))
 
-(with-test (:name (:wait-for :basics))
-  (assert (not (sb-ext:wait-for nil :timeout 0.1)))
-  (assert (eql 42 (sb-ext:wait-for 42)))
-  (let ((n 0))
-    (assert (eql 100 (sb-ext:wait-for (when (= 100 (incf n))
-                                        n))))))
-
 (with-test (:name (:wait-for :deadline))
   (assert (eq :ok
               (sb-sys:with-deadline (:seconds 10)
@@ -505,21 +488,10 @@
         ;; (At least) one thread should decrease the count to 0.
         (assert (find 0 values))))))
 
-(with-test (:name (:join-thread :timeout)
-                  :skipped-on (not :sb-thread))
-  (assert-error
-   (join-thread (make-join-thread (lambda () (sleep 10))) :timeout 0.01)
-   join-thread-error)
-  (let ((cookie (cons t t)))
-    (assert (eq cookie
-                (join-thread (make-join-thread (lambda () (sleep 10)))
-                             :timeout 0.01
-                             :default cookie)))))
-
 (with-test (:name (wait-on-semaphore semaphore-notification :lp-1038034)
             :skipped-on (not :sb-thread)
             :fails-on (and :sb-thread
-                           (not :darwin)) ;; Maybe because it doesn't use futexes?
+                           (not (or :darwin :openbsd))) ;; Maybe because it doesn't use futexes?
             :broken-on :win32)
   ;; Test robustness of semaphore acquisition and notification with
   ;; asynchronous thread termination...  Which we know is currently
@@ -604,36 +576,3 @@
 (with-test (:name (abort-thread :main-thread))
   (assert (main-thread-p))
   (assert-error (abort-thread) thread-error))
-
-;; SB-THREAD:MAKE-THREAD used to lock SB-THREAD:*MAKE-THREAD-LOCK*
-;; before entering WITHOUT-INTERRUPTS. When a thread which was
-;; executing SB-THREAD:MAKE-THREAD was interrupted with code which
-;; also called SB-THREAD:MAKE-THREAD, it could happen that the first
-;; thread already owned SB-THREAD:*MAKE-THREAD-LOCK* and the
-;; interrupting code thus made a recursive lock attempt.
-;;
-;; See (:TIMER :DISPATCH-THREAD :MAKE-THREAD :BUG-1180102) in
-;; timer.impure.lisp.
-(with-test (:name (make-thread :interrupt-with make-thread :bug-1180102)
-            :skipped-on (not :sb-thread)
-            :broken-on :win32)
-  (fresh-line)
-  (write-string "; ")
-  (force-output)
-  (dotimes (i 100)
-    (let (outer-threads
-          (inner-threads (list nil))
-          (parent *current-thread*))
-      (dotimes (i 100)
-        (push (make-thread
-               (lambda ()
-                 (interrupt-thread
-                  parent
-                  (lambda () (atomic-push (make-thread (lambda ()))
-                                          (car inner-threads))))))
-              outer-threads)
-        (push (make-thread (lambda ())) outer-threads))
-      (mapc #'join-thread outer-threads)
-      (mapc #'join-thread (car inner-threads)))
-    (write-char #\.)
-    (force-output)))

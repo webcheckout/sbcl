@@ -98,20 +98,20 @@
 ;;; SXHASH of FLOAT values is defined directly in terms of DEFTRANSFORM in
 ;;; order to avoid boxing.
 (deftransform sxhash ((x) (single-float))
-  '(let ((bits (logand (single-float-bits x) #.(1- (ash 1 32)))))
+  `(let ((bits (logand (single-float-bits x) ,(1- (ash 1 32)))))
      (logxor 66194023
              (sxhash (the fixnum
-                          (logand most-positive-fixnum
+                          (logand sb-xc:most-positive-fixnum
                                   (logxor bits
                                           (ash bits -7))))))))
-#!-64-bit
+#-64-bit
 (deftransform sxhash ((x) (double-float))
-  '(let* ((hi (logand (double-float-high-bits x) #.(1- (ash 1 32))))
+  `(let* ((hi (logand (double-float-high-bits x) ,(1- (ash 1 32))))
           (lo (double-float-low-bits x))
           (hilo (logxor hi lo)))
      (logxor 475038542
              (sxhash (the fixnum
-                          (logand most-positive-fixnum
+                          (logand sb-xc:most-positive-fixnum
                                   (logxor hilo
                                           (ash hilo -7))))))))
 
@@ -123,7 +123,7 @@
     `(logand (logxor (ash x 4) (ash x -1) ,c) sb-xc:most-positive-fixnum)))
 
 ;;; Treat double-float essentially the same as a fixnum if words are 64 bits.
-#!+64-bit
+#+64-bit
 (deftransform sxhash ((x) (double-float))
   ;; logical negation of magic constant ensures that 0.0d0 hashes to something
   ;; other than what the fixnum 0 hashes to (as tested in hash.impure.lisp)
@@ -152,7 +152,7 @@
                   (mixf result
                         ,(ecase sb-c:*backend-byte-order*
                                 (:little-endian
-                                 '(logand num most-positive-fixnum))
+                                 '(logand num sb-xc:most-positive-fixnum))
                                 ;; FIXME: I'm not certain that
                                 ;; N-LOWTAG-BITS is the clearest way of
                                 ;; expressing this: it's essentially the

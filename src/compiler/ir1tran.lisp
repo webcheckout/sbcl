@@ -99,7 +99,7 @@
   (let ((answer
          (typecase env
            (null nil)
-           #!+(and sb-fasteval (host-feature sb-xc))
+           #+(and sb-fasteval (not sb-xc-host))
            (sb-interpreter:basic-env
             (sb-interpreter::fun-lexically-notinline-p name env))
            (t
@@ -140,7 +140,7 @@
                ;; complain about undefined functions.
                (not latep))
       (note-undefined-reference name :function))
-    (let ((ftype (proclaimed-ftype name))
+    (let ((ftype (global-ftype name))
           (notinline (fun-lexically-notinline-p name)))
       (make-global-var
        :kind :global-function
@@ -238,7 +238,7 @@
                           :type (if (and (eq inlinep :notinline)
                                          (neq where :declared))
                                     (specifier-type 'function)
-                                    (proclaimed-ftype name))))
+                                    (global-ftype name))))
                        (find-global-fun name nil)))))))))
 
 ;;; Return the LEAF structure for the lexically apparent function
@@ -297,20 +297,12 @@
                        (type (type-specifier (info :variable :type name))))
                    `(macro . (the ,type ,expansion))))
                 (:constant
-                 (let ((value (symbol-value name)))
-                   ;; Override the values of standard symbols in XC,
-                   ;; since we can't redefine them.
-                   #+sb-xc-host
-                   (when (eql (find-symbol (symbol-name name) :cl) name)
-                     (multiple-value-bind (xc-value foundp)
-                         (xc-constant-value name)
-                       (cond (foundp
-                              (setf value xc-value))
-                             ((not (eq value name))
-                              (compiler-warn
-                               "Using cross-compilation host's definition of ~S: ~A~%"
-                               name (symbol-value name))))))
-                   (find-constant value name)))
+                 #+sb-xc-host ; check that we never reference host constants
+                 (unless (member name '(nil t)) ; other than these 2
+                   (when (eq (find-symbol (string name) "XC-STRICT-CL")
+                             name)
+                     (error "Using a constant from the host ~s" name)))
+                 (find-constant (symbol-value name) name))
                 (t
                  (make-global-var :kind kind
                                   :%source-name name
@@ -323,22 +315,10 @@
 ;;; any subparts) are dumpable at all.
 (defun maybe-emit-make-load-forms (constant &optional (name nil namep))
   (let ((xset (alloc-xset)))
-    (labels ((trivialp (value)
-               (sb-xc:typep value
-                      '(or
-                        #-sb-xc-host
-                        (or unboxed-array #!+sb-simd-pack simd-pack
-                                          #!+sb-simd-pack-256 simd-pack-256)
-                        #+sb-xc-host
-                        (and array (not (array t)))
-                        symbol
-                        number
-                        character
-                        string))) ; subsumed by UNBOXED-ARRAY
-             (grovel (value)
+    (labels ((grovel (value)
                ;; Unless VALUE is an object which which obviously
                ;; can't contain other objects
-               (unless (trivialp value)
+               (unless (dumpable-leaflike-p value)
                  (if (xset-member-p value xset)
                      (return-from grovel nil)
                      (add-to-xset value xset))
@@ -362,11 +342,7 @@
                    ((array t)
                     (dotimes (i (array-total-size value))
                       (grovel (row-major-aref value i))))
-                   ;; We use ordinary host packages to model the target packages.
-                   ;; Those objects are not in "our" type system, but we can check
-                   ;; for them and make them legal to dump out.
-                   (#+sb-xc-host (or structure!object package)
-                    #-sb-xc-host instance
+                   (instance
                     ;; In the target SBCL, we can dump any instance, but
                     ;; in the cross-compilation host, %INSTANCE-FOO
                     ;; functions don't work on general instances, only on
@@ -390,12 +366,7 @@
                        can't be dumped into fasl files."
                      (type-of value)))))))
       ;; Dump all non-trivial named constants using the name.
-      (if (and namep (not (typep constant '(or symbol character
-                                            ;; FIXME: Cold init breaks if we
-                                            ;; try to reference FP constants
-                                            ;; thru their names.
-                                            #+sb-xc-host number
-                                            #-sb-xc-host fixnum))))
+      (if (and namep (not (sb-xc:typep constant '(or symbol character fixnum))))
           (emit-make-load-form constant name)
           (grovel constant))))
   (values))
@@ -414,7 +385,7 @@
 ;;; determine what is evaluated next. If the ctran has no block, then
 ;;; we make it be in the block that the node is in. If the ctran heads
 ;;; its block, we end our block and link it to that block.
-#!-sb-fluid (declaim (inline use-ctran))
+#-sb-fluid (declaim (inline use-ctran))
 (defun use-ctran (node ctran)
   (declare (type node node) (type ctran ctran))
   (if (eq (ctran-kind ctran) :unused)
@@ -467,7 +438,7 @@
            (setf (lvar-uses lvar) (list node (lvar-uses lvar)))))
     (reoptimize-lvar lvar)))
 
-#!-sb-fluid(declaim (inline use-continuation))
+#-sb-fluid(declaim (inline use-continuation))
 (defun use-continuation (node ctran lvar)
   (use-ctran node ctran)
   (use-lvar node lvar))
@@ -892,7 +863,7 @@
                    ;; system to work through them, and this code does so, by
                    ;; crudely suppressing all warnings in cross-compilation
                    ;; macroexpansion. -- WHN 19990412
-                   #+(and cmu sb-xc-host)
+                   #+host-quirks-cmu
                    (warning (lambda (c)
                               (compiler-notify
                                "~@<~A~:@_~
@@ -979,13 +950,13 @@
                                    (cons path +code-coverage-unmarked+)))
                   (next (make-ctran))
                   (*allow-instrumenting* nil))
-              #!+(or x86-64 x86) (declare (ignore store)) ; eval'd for side-effect only
+              #+(or x86-64 x86) (declare (ignore store)) ; eval'd for side-effect only
               (push (ctran-block start)
                     (gethash path (code-coverage-blocks metadata)))
               (ir1-convert start next nil
-                           #!+(or x86-64 x86)
+                           #+(or x86-64 x86)
                            `(%primitive mark-covered ',path)
-                           #!-(or x86-64 x86)
+                           #-(or x86-64 x86)
                            `(locally
                                 (declare (optimize speed
                                                    (safety 0)
@@ -1112,21 +1083,13 @@
                    (defined-fun-inlinep var))))
     (if (eq inlinep :notinline)
         (ir1-convert-combination start next result form var)
-        (let* ((transform (info :function :source-transform name)))
+        (let ((transform (info :function :source-transform name)))
           (if transform
               (multiple-value-bind (transformed pass)
                   (if (functionp transform)
                       (funcall transform form *lexenv*)
-                      (let ((result
-                             (if (eq (cdr transform) :predicate)
-                                 (and (singleton-p (cdr form))
-                                      `(%instance-typep
-                                        ,(cadr form)
-                                        ',(dd-name (car transform))))
-                                 (slot-access-transform
-                                  (if (consp name) :write :read)
-                                  (cdr form) transform))))
-                        (values result (null result))))
+                      (struct-fun-transform transform form name))
+                ;; Note that "pass" means fail. Gotta love it.
                 (cond (pass
                        (ir1-convert-maybe-predicate start next result form var))
                       (t
@@ -1561,9 +1524,9 @@
                (etypecase fun
                  (leaf
                   (if bound-fun
-                      #!+stack-allocatable-closures
+                      #+stack-allocatable-closures
                       (setf (leaf-extent bound-fun) extent)
-                      #!-stack-allocatable-closures
+                      #-stack-allocatable-closures
                       (compiler-notify
                        "Ignoring DYNAMIC-EXTENT declaration on function ~S ~
                         (not supported on this platform)." fname)
@@ -1730,6 +1693,17 @@
     (warn-repeated-optimize-qualities (lexenv-policy lexenv) optimize-qualities)
     (values lexenv result-type (cdr post-binding-lexenv)
             lambda-list explicit-check)))
+
+(defun process-muffle-decls (decls lexenv)
+  (flet ((process-it (spec)
+           (cond ((atom spec))
+                 ((member (car spec) '(muffle-conditions unmuffle-conditions))
+                  (setq lexenv
+                        (process-1-decl spec lexenv nil nil nil nil))))))
+    (dolist (decl decls)
+      (dolist (spec (rest decl))
+        (process-it spec))))
+  lexenv)
 
 (defun %processing-decls (decls vars fvars ctran lvar binding-form-p fun)
   (multiple-value-bind (*lexenv* result-type post-binding-lexenv)

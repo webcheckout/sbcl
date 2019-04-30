@@ -14,10 +14,6 @@
 
 ;;;; miscellaneous constants, utility functions, and macros
 
-(defconstant pi
-  #!+long-float 3.14159265358979323846264338327950288419716939937511l0
-  #!-long-float 3.14159265358979323846264338327950288419716939937511d0)
-
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (defun handle-reals (function var)
     `((((foreach fixnum single-float bignum ratio))
@@ -48,7 +44,7 @@
            ,@args))))))
 
 
-#!+x86 ;; for constant folding
+#+x86 ;; for constant folding
 (macrolet ((def (name ll)
              `(defun ,name ,ll (,name ,@ll))))
   (def %atan2 (x y))
@@ -63,7 +59,7 @@
   (def %log (x))
   (def %exp (x)))
 
-#!+(or x86-64 arm-vfp arm64) ;; for constant folding
+#+(or x86-64 arm-vfp arm64 riscv) ;; for constant folding
 (macrolet ((def (name ll)
              `(defun ,name ,ll (,name ,@ll))))
   (def %sqrt (x)))
@@ -74,29 +70,29 @@
 ;;;; into the FPU.
 
 ;;; trigonometric
-#!-x86 (def-math-rtn "sin" 1)
-#!-x86 (def-math-rtn "cos" 1)
-#!-x86 (def-math-rtn "tan" 1)
-#!-x86 (def-math-rtn "atan" 1)
-#!-x86 (def-math-rtn "atan2" 2)
+#-x86 (def-math-rtn "sin" 1)
+#-x86 (def-math-rtn "cos" 1)
+#-x86 (def-math-rtn "tan" 1)
+#-x86 (def-math-rtn "atan" 1)
+#-x86 (def-math-rtn "atan2" 2)
 
-(def-math-rtn "acos" 1 #!+win32 t)
-(def-math-rtn "asin" 1 #!+win32 t)
-(def-math-rtn "cosh" 1 #!+win32 t)
-(def-math-rtn "sinh" 1 #!+win32 t)
-(def-math-rtn "tanh" 1 #!+win32 t)
-(def-math-rtn "asinh" 1 #!+win32 t)
-(def-math-rtn "acosh" 1 #!+win32 t)
-(def-math-rtn "atanh" 1 #!+win32 t)
+(def-math-rtn "acos" 1 #+win32 t)
+(def-math-rtn "asin" 1 #+win32 t)
+(def-math-rtn "cosh" 1 #+win32 t)
+(def-math-rtn "sinh" 1 #+win32 t)
+(def-math-rtn "tanh" 1 #+win32 t)
+(def-math-rtn "asinh" 1 #+win32 t)
+(def-math-rtn "acosh" 1 #+win32 t)
+(def-math-rtn "atanh" 1 #+win32 t)
 
 ;;; exponential and logarithmic
-(def-math-rtn "hypot" 2 #!+win32 t)
-#!-x86 (def-math-rtn "exp" 1)
-#!-x86 (def-math-rtn "log" 1)
-#!-x86 (def-math-rtn "log10" 1)
+(def-math-rtn "hypot" 2 #+win32 t)
+#-x86 (def-math-rtn "exp" 1)
+#-x86 (def-math-rtn "log" 1)
+#-x86 (def-math-rtn "log10" 1)
 (def-math-rtn "pow" 2)
-#!-(or x86 x86-64 arm-vfp arm64) (def-math-rtn "sqrt" 1)
-#!-x86 (def-math-rtn "log1p" 1)
+#-(or x86 x86-64 arm-vfp arm64 riscv) (def-math-rtn "sqrt" 1)
+#-x86 (def-math-rtn "log1p" 1)
 
 
 ;;;; power functions
@@ -215,7 +211,7 @@
                             (type (unsigned-byte 32) x-lo y-lo))
                    ;; y==zero: x**0 = 1
                    (when (zerop (logior y-ihi y-lo))
-                     (return-from real-expt (coerce 1d0 rtype)))
+                     (return-from real-expt (coerce $1d0 rtype)))
                    ;; +-NaN return x+y
                    ;; FIXME: Hardcoded qNaN/sNaN values are not portable.
                    (when (or (> x-ihi #x7ff00000)
@@ -257,7 +253,7 @@
                            (when (< x-hi 0)
                              (cond ((and (= x-ihi #x3ff00000) (zerop yisint))
                                     ;; (-1)**non-int
-                                    (let ((y*pi (* y pi)))
+                                    (let ((y*pi (* y sb-xc:pi)))
                                       (declare (double-float y*pi))
                                       (return-from real-expt
                                         (complex
@@ -276,11 +272,11 @@
                              (declare (double-float pow))
                              (case yisint
                                (1 ; odd
-                                (coerce (* -1d0 pow) rtype))
+                                (coerce (* $-1d0 pow) rtype))
                                (2 ; even
                                 (coerce pow rtype))
                                (t ; non-integer
-                                (let ((y*pi (* y pi)))
+                                (let ((y*pi (* y sb-xc:pi)))
                                   (declare (double-float y*pi))
                                   (complex
                                    (coerce (* pow (%cos y*pi))
@@ -349,13 +345,13 @@
   ;; Motivated by an attempt to get LOG to work better on bignums.
   (let ((n (integer-length x)))
     (if (< n sb-vm:double-float-digits)
-        (log (coerce x 'double-float) 2.0d0)
+        (log (coerce x 'double-float) $2.0d0)
         (let ((f (ldb (byte sb-vm:double-float-digits
                             (- n sb-vm:double-float-digits))
                       x)))
           (+ n (log (scale-float (coerce f 'double-float)
                                  (- sb-vm:double-float-digits))
-                    2.0d0))))))
+                    $2.0d0))))))
 
 (defun log (number &optional (base nil base-p))
   "Return the logarithm of NUMBER in the base BASE, which defaults to e."
@@ -364,26 +360,26 @@
       (cond
         ((zerop base)
          (if (or (typep number 'double-float) (typep base 'double-float))
-             0.0d0
-             0.0f0))
+             $0.0d0
+             $0.0f0))
         ((and (typep number '(integer (0) *))
               (typep base '(integer (0) *)))
          (coerce (/ (log2 number) (log2 base)) 'single-float))
         ((and (typep number 'integer) (typep base 'double-float))
          ;; No single float intermediate result
-         (/ (log2 number) (log base 2.0d0)))
+         (/ (log2 number) (log base $2.0d0)))
         ((and (typep number 'double-float) (typep base 'integer))
-         (/ (log number 2.0d0) (log2 base)))
+         (/ (log number $2.0d0) (log2 base)))
         (t
          (/ (log number) (log base))))
       (number-dispatch ((number number))
         (((foreach fixnum bignum))
          (if (minusp number)
-             (complex (log (- number)) (coerce pi 'single-float))
-             (coerce (/ (log2 number) (log (exp 1.0d0) 2.0d0)) 'single-float)))
+             (complex (log (- number)) (coerce sb-xc:pi 'single-float))
+             (coerce (/ (log2 number) (log (exp $1.0d0) $2.0d0)) 'single-float)))
         ((ratio)
          (if (minusp number)
-             (complex (log (- number)) (coerce pi 'single-float))
+             (complex (log (- number)) (coerce sb-xc:pi 'single-float))
              (let ((numerator (numerator number))
                    (denominator (denominator number)))
                (if (= (integer-length numerator)
@@ -391,15 +387,14 @@
                    (coerce (%log1p (coerce (- number 1) 'double-float))
                            'single-float)
                    (coerce (/ (- (log2 numerator) (log2 denominator))
-                              (log (exp 1.0d0) 2.0d0))
+                              (log (exp $1.0d0) $2.0d0))
                            'single-float)))))
         (((foreach single-float double-float))
          ;; Is (log -0) -infinity (libm.a) or -infinity + i*pi (Kahan)?
          ;; Since this doesn't seem to be an implementation issue
          ;; I (pw) take the Kahan result.
-         (if (< (float-sign number)
-                (coerce 0 '(dispatch-type number)))
-             (complex (log (- number)) (coerce pi '(dispatch-type number)))
+         (if (= (float-sign-bit number) 1) ; MINUSP
+             (complex (log (- number)) (coerce sb-xc:pi '(dispatch-type number)))
              (coerce (%log (coerce number 'double-float))
                      '(dispatch-type number))))
         ((complex)
@@ -411,12 +406,12 @@
   (number-dispatch ((number number))
     (((foreach fixnum bignum ratio))
      (if (minusp number)
-         (complex 0f0
+         (complex $0f0
                   (coerce (%sqrt (- (coerce number 'double-float))) 'single-float))
          (coerce (%sqrt (coerce number 'double-float)) 'single-float)))
     (((foreach single-float double-float))
      (if (minusp number)
-         (complex (coerce 0.0 '(dispatch-type number))
+         (complex (coerce $0.0 '(dispatch-type number))
                   (coerce (%sqrt (- (coerce number 'double-float)))
                           '(dispatch-type number)))
          (coerce (%sqrt (coerce number 'double-float))
@@ -454,16 +449,16 @@
   (number-dispatch ((number number))
     ((rational)
      (if (minusp number)
-         (coerce pi 'single-float)
-         0.0f0))
+         (coerce sb-xc:pi 'single-float)
+         $0.0f0))
     ((single-float)
      (if (minusp (float-sign number))
-         (coerce pi 'single-float)
-         0.0f0))
+         (coerce sb-xc:pi 'single-float)
+         $0.0f0))
     ((double-float)
      (if (minusp (float-sign number))
-         (coerce pi 'double-float)
-         0.0d0))
+         (coerce sb-xc:pi 'double-float)
+         $0.0d0))
     (handle-complex
      (atan (imagpart number) (realpart number)))))
 
@@ -551,10 +546,10 @@
                         (values double-float))
                (if (zerop x)
                    (if (zerop y)
-                       (if (plusp (float-sign x))
+                       (if (= (float-sign-bit x) 0) ; PLUSP
                            y
-                           (float-sign y pi))
-                       (float-sign y (/ pi 2)))
+                           (float-sign y sb-xc:pi))
+                       (float-sign y (sb-xc:/ sb-xc:pi 2)))
                    (%atan2 y x))))
         (number-dispatch ((y real) (x real))
           ((double-float
@@ -705,17 +700,6 @@
 ;;;;   Please send any bug reports, comments, or improvements to
 ;;;;   Raymond Toy at <email address deleted during 2002 spam avalanche>.
 
-;;; FIXME: In SBCL, the floating point infinity constants like
-;;; SB-EXT:DOUBLE-FLOAT-POSITIVE-INFINITY aren't available as
-;;; constants at cross-compile time, because the cross-compilation
-;;; host might not have support for floating point infinities. Thus,
-;;; they're effectively implemented as special variable references,
-;;; and the code below which uses them might be unnecessarily
-;;; inefficient. Perhaps some sort of MAKE-LOAD-TIME-VALUE hackery
-;;; should be used instead?  (KLUDGED 2004-03-08 CSR, by replacing the
-;;; special variable references with (probably equally slow)
-;;; constructors)
-;;;
 ;;; FIXME: As of 2004-05, when PFD noted that IMAGPART and COMPLEX
 ;;; differ in their interpretations of the real line, IMAGPART was
 ;;; patch, which without a certain amount of effort would have altered
@@ -762,13 +746,11 @@
   (declare (type double-float x))
   (cond ((float-nan-p x)
          x)
-        ((float-infinity-p x)
-         ;; DOUBLE-FLOAT-POSITIVE-INFINITY
-         (double-from-bits 0 (1+ sb-vm:double-float-normal-exponent-max) 0))
+        ((float-infinity-p x) double-float-positive-infinity)
         ((zerop x)
          ;; The answer is negative infinity, but we are supposed to
           ;; signal divide-by-zero, so do the actual division
-         (/ -1.0d0 x)
+         (/ $-1.0d0 x)
          )
         (t
           (logb-finite x))))
@@ -778,7 +760,7 @@
 ;;;   Create complex number with real part X and imaginary part Y
 ;;;   such that has the same type as Z.  If Z has type (complex
 ;;;   rational), the X and Y are coerced to single-float.
-#!+long-float (eval-when (:compile-toplevel :load-toplevel :execute)
+#+long-float (eval-when (:compile-toplevel :load-toplevel :execute)
                 (error "needs work for long float support"))
 (declaim (inline coerce-to-complex-type))
 (defun coerce-to-complex-type (x y z)
@@ -789,17 +771,17 @@
       ;; Convert anything that's not already a DOUBLE-FLOAT (because
       ;; the initial argument was a (COMPLEX DOUBLE-FLOAT) and we
       ;; haven't done anything to lose precision) to a SINGLE-FLOAT.
-      (complex (float x 1f0)
-               (float y 1f0))))
+      (complex (float x $1f0)
+               (float y $1f0))))
 
 ;;; Compute |(x+i*y)/2^k|^2 scaled to avoid over/underflow. The
 ;;; result is r + i*k, where k is an integer.
-#!+long-float (eval-when (:compile-toplevel :load-toplevel :execute)
+#+long-float (eval-when (:compile-toplevel :load-toplevel :execute)
                 (error "needs work for long float support"))
 (defun cssqs (z)
   (declare (muffle-conditions compiler-note))
-  (let ((x (float (realpart z) 1d0))
-        (y (float (imagpart z) 1d0)))
+  (let ((x (float (realpart z) $1d0))
+        (y (float (imagpart z) $1d0)))
     ;; Would this be better handled using an exception handler to
     ;; catch the overflow or underflow signal?  For now, we turn all
     ;; traps off and look at the accrued exceptions to see if any
@@ -807,21 +789,15 @@
     (with-float-traps-masked (:underflow :overflow)
       (let ((rho (+ (square x) (square y))))
        (declare (optimize (speed 3) (space 0)))
-      (cond ((and (or (float-nan-p rho)
-                      (float-infinity-p rho))
-                  (or (float-infinity-p (abs x))
-                      (float-infinity-p (abs y))))
-             ;; DOUBLE-FLOAT-POSITIVE-INFINITY
-             (values
-              (double-from-bits 0 (1+ sb-vm:double-float-normal-exponent-max) 0)
-              0))
+      (cond ((and (float-infinity-or-nan-p rho)
+                  (or (float-infinity-p x) (float-infinity-p y)))
+             (values double-float-positive-infinity 0))
             ((let ((threshold
                     ;; (/ least-positive-double-float double-float-epsilon)
-                    (load-time-value
-                     #!-long-float
+                     #-long-float
                      (make-double-float #x1fffff #xfffffffe)
-                     #!+long-float
-                     (error "(/ least-positive-long-float long-float-epsilon)")))
+                     #+long-float
+                     (error "(/ least-positive-long-float long-float-epsilon)"))
                    (traps (ldb sb-vm:float-sticky-bits
                                (sb-vm:floating-point-modes))))
                 ;; Overflow raised or (underflow raised and rho <
@@ -853,12 +829,12 @@
   (declare (type (or complex rational) z))
   (multiple-value-bind (rho k)
       (cssqs z)
-    (declare (type (or (member 0d0) (double-float 0d0)) rho)
+    (declare (type (or (member $0d0) (double-float $0d0)) rho)
              (type fixnum k))
-    (let ((x (float (realpart z) 1.0d0))
-          (y (float (imagpart z) 1.0d0))
-          (eta 0d0)
-          (nu 0d0))
+    (let ((x (float (realpart z) $1.0d0))
+          (y (float (imagpart z) $1.0d0))
+          (eta $0d0)
+          (nu $0d0))
       (declare (double-float x y eta nu)
                ;; get maybe-inline functions inlined.
                (optimize (space 0)))
@@ -876,10 +852,10 @@
       (setf eta rho)
       (setf nu y)
 
-      (when (/= rho 0d0)
-        (when (not (float-infinity-p (abs nu)))
-          (setf nu (/ (/ nu rho) 2d0)))
-        (when (< x 0d0)
+      (when (/= rho $0d0)
+        (when (not (float-infinity-p nu))
+          (setf nu (/ (/ nu rho) $2d0)))
+        (when (< x $0d0)
           (setf eta (abs nu))
           (setf nu (float-sign y rho))))
       (coerce-to-complex-type eta nu z))))
@@ -895,24 +871,18 @@
   ;; influences the choices of these constants but doesn't say how to
   ;; choose them.  We'll just assume his choices matches our
   ;; implementation of log1p.
-  (let ((t0 (load-time-value
-             #!-long-float
-             (make-double-float #x3fe6a09e #x667f3bcd)
-             #!+long-float
-             (error "(/ (sqrt 2l0))")))
+  (let ((t0 #-long-float (make-double-float #x3fe6a09e #x667f3bcd)
+            #+long-float (error "(/ (sqrt 2l0) 2)"))
         ;; KLUDGE: if repeatable fasls start failing under some weird
         ;; xc host, this 1.2d0 might be a good place to examine: while
         ;; it _should_ be the same in all vaguely-IEEE754 hosts, 1.2
         ;; is not exactly representable, so something could go wrong.
-        (t1 1.2d0)
-        (t2 3d0)
-        (ln2 (load-time-value
-              #!-long-float
-              (make-double-float #x3fe62e42 #xfefa39ef)
-              #!+long-float
-              (error "(log 2l0)")))
-        (x (float (realpart z) 1.0d0))
-        (y (float (imagpart z) 1.0d0)))
+        (t1 $1.2d0)
+        (t2 $3d0)
+        (ln2 #-long-float (make-double-float #x3fe62e42 #xfefa39ef)
+             #+long-float (error "(log 2l0)"))
+        (x (float (realpart z) $1.0d0))
+        (y (float (imagpart z) $1.0d0)))
     (multiple-value-bind (rho k)
         (cssqs z)
       (declare (optimize (speed 3)))
@@ -922,11 +892,11 @@
                                          (< t0 beta)
                                          (or (<= beta t1)
                                              (< rho t2)))
-                                    (/ (%log1p (+ (* (- beta 1.0d0)
-                                                     (+ beta 1.0d0))
+                                    (/ (%log1p (+ (* (- beta $1.0d0)
+                                                     (+ beta $1.0d0))
                                                   (* theta theta)))
-                                       2d0)
-                                    (+ (/ (log rho) 2d0)
+                                       $2d0)
+                                    (+ (/ (log rho) $2d0)
                                        (* k ln2)))
                                 (atan y x)
                                 z)))))
@@ -940,15 +910,15 @@
   (declare (muffle-conditions compiler-note))
   (declare (type (or rational complex) z))
   (let* (;; constants
-         (theta (/ (sqrt most-positive-double-float) 4.0d0))
-         (rho (/ 4.0d0 (sqrt most-positive-double-float)))
-         (half-pi (/ pi 2.0d0))
-         (rp (float (realpart z) 1.0d0))
-         (beta (float-sign rp 1.0d0))
+         (theta (sb-xc:/ (sb-xc:sqrt sb-xc:most-positive-double-float) $4.0d0))
+         (rho (sb-xc:/ $4.0d0 (sb-xc:sqrt sb-xc:most-positive-double-float)))
+         (half-pi (sb-xc:/ sb-xc:pi $2.0d0))
+         (rp (float (realpart z) $1.0d0))
+         (beta (float-sign rp $1.0d0))
          (x (* beta rp))
-         (y (* beta (- (float (imagpart z) 1.0d0))))
-         (eta 0.0d0)
-         (nu 0.0d0))
+         (y (* beta (- (float (imagpart z) $1.0d0))))
+         (eta $0.0d0)
+         (nu $0.0d0))
     ;; Shouldn't need this declare.
     (declare (double-float x y))
     (locally
@@ -962,64 +932,79 @@
            ;; that it won't overflow.
            (setf eta (let* ((x-bigger (> x (abs y)))
                             (r (if x-bigger (/ y x) (/ x y)))
-                            (d (+ 1.0d0 (* r r))))
+                            (d (+ $1.0d0 (* r r))))
                        (if x-bigger
                            (/ (/ x) d)
                            (/ (/ r y) d)))))
-          ((= x 1.0d0)
+          ((= x $1.0d0)
            ;; Should this be changed so that if y is zero, eta is set
            ;; to +infinity instead of approx 176?  In any case
            ;; tanh(176) is 1.0d0 within working precision.
-           (let ((t1 (+ 4d0 (square y)))
+           (let ((t1 (+ $4d0 (square y)))
                  (t2 (+ (abs y) rho)))
              (setf eta (log (/ (sqrt (sqrt t1))
                                (sqrt t2))))
-             (setf nu (* 0.5d0
+             (setf nu (* $0.5d0
                          (float-sign y
-                                     (+ half-pi (atan (* 0.5d0 t2))))))))
+                                     (+ half-pi (atan (* $0.5d0 t2))))))))
           (t
            (let ((t1 (+ (abs y) rho)))
               ;; Normal case using log1p(x) = log(1 + x)
-             (setf eta (* 0.25d0
-                          (%log1p (/ (* 4.0d0 x)
-                                     (+ (square (- 1.0d0 x))
+             (setf eta (* $0.25d0
+                          (%log1p (/ (* $4.0d0 x)
+                                     (+ (square (- $1.0d0 x))
                                         (square t1))))))
-             (setf nu (* 0.5d0
-                         (atan (* 2.0d0 y)
-                               (- (* (- 1.0d0 x)
-                                     (+ 1.0d0 x))
+             (setf nu (* $0.5d0
+                         (atan (* $2.0d0 y)
+                               (- (* (- $1.0d0 x)
+                                     (+ $1.0d0 x))
                                   (square t1))))))))
     (coerce-to-complex-type (* beta eta)
                             (- (* beta nu))
                              z))))
 
+#|
+(format t "~x~%" (double-float-bits (/ (+ (log 2l0) (log most-positive-long-float)) 4l0)))
+=> 406633CE8FB9F87D
+
+and:
+#include <math.h>
+#include <string.h>
+#include <stdio.h>
+void main() {
+    double most_pos_dbl = 1.7976931348623157e308;
+    double thing = (log(most_pos_dbl) + log(2.0e0)) / 4.0e0;
+    unsigned long word;
+    memcpy(&word, &thing, 8);
+    printf("%lX = %20.15lf\n", word, thing);
+}
+prints: 406633CE8FB9F87D =  177.618965018485966
+|#
+
 ;;; Compute tanh z = sinh z / cosh z.
 (defun complex-tanh (z)
   (declare (muffle-conditions compiler-note))
   (declare (type (or rational complex) z))
-  (let ((x (float (realpart z) 1.0d0))
-        (y (float (imagpart z) 1.0d0)))
+  (let ((x (float (realpart z) $1.0d0))
+        (y (float (imagpart z) $1.0d0)))
     (locally
       ;; space 0 to get maybe-inline functions inlined
       (declare (optimize (speed 3) (space 0)))
     (cond ((> (abs x)
-              (load-time-value
-               #!-long-float
-               (make-double-float #x406633ce #x8fb9f87e)
-               #!+long-float
-               (error "(/ (+ (log 2l0) (log most-positive-long-float)) 4l0)")))
+              #-long-float (make-double-float #x406633ce #x8fb9f87d)
+              #+long-float (error "(/ (+ (log 2l0) (log most-positive-long-float)) 4l0)"))
            (coerce-to-complex-type (float-sign x)
                                    (float-sign y) z))
           (t
            (let* ((tv (%tan y))
-                  (beta (+ 1.0d0 (* tv tv)))
+                  (beta (+ $1.0d0 (* tv tv)))
                   (s (sinh x))
-                  (rho (sqrt (+ 1.0d0 (* s s)))))
-             (if (float-infinity-p (abs tv))
+                  (rho (sqrt (+ $1.0d0 (* s s)))))
+             (if (float-infinity-p tv)
                  (coerce-to-complex-type (/ rho s)
                                          (/ tv)
                                          z)
-                 (let ((den (+ 1.0d0 (* beta s s))))
+                 (let ((den (+ $1.0d0 (* beta s s))))
                    (coerce-to-complex-type (/ (* beta rho s)
                                               den)
                                            (/ tv den)

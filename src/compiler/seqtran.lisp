@@ -404,7 +404,7 @@
              (sequence-bounding-indices-bad-error vector start end)))))
 
 (sb-xc:deftype eq-comparable-type ()
-  '(or fixnum #!+64-bit single-float (not number)))
+  '(or fixnum #+64-bit single-float (not number)))
 
 ;;; True if EQL comparisons involving type can be simplified to EQ.
 (defun eq-comparable-type-p (type)
@@ -636,9 +636,9 @@
          (kind (cond ((sb-vm:saetp-fixnum-p saetp) :tagged)
                      ((member element-type '(character base-char)) :char)
                      ((eq element-type 'single-float) :single-float)
-                     #!+64-bit
+                     #+64-bit
                      ((eq element-type 'double-float) :double-float)
-                     #!+64-bit
+                     #+64-bit
                      ((equal element-type '(complex single-float))
                       :complex-single-float)
                      (t
@@ -663,10 +663,10 @@
                                   tmp)
                                  (:single-float
                                   (single-float-bits tmp))
-                                 #!+64-bit
+                                 #+64-bit
                                  (:double-float
                                   (double-float-bits tmp))
-                                 #!+64-bit
+                                 #+64-bit
                                  (:complex-single-float
                                   (logior (ash (single-float-bits (imagpart tmp)) 32)
                                           (ldb (byte 32 0)
@@ -693,10 +693,10 @@
                                           `item)
                                          (:single-float
                                           `(single-float-bits item))
-                                         #!+64-bit
+                                         #+64-bit
                                          (:double-float
                                           `(double-float-bits item))
-                                         #!+64-bit
+                                         #+64-bit
                                          (:complex-single-float
                                           `(logior (ash (single-float-bits (imagpart item)) 32)
                                                    (ldb (byte 32 0)
@@ -760,7 +760,7 @@
                ;; Force bounds-checks to 0 even if local policy had it >0.
                (declare (optimize (safety 0) (speed 3)
                                   (insert-array-bounds-checks 0)))
-               ,(cond #!+x86-64
+               ,(cond #+x86-64
                       ((type= element-ctype *universal-type*)
                        '(vector-fill/t data item start end))
                       (t
@@ -993,7 +993,7 @@
      (define-one-transform (sequence-type1 sequence-type2)
        (!make-replace-transform nil sequence-type1 sequence-type2)))
   (define-replace-transforms)
-  #!+sb-unicode
+  #+sb-unicode
   (progn
    (define-one-transform (simple-array base-char (*)) (simple-array character (*)))
    (define-one-transform (simple-array character (*)) (simple-array base-char (*)))))
@@ -1040,7 +1040,7 @@
                     ;; sign of the shift count prior to shifting when
                     ;; all we need is a simple negate and shift
                     ;; right.  Yuck.
-                    (mask (ash #.(1- (ash 1 sb-vm:n-word-bits))
+                    (mask (ash most-positive-word
                                (* (- extra ,n-elems-per-word)
                                   ,n-bits-per-elem))))
                (setf (%vector-raw-bits dst end)
@@ -1690,7 +1690,7 @@
                              (t
                               (prog1
                                   `(sb-impl::string-dispatch
-                                       (#!+sb-unicode
+                                       (#+sb-unicode
                                         (simple-array character (*))
                                         (simple-array base-char (*))
                                         t)
@@ -1722,9 +1722,9 @@
               (loop for type in (union-type-types type)
                     always (and (array-type-p type)
                                 (equal (array-type-dimensions type) '(*)))))
-         #!+sb-unicode
+         #+sb-unicode
          sb-vm:simple-character-string-widetag
-         #!-sb-unicode
+         #-sb-unicode
          sb-vm:simple-base-string-widetag)))
 
 (deftransform concatenate ((result-type &rest lvars)
@@ -1754,7 +1754,7 @@
              (give-up-ir1-transform))
             ((= vector-widetag sb-vm:simple-base-string-widetag)
              (string-concatenate-transform node 'simple-base-string lvars))
-            #!+sb-unicode
+            #+sb-unicode
             ((= vector-widetag sb-vm:simple-character-string-widetag)
              (string-concatenate-transform node 'string lvars))
             ;; FIXME: other vectors may use inlined expansion from
@@ -2134,8 +2134,19 @@
                   (when (and (eq effective-test 'eql)
                              const-seq
                              (or (vectorp const-seq) (proper-list-p const-seq))
-                             (every (lambda (x) (sb-xc:typep x 'eq-comparable-type))
-                                    const-seq))
+                             (let ((key (if key
+                                            (let ((name (lvar-fun-name* key)))
+                                              (and (constant-fold-arg-p name)
+                                                   name))
+                                            #'identity)))
+                               (and key
+                                    (every (lambda (x)
+                                             (block nil
+                                               (sb-xc:typep (handler-case (funcall key x)
+                                                              (error ()
+                                                                (return)))
+                                                            'eq-comparable-type)))
+                                           const-seq))))
                     (setq test-form '#'eq))
                   `(nth-value ,',values-index
                               (%find-position item sequence

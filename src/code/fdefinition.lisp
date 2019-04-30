@@ -22,8 +22,8 @@
 ;;;; fdefinition (fdefn) objects
 
 (defun make-fdefn (name)
-  #!-immobile-space (make-fdefn name)
-  #!+immobile-space
+  #-immobile-space (make-fdefn name)
+  #+immobile-space
   (let ((fdefn (truly-the (values fdefn &optional)
                           (sb-vm::alloc-immobile-fdefn))))
     (sb-vm::%set-fdefn-name fdefn name)
@@ -36,10 +36,29 @@
   (declare (type function fun)
            (type fdefn fdefn)
            (values function))
-  #!+immobile-code (sb-vm::%set-fdefn-fun fdefn fun)
-  #!-immobile-code (setf (fdefn-fun fdefn) fun))
+  #+immobile-code (sb-vm::%set-fdefn-fun fdefn fun)
+  #-immobile-code (setf (fdefn-fun fdefn) fun))
 
-#!-sb-fluid (declaim (inline symbol-fdefn))
+;; Given Info-Vector VECT, return the fdefn that it contains for its root name,
+;; or nil if there is no value. NIL input is acceptable and will return NIL.
+;; (see src/compiler/info-vector for more details)
+(declaim (inline info-vector-fdefn))
+(defun info-vector-fdefn (vect)
+  (when vect
+    ;; This is safe: Info-Vector invariant requires that it have length >= 1.
+    (let ((word (the fixnum (svref vect 0))))
+      ;; Test that the first info-number is +fdefn-info-num+ and its n-infos
+      ;; field is nonzero. These conditions can be tested simultaneously
+      ;; using a SIMD-in-a-register idea. The low 6 bits must be nonzero
+      ;; and the next 6 must be exactly #b111111, so considered together
+      ;; as a 12-bit unsigned integer it must be >= #b111111000001
+      (when (>= (ldb (byte (* info-number-bits 2) 0) word)
+                (1+ (ash +fdefn-info-num+ info-number-bits)))
+        ;; DATA-REF-WITH-OFFSET doesn't know the info-vector length invariant,
+        ;; so depite (safety 0) eliding bounds check, FOLD-INDEX-ADDRESSING
+        ;; wasn't kicking in without (TRULY-THE (INTEGER 1 *)).
+        (aref vect (1- (truly-the (integer 1 *) (length vect))))))))
+
 ;; Return SYMBOL's fdefinition, if any, or NIL. SYMBOL must already
 ;; have been verified to be a symbol by the caller.
 (defun symbol-fdefn (symbol)
@@ -127,7 +146,10 @@
 ;;; but as we've defined FDEFINITION, that strips encapsulations.
 (defmacro %coerce-name-to-fun (name &optional (lookup-fn 'find-fdefn)
                                     strictly-functionp)
-  (declare (boolean strictly-functionp))
+  ;; Whoa! We were getting a warning from the *host* here -
+  ;;   "Abbreviated type declaration: (BOOLEAN SB-IMPL::STRICTLY-FUNCTIONP)."
+  ;; I guess it's because we hand it a lambda and it doesn't like our style?
+  (declare (type boolean strictly-functionp))
   `(let* ((name ,name) (fdefn (,lookup-fn name)) f)
      (if (and fdefn
               (setq f (fdefn-fun (truly-the fdefn fdefn)))
@@ -402,7 +424,7 @@
     (and fdefn (fdefn-fun fdefn) t)))
 
 ;; Byte index 2 of the fdefn's header is the statically-linked flag
-#!+immobile-code
+#+immobile-code
 (defmacro sb-vm::fdefn-has-static-callers (fdefn)
   `(sap-ref-8 (int-sap (get-lisp-obj-address ,fdefn))
               (- 2 sb-vm::other-pointer-lowtag)))
@@ -414,7 +436,7 @@
       (:symbol name "removing the function or macro definition of ~A")
     (let ((fdefn (find-fdefn name)))
       (when fdefn
-        #!+immobile-code
+        #+immobile-code
         (unless (eql (sb-vm::fdefn-has-static-callers fdefn) 0)
           (sb-vm::remove-static-links fdefn))
         (fdefn-makunbound fdefn)))

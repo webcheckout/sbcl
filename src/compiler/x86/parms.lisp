@@ -28,7 +28,7 @@
 ;;; useless in SBCL, since it's possible for otherwise binary
 ;;; compatible systems to return different values for getpagesize().
 ;;; -- JES, 2007-01-06
-(defconstant +backend-page-bytes+ #!+win32 65536 #!-win32 4096)
+(defconstant +backend-page-bytes+ #+win32 65536 #-win32 4096)
 
 ;;; The size in bytes of GENCGC cards, i.e. the granularity at which
 ;;; writes to old generations are logged.  With mprotect-based write
@@ -76,7 +76,6 @@
 (defconstant single-float-normal-exponent-min 1)
 (defconstant single-float-normal-exponent-max 254)
 (defconstant single-float-hidden-bit (ash 1 23))
-(defconstant single-float-trapping-nan-bit (ash 1 22))
 
 (defconstant double-float-bias 1022)
 (defconstant-eqx double-float-exponent-byte    (byte 11 20) #'equalp)
@@ -84,7 +83,6 @@
 (defconstant double-float-normal-exponent-min 1)
 (defconstant double-float-normal-exponent-max #x7FE)
 (defconstant double-float-hidden-bit (ash 1 20))
-(defconstant double-float-trapping-nan-bit (ash 1 19))
 
 (defconstant long-float-bias 16382)
 (defconstant-eqx long-float-exponent-byte    (byte 15 0) #'equalp)
@@ -92,7 +90,6 @@
 (defconstant long-float-normal-exponent-min 1)
 (defconstant long-float-normal-exponent-max #x7FFE)
 (defconstant long-float-hidden-bit (ash 1 31))         ; actually not hidden
-(defconstant long-float-trapping-nan-bit (ash 1 30))
 
 (defconstant single-float-digits
   (+ (byte-size single-float-significand-byte) 1))
@@ -194,14 +191,14 @@
 ;;; NetBSD configuration used to have this comment regarding the linkage
 ;;; table: "In CMUCL: 0xB0000000->0xB1000000"
 
-#!+win32     (!gencgc-space-setup #x22000000)
-#!+linux     (!gencgc-space-setup #x01000000 :dynamic-space-start #x09000000)
-#!+sunos     (!gencgc-space-setup #x20000000 :dynamic-space-start #x48000000)
-#!+freebsd   (!gencgc-space-setup #x01000000 :dynamic-space-start #x58000000)
-#!+dragonfly (!gencgc-space-setup #x01000000 :dynamic-space-start #x58000000)
-#!+openbsd   (!gencgc-space-setup #x3d000000 :dynamic-space-start #x8d000000)
-#!+netbsd    (!gencgc-space-setup #x20000000 :dynamic-space-start #x60000000)
-#!+darwin    (!gencgc-space-setup #x04000000 :dynamic-space-start #x10000000)
+#+win32     (!gencgc-space-setup #x22000000)
+#+linux     (!gencgc-space-setup #x01000000 :dynamic-space-start #x09000000)
+#+sunos     (!gencgc-space-setup #x20000000 :dynamic-space-start #x48000000)
+#+freebsd   (!gencgc-space-setup #x01000000 :dynamic-space-start #x58000000)
+#+dragonfly (!gencgc-space-setup #x01000000 :dynamic-space-start #x58000000)
+#+openbsd   (!gencgc-space-setup #x11000000 :dynamic-space-start #x8d000000)
+#+netbsd    (!gencgc-space-setup #x20000000 :dynamic-space-start #x60000000)
+#+darwin    (!gencgc-space-setup #x04000000 :dynamic-space-start #x10000000)
 
 ;;; Size of one linkage-table entry in bytes.
 (defconstant linkage-table-entry-size 8)
@@ -216,8 +213,8 @@
   single-step-around-trap
   single-step-before-trap
   memory-fault-emulation-trap
-  #!+sb-safepoint global-safepoint-trap
-  #!+sb-safepoint csp-safepoint-trap
+  #+sb-safepoint global-safepoint-trap
+  #+sb-safepoint csp-safepoint-trap
   error-trap)
 
 ;;;; static symbols
@@ -277,5 +274,5 @@
     %coerce-callable-to-fun)
   #'equalp)
 
-#!+win32
+#+win32
 (defconstant +win32-tib-arbitrary-field-offset+ #.(+ #xE10 (* 4 63)))

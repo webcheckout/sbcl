@@ -95,6 +95,7 @@
       (sb-xc:gensym (symbol-name x))
       (sb-xc:gensym)))
 
+(eval-when (:load-toplevel :execute #+sb-xc-host :compile-toplevel)
 (labels ((symbol-concat (package &rest things)
            (dx-let ((strings (make-array (length things)))
                     (length 0)
@@ -106,7 +107,7 @@
                              (l (length s)))
                         (setf (svref strings index) s)
                         (incf length l)
-                        #!+sb-unicode
+                        #+sb-unicode
                         (when (and (typep s '(array character (*)))
                                    ;; BASE-CHAR-p isn't a standard predicate.
                                    ;; and host ignores ELT-TYPE anyway.
@@ -122,13 +123,13 @@
                  (setq name (make-array length :element-type elt-type)))
                (dotimes (index (length things)
                                (if package
-                                   (values (%intern name length package elt-type))
+                                   (values (%intern name length package elt-type nil))
                                    (make-symbol name)))
                  (let ((s (svref strings index)))
                    (replace name s :start1 start)
                    (incf start (length s)))))))
-         #+sb-xc-host (%intern (name length package elt-type)
-                        (declare (ignore length elt-type))
+         #+sb-xc-host (%intern (name length package elt-type dummy)
+                        (declare (ignore length elt-type dummy))
                         ;; Copy, in case the host respects the DX declaration,
                         ;; but does not copy, which makes our assumption wrong.
                         (intern (copy-seq name) package)))
@@ -147,7 +148,7 @@
   ;; consistency with the above would not be particularly enlightening
   ;; as to how it isn't just GENSYMIFY]
   (defun gensymify* (&rest things)
-    (apply #'symbol-concat nil things)))
+    (apply #'symbol-concat nil things))))
 
 ;;; Access *PACKAGE* in a way which lets us recover when someone has
 ;;; done something silly like (SETF *PACKAGE* :CL-USER) in unsafe code.
@@ -244,6 +245,13 @@
 (defun ensure-list (thing)
   (if (listp thing) thing (list thing)))
 
+(defun recons (old-cons car cdr)
+  "If CAR is eq to the car of OLD-CONS and CDR is eq to the CDR, return
+  OLD-CONS, otherwise return (cons CAR CDR)."
+  (if (and (eq car (car old-cons)) (eq cdr (cdr old-cons)))
+      old-cons
+      (cons car cdr)))
+
 ;;; Anaphoric macros
 (defmacro awhen (test &body body)
   `(let ((it ,test))
@@ -261,6 +269,19 @@
                       `(let ((it ,it)) (declare (ignorable it)) ,@body)
                       it)
                  (acond ,@rest)))))))
+
+;;; Like GETHASH if HASH-TABLE contains an entry for KEY.
+;;; Otherwise, evaluate DEFAULT, store the resulting value in
+;;; HASH-TABLE and return two values: 1) the result of evaluating
+;;; DEFAULT 2) NIL.
+(defmacro ensure-gethash (key hash-table &optional default)
+  (with-unique-names (n-key n-hash-table value foundp)
+    `(let ((,n-key ,key)
+           (,n-hash-table ,hash-table))
+       (multiple-value-bind (,value ,foundp) (gethash ,n-key ,n-hash-table)
+         (if ,foundp
+             (values ,value t)
+             (values (setf (gethash ,n-key ,n-hash-table) ,default) nil))))))
 
 ;; This is not an 'extension', but is needed super early, so ....
 (defmacro sb-xc:defconstant (name value &optional (doc nil docp))

@@ -72,8 +72,6 @@
         ((nil) ; default
          (values '(cl:make-load-form-saving-slots obj :environment env)
                  '(sb-xc:make-load-form-saving-slots obj :environment env)))
-        (:ignore-it
-         (values '(bug "Can't :ignore-it for host") :ignore-it))
         (t
          (assert (not (member :host usable-by)))
          (values nil `(funcall ,method obj env))))
@@ -100,12 +98,12 @@
 ;;; (Among the issues is the very restricted initialization form)
 (defmacro !define-thread-local (name initform &optional docstring)
   (check-type initform (or fixnum symbol))
-  #!-sb-thread `(progn
+  #-sb-thread `(progn
                   (eval-when (:compile-toplevel :load-toplevel :execute)
                     (setf (info :variable :always-bound ',name) :always-bound))
                   ;; DEFPARAMETER, not DEFVAR, because genesis can do it
                   (defparameter ,name ,initform ,docstring))
-  #!+sb-thread `(progn
+  #+sb-thread `(progn
                   ;; Genesis can handle !%DEFINE-THREAD-LOCAL
                   #-sb-xc-host (!%define-thread-local ',name ',initform)
                   (eval-when (:compile-toplevel :load-toplevel :execute)

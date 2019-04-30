@@ -103,6 +103,15 @@
   (def (setf %funcallable-instance-fun) (fin new-value))
   (def %funcallable-instance-info (fin i))
   (def %set-funcallable-instance-info (fin i new-value))
+  #+(and compact-instance-header x86-64) (def layout-of)
+  #+64-bit (def layout-depthoid)
+  ;; lists
+  (def %rplaca (x val))
+  (def %rplacd (x val))
+
+  #+compare-and-swap-vops
+  (def* (%array-atomic-incf/word (array index diff))
+        (%raw-instance-atomic-incf/word (instance index diff)))
 
   #+sb-simd-pack
   (def* (%make-simd-pack (tag low high))
@@ -129,6 +138,7 @@
   (def %set-stack-ref (s n value))
   (def fun-code-header)
   (def sb-vm::symbol-extra)
+  #+sb-thread (def sb-kernel:symbol-tls-index)
   #-(or x86 x86-64) (def lra-code-header)
   (def %make-lisp-obj)
   (def get-lisp-obj-address))

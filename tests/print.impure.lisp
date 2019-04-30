@@ -351,10 +351,11 @@
 
 ;;; a spot of random-testing for rational printing
 (defvar *seed-state* (make-random-state))
-(with-open-file (f "last-random-state.lisp-expr"
-                   :direction :output :if-exists :supersede)
-  ;; I don't want to see this every time
-  (write *seed-state* :pretty nil :stream f)) ; so that we can reproduce errors
+(ignore-errors
+ (with-open-file (f "last-random-state.lisp-expr"
+                    :direction :output :if-exists :supersede)
+   ;; I don't want to see this every time
+   (write *seed-state* :pretty nil :stream f))) ; so that we can reproduce errors
 (with-test (:name (read print rational :consistency ))
   (let ((seed (make-random-state *seed-state*)))
     (loop repeat 42
@@ -463,7 +464,7 @@
 ;; of the stream.
 
 (defun test-readable-character (character external-format)
-  (let ((file "print.impure.tmp"))
+  (let ((file (scratch-file-name "tmp")))
     (unwind-protect
          (progn
            (with-open-file (stream file
@@ -667,7 +668,7 @@
         (dimss (loop repeat 10
                      collect (loop repeat (1+ (random 3))
                                    collect (1+ (random 10)))))
-        (props sb-vm::*specialized-array-element-type-properties*))
+        (props sb-vm:*specialized-array-element-type-properties*))
     (labels ((random-elt (type)
                (case type
                  (base-char
@@ -696,7 +697,7 @@
                       (complex
                        (complex (random-elt x) (random-elt x)))))))))
       (dotimes (i (length props))
-        (let ((et (sb-vm::saetp-specifier (aref props i))))
+        (let ((et (sb-vm:saetp-specifier (aref props i))))
           (when et
             (when (eq 'base-char et)
               ;; base-strings not included in the #. printing.

@@ -41,6 +41,21 @@
     (inst and result #xFF)
     DONE))
 
+(macrolet ((read-depthoid ()
+             `(make-ea :dword
+                       :disp (- (ash (+ instance-slots-offset
+                                         (get-dsd-index layout sb-kernel::depthoid))
+                                      word-shift)
+                                 instance-pointer-lowtag)
+                       :base layout)))
+  (define-vop (sb-c::layout-depthoid-gt)
+    (:translate sb-c::layout-depthoid-gt)
+    (:policy :fast-safe)
+    (:args (layout :scs (descriptor-reg)))
+    (:info k)
+    (:arg-types * (:constant (unsigned-byte 16)))
+    (:conditional :g)
+    (:generator 1 (inst cmp (read-depthoid) (fixnumize k)))))
 
 (define-vop (%other-pointer-widetag)
   (:translate %other-pointer-widetag)
@@ -245,7 +260,7 @@
   (:generator 1
     (inst break pending-interrupt-trap)))
 
-#!+sb-thread
+#+sb-thread
 (define-vop (current-thread-offset-sap)
   (:results (sap :scs (sap-reg)))
   (:result-types system-area-pointer)
@@ -255,19 +270,19 @@
   (:arg-types tagged-num)
   (:policy :fast-safe)
   (:generator 2
-    #!+win32
+    #+win32
     (inst mov sap (make-ea :dword :disp +win32-tib-arbitrary-field-offset+) :fs)
     ;; Using the FS segment, memory can be accessed only at the segment
     ;; base specified by the descriptor (as segment-relative address 0)
     ;; up through the segment limit. Negative indices are no good.
     ;; Instead of accessing via FS, load thread->this into SAP,
     ;; and then the index can be signed.
-    #!-win32 (inst mov sap (make-ea :dword :disp (ash thread-this-slot 2)) :fs)
+    #-win32 (inst mov sap (make-ea :dword :disp (ash thread-this-slot 2)) :fs)
     (inst mov sap (make-ea :dword :base sap :index n))))
 ;; ADDRESS-BASED-COUNTER-VAL uses the thread's alloc region free pointer
 ;; as a quasi-random value, so that's a relatively useful case to handle
 ;; without the extra instruction. Win32 needs an extra instruction always.
-#!+(and sb-thread (not win32))
+#+(and sb-thread (not win32))
 (define-vop (current-thread-offset-sap/c)
   (:results (sap :scs (sap-reg)))
   (:result-types system-area-pointer)
@@ -354,7 +369,7 @@ number of CPU cycles elapsed as secondary value. EXPERIMENTAL."
                  (+ (ash (- ,hi1 ,hi0) 32)
                     (- ,lo1 ,lo0)))))))
 
-#!+sb-dyncount
+#+sb-dyncount
 (define-vop (count-me)
   (:args (count-vector :scs (descriptor-reg)))
   (:info index)

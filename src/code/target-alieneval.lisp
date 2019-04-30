@@ -40,7 +40,7 @@
                      ~:@_  (\"alien_name\" LISP-NAME)~
                      ~:@_  FOO-BAR                - equivalent to (\"foo_bar\" FOO-BAR)~
                      ~:@_  \"foo_bar\"              - equivalent to (\"foo_bar\" FOO-BAR)~:@>")))
-      (etypecase name
+      (typecase name
        (string
         (values (guess-lisp-name-from-alien-name name)
                 (coerce name 'simple-string)))
@@ -198,7 +198,7 @@ This is SETFable."
             :sap (sap-int (alien-value-sap value))
             :type (unparse-alien-type (alien-value-type value)))))
 
-#!-sb-fluid (declaim (inline null-alien))
+#-sb-fluid (declaim (inline null-alien))
 (defun null-alien (x)
   "Return true if X (which must be an ALIEN pointer) is null, false otherwise."
   (zerop (sap-int (alien-sap x))))
@@ -296,7 +296,7 @@ Examples:
 
 ;;; Allocate a block of memory at least BYTES bytes long and return a
 ;;; system area pointer to it.
-#!-sb-fluid (declaim (inline %make-alien))
+#-sb-fluid (declaim (inline %make-alien))
 (defun %make-alien (bytes)
   (declare (type index bytes)
            (optimize (sb-c:alien-funcall-saves-fp-and-pc 0)))
@@ -307,13 +307,12 @@ Examples:
         (malloc-error bytes)
         sap)))
 
-#!+c-stack-is-control-stack
+#+c-stack-is-control-stack
 (declaim (inline invoke-with-saved-fp))
 ;;; On :c-stack-is-control-stack platforms, this DEFUN must appear prior to the
 ;;; first cross-compile-time use of ALIEN-FUNCALL, the transform of which is
 ;;; an invocation of INVOKE-WITH-SAVED-FP, which should be inlined.
-;;; Makes no sense when compiling for the host.
-#!+(and c-stack-is-control-stack (host-feature sb-xc))
+#+c-stack-is-control-stack
 (defun invoke-with-saved-fp (fn)
   (declare #-sb-xc-host (muffle-conditions compiler-note)
            (optimize (speed 3)))
@@ -321,7 +320,7 @@ Examples:
   (let ((*saved-fp* (sb-c::current-fp-fixnum)))
     (funcall fn)))
 
-#!-sb-fluid (declaim (inline free-alien))
+#-sb-fluid (declaim (inline free-alien))
 (defun free-alien (alien)
   "Dispose of the storage pointed to by ALIEN. The ALIEN must have been
 allocated by MAKE-ALIEN, MAKE-ALIEN-STRING or malloc(3)."
@@ -627,7 +626,7 @@ null byte."
 (defun-cached (coerce-to-interpreted-function
                :hash-bits 8 :hash-function #'globaldb-sxhashoid)
     ((lambda-form equal))
-  (let (#!+(or sb-eval sb-fasteval)
+  (let (#+(or sb-eval sb-fasteval)
         (*evaluator-mode* :interpret))
     (coerce lambda-form 'function)))
 

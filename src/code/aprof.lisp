@@ -68,6 +68,7 @@
   (:export #:aprof-run #:aprof-show)
   (:import-from #:sb-di #:valid-lisp-pointer-p)
   (:import-from #:sb-disassem #:dstate-inst-properties)
+  (:import-from #:sb-vm #:rbp-offset)
   (:import-from #:sb-x86-64-asm
                 #:lock #:x66 #:rex #:+rex-b+
                 #:inst-operand-size
@@ -84,6 +85,7 @@
                 #:|push| #:|pop| #:|or| #:|call| #:|break|))
 
 (in-package #:sb-aprof)
+(setf (system-package-p *package*) t)
 
 (defstruct (alloc (:constructor make-alloc (bytes count type pc)))
   bytes count type pc)
@@ -163,7 +165,7 @@
 (defun layout-name (ptr)
   (if (eql (valid-lisp-pointer-p (int-sap ptr)) 0)
       'structure
-      (classoid-name (layout-classoid (make-lisp-obj ptr)))))
+      (layout-classoid-name (make-lisp-obj ptr))))
 
 ;;; map-segment-instructions is really deficient in providing an intelligent
 ;;; decoding of the bits, as they're wired into the instruction printer.
@@ -264,7 +266,7 @@
                             (eql (machine-ea-base ea) 11)
                             (null (machine-ea-index ea))
                             (eql (machine-ea-disp ea)
-                                (+ profiler-index sb-vm:n-word-bytes))))
+                                 (+ profiler-index sb-vm:n-word-bytes))))
                       (t
                        (advance-if (and (eq opcode 'mov) (pseudoatomic-flag-p))
                                    +state-begin-pa+))))
@@ -344,7 +346,9 @@
                        (let ((dir (infer-mov-direction dchunk)))
                          (ecase dir
                           (:load
-                           (cond ((eq (machine-ea-base ea) :rip)) ; ignore
+                           (cond ((or (eql (machine-ea-base ea) rbp-offset) ; load from frame
+                                      (eq (machine-ea-base ea) :rip)) ; load from constant pool
+                                  ) ; do nothing
                                  (t (fail))))
                           (:store
                            ;; widetag stored before ORing in lowtag
@@ -356,7 +360,13 @@
                                   (advance +state-widetag-only+)
                                   (setq widetag (if (eq (inst-operand-size dstate) :qword)
                                                     :variable
-                                                    (logand (reg/mem-imm-data 0 dstate) #xFF))))
+                                                    (logand (reg/mem-imm-data 0 dstate) #xFF)))
+                                  ;; Done, unless we need to scan more in order to infer the layout
+                                  (when (and (integerp widetag)
+                                             (not (member widetag `(,sb-vm:funcallable-instance-widetag
+                                                                    ,sb-vm:instance-widetag))))
+                                    (return-from infer-type
+                                      (values (aref *tag-to-type* widetag) size))))
                                  ((and (eql (machine-ea-base ea) target-reg)
                                        (not (machine-ea-index ea))
                                        (machine-ea-disp ea))) ; ignore
@@ -620,14 +630,14 @@
           (incf sum-pct (float (/ bytes total-bytes)))
           ;; Show summary for the function
           (cond ((not detail)
-                 (format stream " ~5,1,2f      ~5,1,2f ~12d~15d   ~a~%"
+                 (format stream " ~5,1,2f      ~5,1,2f ~12d~15d   ~s~%"
                          (/ bytes total-bytes)
                          sum-pct
                          bytes
                          (reduce #'+ data :key #'alloc-count)
                          name))
                 (t
-                 (format stream " ~5,1,2f   ~12d   ~:[~10@t~;~:*~10d~]~@[~14@a~]    ~a~@[ - ~a~]~%"
+                 (format stream " ~5,1,2f   ~12d   ~:[~10@t~;~:*~10d~]~@[~14@a~]    ~s~@[ - ~s~]~%"
                          (/ bytes total-bytes)
                          bytes
                          (if (cdr data) nil (alloc-count (car data)))
@@ -639,7 +649,7 @@
                          )))
           (when (and detail (cdr data))
             (dolist (point data)
-              (format stream "     ~5,1,2f ~12d ~10d~@[~14x~]~@[        ~a~]~%"
+              (format stream "     ~5,1,2f ~12d ~10d~@[~14x~]~@[        ~s~]~%"
                         (/ (alloc-bytes point) bytes) ; fraction within function
                         (alloc-bytes point)
                         (alloc-count point)

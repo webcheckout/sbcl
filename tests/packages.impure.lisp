@@ -656,6 +656,65 @@ if a restart was invoked."
                 (let ((*package* p1))
                   (intern "FOO" :own-nickname))))))
 
+(defun random-package-name (min max)
+  (let* ((s (make-string (+ min (random (- max min))))))
+    (dotimes (i (length s) s)
+      (setf (char s i) (code-char (+ (char-code #\A) (random 26)))))))
+
+;;; Hammer on the somewhat intricate structure that maintains the bidirection mapping
+;;; between PLNs and packages, and PLN ID to package.
+(with-test (:name :pln-data-structure-bashing)
+  (with-tmp-packages ((referencing-pkg (make-package "FOO")))
+    (prog (plns)
+       (dotimes (i 40)
+         (let ((package (make-package (random-package-name 10 12)))
+               (local-nick (random-package-name 3 6)))
+           (push (cons local-nick package) plns)
+           (add-package-local-nickname local-nick package referencing-pkg)))
+       iterate
+       ;; Test all 3 directions of the mapping
+       (dolist (entry plns)
+         ;; local nickname to package
+         (assert (eq (sb-impl::pkgnick-search-by-name (car entry) referencing-pkg)
+                     (cdr entry)))
+         ;; numeric id to package
+         (let ((id (sb-int:info-gethash (car entry) (car sb-impl::*package-nickname-ids*))))
+           (assert (eq (sb-impl::pkgnick-search-by-id id referencing-pkg)
+                       (cdr entry))))
+         ;; package to local nickname
+         (assert (string= (sb-impl::package-local-nickname (cdr entry)
+                                                           referencing-pkg)
+                          (car entry))))
+       ;; Delete a random package that has a local nickname
+       (let ((entry (nth (random (length plns)) plns)))
+         (delete-package (cdr entry))
+         ;; Deletion removes from local nicknames on attempted lookup
+         (assert (not (sb-impl::find-package-using-package (car entry) referencing-pkg)))
+         (setq plns (delete entry plns))
+         (assert (= (length (car (sb-impl::package-%local-nicknames referencing-pkg)))
+                    (* 2 (length plns)))))
+       (when plns (go iterate)))))
+
+(defun intern-in-fixed-pkg-designator (x) (intern x "PWELN"))
+(compile 'intern-in-fixed-pkg-designator)
+
+(with-test (:name :cached-find-package)
+  (with-tmp-packages
+      ((p1 (make-package "PKG-WITH-EXCEEDINGLY-LONG-NAME"))
+       (p2 (make-package "PKG-WHICH-EVERYONE-LOVES-NOW" :nicknames '("PWELN")))
+       (p3 (defpackage "USERPKG"
+             (:local-nicknames ("PWELN" "PKG-WITH-EXCEEDINGLY-LONG-NAME")
+                               ("FOOCL" "COMMON-LISP")))))
+      (let ((s (intern-in-fixed-pkg-designator "A")))
+        (assert (eq (symbol-package s) p2))) ; global PWELN package
+      (let ((s (let ((*package* p3))
+                 (intern-in-fixed-pkg-designator "A"))))
+        (assert (eq (symbol-package s) p1))) ; local PWELN package
+      (delete-package p1) ; will lazily delete "inbound" nicknames
+      (let ((s (let ((*package* p3))
+                 (intern-in-fixed-pkg-designator "A"))))
+        (assert (eq (symbol-package s) p2))))) ; global PWELN package
+
 (with-test (:name :delete-package-restart)
   (let* (ok
          (result
@@ -844,6 +903,15 @@ if a restart was invoked."
       (assert (equal (package-local-nicknames package2) `((,name3 . ,package1))))
       (assert (package-locked-p package2)))))
 
+(with-test (:name :locally-nicknamed-by-dedup)
+  (with-tmp-packages
+      ((p1 (make-package "LONGNAME.SAMPLE.FRED"))
+       (p2 (defpackage "BAZ"
+             (:local-nicknames (:fred "LONGNAME.SAMPLE.FRED")
+                               (:f "LONGNAME.SAMPLE.FRED")))))
+    (assert (equal (package-locally-nicknamed-by-list "LONGNAME.SAMPLE.FRED")
+                   (list (find-package "BAZ"))))))
+
 ;;; Now a possibly useless test on an essentially useless function.
 ;;; But we may as well get it right - assert that GENTEMP returns
 ;;; a symbol that definitely did not exist in the specified package
@@ -925,8 +993,20 @@ if a restart was invoked."
       (assert (not (search "symbols:SILLY"
                            (write-to-string c :pretty nil :escape nil)))))
     (condition () (error "Should not get here"))
-    (:no-error () (error "Should not get here"))))
+    (:no-error (c) (declare (ignore c)) (error "Should not get here"))))
 
 ;; git revision f7d1550c0e16262f28213c9e3c048f42e3f0b476 broke find-all-symbols
 (with-test (:name :find-all-symbols)
   (find-all-symbols "FIXNUM"))
+
+(defun foo-intern (x) (intern x "PKG-A"))
+(compile 'foo-intern)
+;;; Basic smoke test of compiler transform of INTERN
+(with-test (:name :cached-find-package)
+  (assert-error (foo-intern "X"))
+  (make-package "PKG-A")
+  (locally (declare (notinline intern find-symbol))
+    (assert (eq (foo-intern "X") (find-symbol "X" "PKG-A")))
+    (delete-package "PKG-A")
+    (make-package "PKG-B" :nicknames '("PKG-A"))
+    (assert (eq (foo-intern "X") (find-symbol "X" "PKG-B")))))

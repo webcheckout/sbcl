@@ -225,9 +225,10 @@
                   exports)
           package)
   ;; 5. :local-nicknames
+  ;; FIXME: See bug at PACKAGE-LOCALLY-NICKNAMED-BY-LIST
   (setf (package-%local-nicknames package) nil) ; throw out the old ones.
   (loop :for (nickname . nickname-package) :in local-nicknames :do
-     (add-package-local-nickname nickname nickname-package package))
+     (%add-package-local-nickname nickname nickname-package package))
   ;; Everything was created: update metadata
   (when source-location
     (setf (package-source-location package) source-location))
@@ -237,6 +238,8 @@
       (add-implementation-package package p))
   ;; Handle lock
   (setf (package-lock package) lock)
+  ;; Flush cached FIND-PACKAGE values
+  (atomic-incf *package-names-cookie*)
   package)
 
 (declaim (type list *on-package-variance*))
@@ -399,6 +402,20 @@ specifies to signal a warning if SWANK package is in variance, and an error othe
                     :format-control "no symbol named ~S in ~S"
                     :format-arguments (list name (package-name package))))
            (intern name package)))))
+
+;;;; One more package-related transform. I'm unsure why this can't be installed
+;;;; sooner, but it can't. It's a symptom of our build weirdness involving
+;;;; the lack of a class definition for the class CLASS, but I can't see what
+;;;; that's got to do with anything.
+(in-package "SB-C")
+
+;;; As for the INTERN transform, you could be screwed if you use any of the
+;;; standard package names as a local nickname of a random package.
+(deftransform find-package ((name) ((constant-arg string-designator)))
+  (multiple-value-bind (form constp) (find-package-xform name)
+    ;; standard packages are effectively constant objects, otherwise
+    ;; we have to invoke the find function.
+    (if constp form `(sb-impl::cached-find-package ,form))))
 
 ;;;; package hacking
 

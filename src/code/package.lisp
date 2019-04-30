@@ -85,15 +85,24 @@
   ;; documentation string for this package
   (doc-string nil :type (or simple-string null))
   ;; package locking
-  (lock nil :type boolean)
+  (%bits 0 :type (and fixnum unsigned-byte))
   (%implementation-packages nil :type list)
+  ;; Mapping of local nickname to actual package.
+  ;; One vector stores the mapping sorted by string, the other stores it by
+  ;; integer nickname ID so that we can binary search in either.
+  (%local-nicknames nil :type (or null (cons simple-vector simple-vector)))
   ;; Definition source location
-  (source-location nil :type (or null sb-c:definition-source-location))
-  ;; Local package nicknames.
-  (%local-nicknames nil :type list)
-  (%locally-nicknamed-by nil :type list))
+  (source-location nil :type (or null sb-c:definition-source-location)))
 (!set-load-form-method package (:xc)
   (lambda (obj env)
     (declare (ignore env))
     ;; the target code will use FIND-UNDELETED-PACKAGE-OR-LOSE
     `(find-package ,(package-name obj))))
+
+(defconstant +initial-package-bits+ 2) ; for genesis
+
+(defmacro system-package-p (package) ; SBCL stuff excluding CL and KEYWORD
+  #+sb-xc-host `(eql (mismatch "SB-" (package-name ,package)) 3)
+  #-sb-xc-host `(logbitp 1 (package-%bits ,package)))
+
+(defmacro package-lock (package) `(logbitp 0 (package-%bits ,package)))

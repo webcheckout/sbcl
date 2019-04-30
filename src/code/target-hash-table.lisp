@@ -55,9 +55,9 @@
 (defmacro with-concurrent-access-check (hash-table operation &body body)
   (declare (ignorable hash-table operation)
            (type (member :read :write) operation))
-  #!-sb-hash-table-debug
+  #-sb-hash-table-debug
   `(progn ,@body)
-  #!+sb-hash-table-debug
+  #+sb-hash-table-debug
   (let ((thread-slot-accessor (if (eq operation :read)
                                   'hash-table-reading-thread
                                   'hash-table-writing-thread)))
@@ -101,13 +101,13 @@
                    (setf (,thread-slot-accessor ,hash-table) nil)))
                (body-fun)))))))
 
-#!-sb-fluid (declaim (inline eq-hash))
+#-sb-fluid (declaim (inline eq-hash))
 (defun eq-hash (key)
   (declare (values hash (member t nil)))
   (values (pointer-hash key)
           (oddp (get-lisp-obj-address key))))
 
-#!-sb-fluid (declaim (inline equal-hash))
+#-sb-fluid (declaim (inline equal-hash))
 (defun equal-hash (key)
   (declare (values hash (member t nil)))
   (typecase key
@@ -121,7 +121,7 @@
     (t
      (eq-hash key))))
 
-#!-sb-fluid (declaim (inline eql-hash))
+#-sb-fluid (declaim (inline eql-hash))
 (defun eql-hash (key)
   (declare (values hash (member t nil)))
   (if (%other-pointer-subtype-p
@@ -247,7 +247,7 @@ Examples:
 ;;;; construction and simple accessors
 
 (defconstant +min-hash-table-size+ 16)
-(defconstant +min-hash-table-rehash-threshold+ (float 1/16 1.0))
+(defconstant +min-hash-table-rehash-threshold+ (float 1/16 $1.0))
 
 ;; The GC will set this to 1 if it moves an EQ-based key. This used
 ;; to be signaled by a bit in the header of the kv vector, but that
@@ -268,7 +268,7 @@ Examples:
 (defun make-hash-table (&key
                         (test 'eql)
                         (size +min-hash-table-size+)
-                        (rehash-size 1.5)
+                        (rehash-size $1.5)
                         (rehash-threshold 1)
                         (hash-function nil)
                         (weakness nil)
@@ -385,15 +385,15 @@ Examples:
                            ;; SIZE is just a hint, so if the user asks
                            ;; for a SIZE which'd be too big for us to
                            ;; easily implement, we bump it down.
-                           (floor array-dimension-limit 1024))))
+                           (floor sb-xc:array-dimension-limit 1024))))
            (rehash-size (if (integerp rehash-size)
                             rehash-size
-                            (float rehash-size 1.0)))
+                            (float rehash-size $1.0))) ; always single-float
            ;; FIXME: Original REHASH-THRESHOLD default should be 1.0,
            ;; not 1, to make it easier for the compiler to avoid
            ;; boxing.
            (rehash-threshold (max +min-hash-table-rehash-threshold+
-                                  (float rehash-threshold 1.0)))
+                                  (float rehash-threshold $1.0))) ; always single-float
            (size+1 (1+ size))       ; The first element is not usable.
            ;; KLUDGE: The most natural way of expressing the below is
            ;; (round (/ (float size+1) rehash-threshold)), and indeed
@@ -413,16 +413,12 @@ Examples:
            ;; We can not possibly support hash-tables that need
            ;; such large indices. It doesn't work.
            ;; Reducing this to (unsigned-byte 32) would save memory.
-           (index-vector (make-array length
-                                     :element-type
-                                     '(unsigned-byte #.sb-vm:n-word-bits)
+           (index-vector (make-array length :element-type 'word
                                      :initial-element 0))
            ;; Needs to be the half the length of the KV vector to link
            ;; KV entries - mapped to indeces at 2i and 2i+1 -
            ;; together.
-           (next-vector (make-array size+1
-                                    :element-type
-                                    '(unsigned-byte #.sb-vm:n-word-bits)))
+           (next-vector (make-array size+1 :element-type 'word))
            (kv-vector (make-array (* 2 size+1)
                                   :initial-element +empty-ht-slot+))
            (weakness (if weakness
@@ -443,9 +439,7 @@ Examples:
                    next-vector
                    (unless (eq test 'eq)
                      ;; See FIXME at INDEX-VECTOR. Same concern.
-                     (make-array size+1
-                                 :element-type '(unsigned-byte
-                                                 #.sb-vm:n-word-bits)
+                     (make-array size+1 :element-type 'word
                                  :initial-element +magic-hash-vector-value+))
                    (logior (if synchronized 2 0) weakness))))
       (declare (type index size+1 scaled-size length))

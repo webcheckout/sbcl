@@ -164,7 +164,15 @@
                    (cdr (leaf-refs leaf)))
               (coerce-to-values
                (if (eq :declared (leaf-where-from leaf))
-                   (leaf-type leaf)
+                   (let ((leaf-type (leaf-type leaf))
+                         (cons-type (specifier-type 'cons)))
+                     ;; If LEAF-TYPE is (or null some-cons-type) and
+                     ;; DERIVED-TYPE is known to be non-null, use
+                     ;; SOME-CONS-TYPE in that case, because a cons
+                     ;; can't become null.
+                     (if (csubtypep derived-type cons-type)
+                         (type-intersection leaf-type cons-type)
+                         leaf-type))
                    (conservative-type derived-type)))
               derived-values-type))
         derived-values-type)))
@@ -823,8 +831,9 @@
     ;; MAP and friends are good examples where this pertains]
     (when #+sb-xc-host t ; always trust our own code
           #-sb-xc-host
-          (or (package-locked-p ; callee "probably" won't get redefined
-               (sb-xc:symbol-package (fun-name-block-name fun-name)))
+          (or (let ((pkg (sb-xc:symbol-package (fun-name-block-name fun-name))))
+                ;; callee "probably" won't get redefined
+                (or (not pkg) (package-locked-p pkg)))
               (policy node (= safety 0)))
       (dolist (arg-spec dxable-args)
         (when (symbolp arg-spec)
@@ -873,7 +882,7 @@
                 (let ((original-lambda-list (second original-lambda)))
                   ;; KISS - the closure that you're passing can have 0 or more
                   ;; mandatory args and nothing else.
-                  (unless (intersection original-lambda-list lambda-list-keywords)
+                  (unless (intersection original-lambda-list sb-xc:lambda-list-keywords)
                     (push `(,tempname ,original-lambda-list
                              (%funcall ,(nth arg-spec received-args)
                                        ,@original-lambda-list))
@@ -1037,7 +1046,7 @@
 ;;;
 ;;; Why do we need to consider LVAR type? -- APD, 2003-07-30
 (defun maybe-terminate-block (node ir1-converting-not-optimizing-p)
-  (declare (type (or basic-combination cast cset ref) node))
+  (declare (type (or basic-combination cast ref) node))
   (let* ((block (node-block node))
          (lvar (node-lvar node))
          (ctran (node-next node))
@@ -1647,6 +1656,39 @@
                   (reoptimize-lvar lvar)))))))
       (values))))
 
+;;; Turn (or (integer 1 1) (integer 3 3)) to (integer 1 3)
+(defun weaken-numeric-union-type (type)
+  (if (union-type-p type)
+      (let ((low  nil)
+            (high nil)
+            class
+            (format :no))
+        (dolist (part (union-type-types type)
+                      (make-numeric-type :class class
+                                         :format format
+                                         :low low
+                                         :high high))
+          (unless (and (numeric-type-real-p part)
+                       (if class
+                           (eql (numeric-type-class part) class)
+                           (setf class (numeric-type-class part)))
+                       (cond ((eq format :no)
+                              (setf format (numeric-type-format part))
+                              t)
+                             ((eql (numeric-type-format part) format))))
+            (return type))
+          (let ((this-low (numeric-type-low part))
+                (this-high (numeric-type-high part)))
+            (unless (and this-low this-high)
+              (return type))
+            (when (consp this-low)
+              (setf this-low (car this-low)))
+            (when (consp this-high)
+              (setf this-high (car this-high)))
+            (setf low  (min this-low  (or low  this-low))
+                  high (max this-high (or high this-high))))))
+      type))
+
 ;;; Iteration variable: exactly one SETQ of the form:
 ;;;
 ;;; (let ((var initial))
@@ -1674,7 +1716,8 @@
                              (eq (ref-leaf first) var))))
               :exit-if-null)
              (step-type (lvar-type (second +-args)))
-             (set-type (lvar-type (set-value set))))
+             (set-type (lvar-type (set-value set)))
+             (initial-type (weaken-numeric-union-type initial-type)))
     (when (and (numeric-type-p initial-type)
                (numeric-type-p step-type)
                (or (numeric-type-equal initial-type step-type)
@@ -1744,11 +1787,11 @@
     (dolist (set (lambda-var-sets var))
       (let ((type (lvar-type (set-value set))))
         (push type types)
-        (when (node-reoptimize set)
+        (when (and (node-reoptimize set)
+                   (not (node-to-be-deleted-p set)))
           (let ((old-type (node-derived-type set)))
             (unless (values-subtypep old-type type)
-              (derive-node-type set (make-single-value-type type))
-              (maybe-terminate-block set nil)))
+              (derive-node-type set (make-single-value-type type))))
           (setf (node-reoptimize set) nil))))
     (let ((res-type (or (maybe-infer-iteration-var-type var initial-type)
                         (apply #'type-union initial-type types))))
@@ -1819,9 +1862,7 @@
                       (next-node (and next-ctran
                                       (ctran-next next-ctran))))
                  (and (eq next-node ref)
-                      (do-uses (use arg t)
-                        (unless (almost-immediately-used-p arg use)
-                          (return))))))
+                      (lvar-almost-immediately-used-p arg))))
            (not (block-delete-p (node-block ref)))
            ;; If the destinatation is dynamic extent, don't substitute unless
            ;; the source is as well.
@@ -1855,17 +1896,15 @@
               ;; because binding a variable is how multiple values are
               ;; turned into a single value.
               (and (type-single-value-p (lvar-derived-type arg))
-                   ;; Intervening nodes may produces non local exits with the same destination,
-                   ;; generating unknown values or otherwise complicating stack-analyze
+                   ;; Intervening nodes may produce non local exits with the same destination,
+                   ;; generating unknown values or otherwise complicating stack-analyze.
                    ;; Due to inlining and other substitutions
                    ;; only (let ((x non-inlinable-call)) x) can be transformed
                    (almost-immediately-used-p lvar (lambda-bind (lambda-var-home var)))
                    ;; Nothing else exits from here
                    (singleton-p (block-pred (node-block dest)))
                    ;; Nothing happens between the call and the return
-                   (do-uses (use arg t)
-                     (unless (almost-immediately-used-p arg use)
-                       (return)))))
+                   (lvar-almost-immediately-used-p arg)))
              (t
               (aver (lvar-single-value-p lvar))
               t))

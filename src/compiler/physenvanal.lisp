@@ -217,7 +217,10 @@
 (defvar *functional-escape-info*)
 
 (defun functional-may-escape-p (functional)
-  (binding* ((table (or *functional-escape-info*
+  (binding* ((functional (if (lambda-p functional)
+                             (lambda-home functional)
+                             functional))
+             (table (or *functional-escape-info*
                         ;; Many components have no escapes, so we
                         ;; allocate it lazily.
                         (setf *functional-escape-info*
@@ -463,7 +466,7 @@
                        (basic-combination-args node))))
           (ecase (cleanup-kind cleanup)
             (:special-bind
-             (code `(%special-unbind ',(leaf-source-name (lvar-value (car args))))))
+             (code `(%special-unbind ',(lvar-value (car args)))))
             (:catch
              (code `(%catch-breakup)))
             (:unwind-protect
@@ -482,7 +485,7 @@
              (code `(%primitive set-nsp ,(ref-leaf node))))))))
     (flet ((coalesce-unbinds (code)
              code
-              #!+(vop-named sb-c:unbind-n)
+              #+(vop-named sb-c:unbind-n)
               (loop with cleanup
                     while code
                     do (setf cleanup (pop code))

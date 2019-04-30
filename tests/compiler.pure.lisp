@@ -11,8 +11,6 @@
 ;;;; absolutely no warranty. See the COPYING and CREDITS files for
 ;;;; more information.
 
-(cl:in-package :cl-user)
-
 ;; The tests in this file do not work under the legacy interpreter.
 (when (and (eq sb-ext:*evaluator-mode* :interpret)
            (not (member :sb-fasteval *features*)))
@@ -3483,7 +3481,8 @@
                      '(eql #\a)
                      #+sb-unicode 'extended-char
                      #+sb-unicode '(eql #\cyrillic_small_letter_yu)
-                     sb-kernel::*specialized-array-element-types*))
+                     (map 'list 'sb-vm:saetp-specifier
+                          sb-vm:*specialized-array-element-type-properties*)))
     (when et
       (let* ((v (make-array 3 :element-type et)))
         (checked-compile-and-assert ()
@@ -4580,8 +4579,9 @@
                   (or (simple-array character 24) (vector t))))))
     (dolist (pair types)
       (destructuring-bind (orig conservative) pair
-        (assert sb-c::(type= (specifier-type cl-user::conservative)
-                             (conservative-type (specifier-type cl-user::orig))))))))
+        (assert (sb-kernel:type= (sb-kernel:specifier-type conservative)
+                                 (sb-c::conservative-type
+                                  (sb-kernel:specifier-type orig))))))))
 
 (with-test (:name (compile :smodular64 :wrong-width))
   (checked-compile-and-assert ()
@@ -5567,7 +5567,9 @@
     (let ((expect (with-open-file (f input) (read f))))
       (assert (stringp expect))
       (let ((err-string (with-output-to-string (*error-output*)
-                          (compile-file input :print nil))))
+                          (compile-file input :print nil
+                                              :output-file
+                                              (scratch-file-name "fasl")))))
         (assert (search expect err-string))))))
 
 (with-test (:name (coerce :derive-type))
@@ -5689,7 +5691,7 @@
   ;; symbol each time. But if the compiler processes the guts as it
   ;; should, you get back a compiled lambda which returns a constant
   ;; symbol.
-  (let ((f (let ((sb-ext:*evaluator-mode* :interpret))
+  (let ((f (let (#+(or sb-eval sb-fasteval) (sb-ext:*evaluator-mode* :interpret))
              (checked-compile
               `(lambda ()
                  (load-time-value

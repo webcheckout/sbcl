@@ -1,5 +1,47 @@
 ;;;; -*- coding: utf-8; fill-column: 78 -*-
 
+changes in sbcl-1.5.2 relative to sbcl-1.5.1:
+  * enhancement: RISC-V support with the generational garbage collector.
+  * enhancement: command-line option "--tls-limit" can be used to alter the
+    maximum number of thread-local symbols from its default of 4096.
+  * enhancement: better muffling of redefinition and lambda-list warnings
+  * platform support:
+    - OS X: use Grand Central Dispatch semaphores, rather than Mach semaphores
+    - Windows: remove non-functional definition of make-listener-thread
+  * new feature: decimal reader syntax for rationals, using the R exponent
+    marker and/or *READ-DEFAULT-FLOAT-FORMAT* of RATIONAL.
+  * optimization: various Unicode tables have been packed more efficiently
+
+changes in sbcl-1.5.1 relative to sbcl-1.5.0:
+  * enhancement: restarts for missing package errors.
+  * optimization: FIND-PACKAGE should be faster even when run in the context
+    of a package with local package-nicknames.
+  * optimization: fix TRUNCATE deftransform's results to have well-defined
+    signs
+  * bug fix: thread-safety problems in RUN-PROGRAM with :PTY.
+  * bug fix: SLEEP transform could never fire.
+  * build enhancement: defend against quirky host floating point
+    implementation
+  * test enhancement: allow more parallelism in running the
+    regression test suite
+
+changes in sbcl-1.5.0 relative to sbcl-1.4.16:
+  * enhancement: SB-COVER emulates IN-PACKAGE when recording source maps;
+    this makes it possible to generate coverage for forms that uses local
+    package nicknames, or otherwise must be read in the correct package.
+  * build enhancement: new host quirks mechanism, support for building under
+    ABCL and ECL (as well as CCL, CMUCL, CLISP and SBCL itself)
+  * optimization: (FIND-SYMBOL x "P") for constant "P" executes faster,
+    subject to "P" not being a package-local nickname of any
+    package. Similarly INTERN.  (lp#1814924)
+  * optimization: bounds checks are elided when possible where the same array
+    is dereferenced multiple times.
+  * bug fix: initargs are now deduplicated when computing effective slots.
+  * bug fix: TREE-EQUAL with :TEST 'EQL now correctly computes its answer.
+    (reported by Bahodir Mansurov)
+  * bug fix: compiled (COERCE x 'FLOAT) no longer coerces double-floats into
+    single-floats.  (reported by J. Gareth Williams)
+
 changes in sbcl-1.4.16 relative to sbcl-1.4.15:
   * minor incompatible change: ENSURE-DIRECTORIES-EXIST no longer establishes
     a CONTINUE restart in case of an error.

@@ -69,7 +69,7 @@ do {                                                                   \
 
 // Offset from an fdefn raw address to the underlying simple-fun,
 // if and only if it points to a simple-fun.
-#if defined(LISP_FEATURE_SPARC) || defined(LISP_FEATURE_ARM)
+#if defined(LISP_FEATURE_SPARC) || defined(LISP_FEATURE_ARM) || defined(LISP_FEATURE_RISCV)
 #define FUN_RAW_ADDR_OFFSET 0
 #else
 #define FUN_RAW_ADDR_OFFSET (offsetof(struct simple_fun, code) - FUN_POINTER_LOWTAG)
@@ -205,15 +205,6 @@ static inline lispobj fdefn_callee_lispobj(struct fdefn *fdefn) {
       (points_to_asm_routine_p((uword_t)fdefn->raw_addr) ? 0 : FUN_RAW_ADDR_OFFSET);
 }
 
-#endif
-
-#ifdef LISP_FEATURE_IMMOBILE_SPACE
-#include "genesis/layout.h"
-#define LAYOUT_SIZE (sizeof (struct layout)/N_WORD_BYTES)
-/// First 4 layouts: T, STRUCTURE-OBJECT, LAYOUT, FUNCTION
-/// (These #defines ought to be emitted by genesis)
-#define LAYOUT_OF_LAYOUT   ((FIXEDOBJ_SPACE_START+2*LAYOUT_ALIGN)|INSTANCE_POINTER_LOWTAG)
-#define LAYOUT_OF_FUNCTION ((FIXEDOBJ_SPACE_START+3*LAYOUT_ALIGN)|INSTANCE_POINTER_LOWTAG)
 #endif
 
 boolean valid_widetag_p(unsigned char widetag);

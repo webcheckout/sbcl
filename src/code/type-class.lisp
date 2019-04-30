@@ -187,7 +187,7 @@
   (coerce :type (or symbol null))
   |#
   )
-#!-sb-fluid (declaim (freeze-type type-class))
+#-sb-fluid (declaim (freeze-type type-class))
 
 #+sb-xc-host
 (defun ctype-random (mask)
@@ -350,7 +350,7 @@
       (warn "Undefined type-class method ~S" name))
     (symbolicate "TYPE-CLASS-" name)))
 
-(defmacro !define-type-method ((class method &rest more-methods)
+(defmacro define-type-method ((class method &rest more-methods)
                                lambda-list &body body)
   (let ((name (symbolicate class "-" method "-TYPE-METHOD")))
     `(progn
@@ -372,12 +372,12 @@
   ;; that function says that it can't be inlined due to reasons.
   ;; In make-host-2 everything is fine, because of DEF!STRUCT magic.
   ;; And finally, we are prevented from writing "#+sbcl" here, for reasons.
-  #!+(host-feature sbcl) (declare (notinline dd-slots)) ; forward reference
+  #+host-quirks-sbcl (declare (notinline dd-slots)) ; forward reference
   (dsd-index (find slot-name
                    (dd-slots (find-defstruct-description type-name))
                    :key #'dsd-name)))
 
-(defmacro !define-type-class (name &key inherits
+(defmacro define-type-class (name &key inherits
                                      (enumerable (unless inherits (must-supply-this))
                                                  enumerable-supplied-p)
                                      (might-contain-other-types
@@ -398,13 +398,18 @@
                  (loop for name in !type-class-fun-slots
                        append `(,(keywordicate name)
                                 (,(!type-class-fun-slot name) parent))))))))
-    #-sb-xc
-    `(if (find ',name *type-classes* :key #'type-class-name)
+    #+sb-xc-host
+    `(progn
+       (if (find ',name *type-classes* :key #'type-class-name)
          ;; Careful: type-classes are very complicated things to redefine.
          ;; For the sake of parallelized make-host-1 we have to allow it
          ;; not to be an error to get here, but we can't overwrite anything.
          (style-warn "Not redefining type-class ~S" ',name)
          (vector-push-extend ,make-it *type-classes*))
+       ;; I have no idea what compiler bug could be fixed by adding a form here,
+       ;; but this certainly achieves something, somehow.
+       #+host-quirks-cmu (print (aref *type-classes* (1- (length *type-classes*)))))
+
     ;; The Nth entry in the array of classes contain a list of instances
     ;; of the type-class created by genesis that need patching.
     ;; Types are dumped into the cold core without pointing to their class
@@ -433,7 +438,7 @@
 ;;; Semantics are slightly different though: DEFTYPE causes the default
 ;;; for missing &OPTIONAL arguments to be '* but a translator requires
 ;;; an explicit default of '*, or else it assumes a default of NIL.
-(defmacro !def-type-translator (name &rest stuff)
+(defmacro def-type-translator (name &rest stuff)
   (declare (type symbol name))
   (let* ((allow-atom (if (eq (car stuff) :list) (progn (pop stuff) nil) t))
          (lambda-list (pop stuff))
@@ -541,13 +546,13 @@
 ;;; FIXME: This was a macro in CMU CL, and is now an INLINE function. Is
 ;;; it important for it to be INLINE, or could be become an ordinary
 ;;; function without significant loss? -- WHN 19990413
-#!-sb-fluid (declaim (inline type-cache-hash))
+#-sb-fluid (declaim (inline type-cache-hash))
 (declaim (ftype (function (ctype ctype) (signed-byte #.sb-vm:n-fixnum-bits))
                 type-cache-hash))
 (defun type-cache-hash (type1 type2)
   (logxor (ash (type-hash-value type1) -3) (type-hash-value type2)))
 
-#!-sb-fluid (declaim (inline type-list-cache-hash))
+#-sb-fluid (declaim (inline type-list-cache-hash))
 (declaim (ftype (function (list) (signed-byte #.sb-vm:n-fixnum-bits))
                 type-list-cache-hash))
 (defun type-list-cache-hash (types)
@@ -830,6 +835,6 @@
 ;; So in case it wasn't clear already ENUMERABLE-P does not mean
 ;;  "possibly a MEMBER type in the Lisp-theoretic sense",
 ;; but means "could be implemented in SBCL as a MEMBER type".
-(!define-type-class character-set :enumerable nil
+(define-type-class character-set :enumerable nil
                     :might-contain-other-types nil)
 (!defun-from-collected-cold-init-forms !type-class-cold-init)

@@ -44,7 +44,6 @@
             (:copier nil))
   (label nil :type (or null label))
   (tn nil :type (or null tn) :read-only t))
-(!set-load-form-method restart-location (:xc :target) :ignore-it)
 
 ;;; This is called during code generation in places where there is an
 ;;; "interesting" location: someplace where we are likely to end up
@@ -79,7 +78,7 @@
                          (- posn (segment-header-skew segment))))))
   (values))
 
-#!-sb-fluid (declaim (inline ir2-block-physenv))
+#-sb-fluid (declaim (inline ir2-block-physenv))
 (defun ir2-block-physenv (2block)
   (declare (type ir2-block 2block))
   (block-physenv (ir2-block-block 2block)))
@@ -276,12 +275,8 @@
     (when elsewhere-locations
       (dolist (loc (nreverse elsewhere-locations))
         (dump-location-from-info loc var-locs)))
-    (let ((compressed
-           (lz-compress (coerce byte-buffer
-                                '(simple-array (unsigned-byte 8) (*))))))
-      (logically-readonlyize
-       (!make-specialized-array (length compressed) '(unsigned-byte 8)
-                                compressed)))))
+    ;; lz-compress accept any array of octets and returns a simple-array
+    (logically-readonlyize (lz-compress byte-buffer))))
 
 ;;; Return DEBUG-SOURCE structure containing information derived from
 ;;; INFO.
@@ -350,16 +345,16 @@
       (if (zerop length)
           #()
           (logically-readonlyize
-           (!make-specialized-array length
-                                    (smallest-element-type (max max-positive
-                                                                (1- max-negative))
-                                                           (plusp max-negative))
-                                    seq))))))
+           (sb-xc:coerce seq
+                         `(simple-array
+                            ,(smallest-element-type (max max-positive
+                                                         (1- max-negative))
+                                                    (plusp max-negative))
+                            1)))))))
 
 (defun compact-vector (sequence)
   (cond ((and (= (length sequence) 1)
-              (not (typep (elt sequence 0) '(and vector
-                                             (not string)))))
+              (not (typep (elt sequence 0) '(and vector (not string)))))
          (elt sequence 0))
         (t
          (coerce-to-smallest-eltype sequence))))
@@ -430,7 +425,7 @@
     (when (and same-name-p
                (not (or more minimal)))
       (setf flags (logior flags compiled-debug-var-same-name-p)))
-    #!+64-bit ; FIXME: fails if SB-VM:N-FIXNUM-TAG-BITS is 3
+    #+64-bit ; FIXME: fails if SB-VM:N-FIXNUM-TAG-BITS is 3
               ; which early-vm.lisp claims to work
     (cond (indirect
            (setf (ldb (byte 27 8) flags) (tn-sc+offset tn))
@@ -459,13 +454,13 @@
            ;; accessed through a saved frame pointer.
            ;; The first one/two sc-offsets are for the frame pointer,
            ;; the third is for the stack offset.
-           #!-64-bit
+           #-64-bit
            (vector-push-extend (tn-sc+offset tn) buffer)
-           #!-64-bit
+           #-64-bit
            (when save-tn
              (vector-push-extend (tn-sc+offset save-tn) buffer))
            (vector-push-extend (tn-sc+offset (leaf-info var)) buffer))
-          #!-64-bit
+          #-64-bit
           (t
            (if (and tn (tn-offset tn))
                (vector-push-extend (tn-sc+offset tn) buffer)
@@ -636,24 +631,24 @@
                    name)))
     (funcall (compiled-debug-fun-ctor kind)
              :name name
-             #!-fp-and-pc-standard-save :return-pc
-             #!-fp-and-pc-standard-save (tn-sc+offset (ir2-physenv-return-pc 2env))
-             #!-fp-and-pc-standard-save :return-pc-pass
-             #!-fp-and-pc-standard-save (tn-sc+offset (ir2-physenv-return-pc-pass 2env))
-             #!-fp-and-pc-standard-save :old-fp
-             #!-fp-and-pc-standard-save (tn-sc+offset (ir2-physenv-old-fp 2env))
+             #-fp-and-pc-standard-save :return-pc
+             #-fp-and-pc-standard-save (tn-sc+offset (ir2-physenv-return-pc 2env))
+             #-fp-and-pc-standard-save :return-pc-pass
+             #-fp-and-pc-standard-save (tn-sc+offset (ir2-physenv-return-pc-pass 2env))
+             #-fp-and-pc-standard-save :old-fp
+             #-fp-and-pc-standard-save (tn-sc+offset (ir2-physenv-old-fp 2env))
              :encoded-locs
              (cdf-encode-locs
               (label-position (ir2-physenv-environment-start 2env))
               (label-position (ir2-physenv-elsewhere-start 2env))
               (when (ir2-physenv-closure-save-tn 2env)
                 (tn-sc+offset (ir2-physenv-closure-save-tn 2env)))
-              #!+unwind-to-frame-and-call-vop
+              #+unwind-to-frame-and-call-vop
               (when (ir2-physenv-bsp-save-tn 2env)
                 (tn-sc+offset (ir2-physenv-bsp-save-tn 2env)))
-              #!-fp-and-pc-standard-save
+              #-fp-and-pc-standard-save
               (label-position (ir2-physenv-lra-saved-pc 2env))
-              #!-fp-and-pc-standard-save
+              #-fp-and-pc-standard-save
               (label-position (ir2-physenv-cfp-saved-pc 2env))))))
 
 ;;; Return a complete C-D-F structure for FUN. This involves
@@ -663,7 +658,7 @@
   (declare (type clambda fun) (type hash-table var-locs))
   (let* ((dfun (dfun-from-fun fun))
          (actual-level (policy (lambda-bind fun) compute-debug-fun))
-         (level (cond #!+sb-dyncount
+         (level (cond #+sb-dyncount
                       (*collect-dynamic-statistics*
                        (max actual-level 2))
                       (actual-level))))

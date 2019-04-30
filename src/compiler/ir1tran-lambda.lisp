@@ -207,7 +207,7 @@
           (bind-ctran (make-ctran))
           (cleanup-ctran (make-ctran)))
       (ir1-convert start bind-ctran nil
-                   `(%special-bind ',(lambda-var-specvar var) ,var))
+                   `(%special-bind ',(leaf-source-name (lambda-var-specvar var)) ,var))
       (setf (cleanup-mess-up cleanup) (ctran-use bind-ctran))
       (let ((*lexenv* (make-lexenv :cleanup cleanup)))
         (ir1-convert bind-ctran cleanup-ctran nil '(%cleanup-point))
@@ -527,14 +527,14 @@
                           (policy *lexenv* (zerop safety))))
               (found-allow-p nil))
 
-          (temps #!-stack-grows-downward-not-upward
+          (temps #-stack-grows-downward-not-upward
                  `(,n-index (1- ,n-count))
-                 #!+stack-grows-downward-not-upward
+                 #+stack-grows-downward-not-upward
                  `(,n-index (- (1- ,n-count)))
-                 #!-stack-grows-downward-not-upward n-value-temp
-                 #!-stack-grows-downward-not-upward n-key)
+                 #-stack-grows-downward-not-upward n-value-temp
+                 #-stack-grows-downward-not-upward n-key)
           (body `(declare (fixnum ,n-index)
-                          #!-stack-grows-downward-not-upward
+                          #-stack-grows-downward-not-upward
                           (ignorable ,n-value-temp ,n-key)))
 
           (collect ((tests))
@@ -585,7 +585,7 @@
                 (%odd-key-args-error)))
 
             (body
-             #!-stack-grows-downward-not-upward
+             #-stack-grows-downward-not-upward
              `(locally
                 (declare (optimize (safety 0)))
                 (loop
@@ -595,7 +595,7 @@
                   (setq ,n-key (%more-arg ,n-context ,n-index))
                   (decf ,n-index)
                   (cond ,@(tests))))
-             #!+stack-grows-downward-not-upward
+             #+stack-grows-downward-not-upward
              `(locally (declare (optimize (safety 0)))
                 (loop
                   (when (plusp ,n-index) (return))
@@ -923,65 +923,66 @@
     (bug "Both SYSTEM-LAMBDA and MAYBE-ADD-DEBUG-CATCH specified"))
   (unless (or debug-name (neq '.anonymous. source-name))
     (setf debug-name (name-lambdalike form)))
-  (multiple-value-bind (vars keyp allow-other-keys aux-vars aux-vals)
-      (make-lambda-vars (cadr form))
-    (multiple-value-bind (forms decls doc) (parse-body (cddr form) t)
-      (binding* (((*lexenv* result-type post-binding-lexenv
-                   lambda-list explicit-check)
-                  (process-decls decls (append aux-vars vars) nil
-                                 :binding-form-p t :allow-lambda-list t))
-                 (debug-catch-p (and maybe-add-debug-catch
-                                     *allow-instrumenting*
-                                     (policy *lexenv*
-                                             (>= insert-debug-catch 2))))
-                 (forms (if debug-catch-p
-                            (wrap-forms-in-debug-catch forms)
-                            forms))
-                 (forms (if (eq result-type *wild-type*)
-                            forms
-                            `((the ,(type-specifier result-type) (progn ,@forms)))))
-                 (*allow-instrumenting* (and (not system-lambda) *allow-instrumenting*))
-                 (res (cond ((or (find-if #'lambda-var-arg-info vars) keyp)
-                             (ir1-convert-hairy-lambda forms vars keyp
-                                                       allow-other-keys
-                                                       aux-vars aux-vals
-                                                       :post-binding-lexenv post-binding-lexenv
-                                                       :source-name source-name
-                                                       :debug-name debug-name
-                                                       :system-lambda system-lambda))
-                            (t
-                             (ir1-convert-lambda-body forms vars
-                                                      :aux-vars aux-vars
-                                                      :aux-vals aux-vals
-                                                      :post-binding-lexenv post-binding-lexenv
-                                                      :source-name source-name
-                                                      :debug-name debug-name
-                                                      :system-lambda system-lambda)))))
-        (when explicit-check
-          (setf (getf (functional-plist res) 'explicit-check) explicit-check))
-        (setf (functional-inline-expansion res) form)
-        (setf (functional-arg-documentation res)
-              (if (eq lambda-list :unspecified)
-                  (strip-lambda-list (cadr form) :arglist)
-                  lambda-list))
-        (setf (functional-documentation res) doc)
-        (when (boundp '*lambda-conversions*)
-          ;; KLUDGE: Not counting TL-XEPs is a lie, of course, but
-          ;; keeps things less confusing to users of TIME, where this
-          ;; count gets used.
-          (unless (and (consp debug-name) (eq 'tl-xep (car debug-name)))
-            (incf *lambda-conversions*)))
-        res))))
+  (multiple-value-bind (forms decls doc) (parse-body (cddr form) t)
+    (let ((*lexenv* (process-muffle-decls decls *lexenv*)))
+      (multiple-value-bind (vars keyp allow-other-keys aux-vars aux-vals)
+          (make-lambda-vars (cadr form))
+        (binding* (((*lexenv* result-type post-binding-lexenv
+                              lambda-list explicit-check)
+                    (process-decls decls (append aux-vars vars) nil
+                                   :binding-form-p t :allow-lambda-list t))
+                   (debug-catch-p (and maybe-add-debug-catch
+                                       *allow-instrumenting*
+                                       (policy *lexenv*
+                                           (>= insert-debug-catch 2))))
+                   (forms (if debug-catch-p
+                              (wrap-forms-in-debug-catch forms)
+                              forms))
+                   (forms (if (eq result-type *wild-type*)
+                              forms
+                              `((the ,(type-specifier result-type) (progn ,@forms)))))
+                   (*allow-instrumenting* (and (not system-lambda) *allow-instrumenting*))
+                   (res (cond ((or (find-if #'lambda-var-arg-info vars) keyp)
+                               (ir1-convert-hairy-lambda forms vars keyp
+                                                         allow-other-keys
+                                                         aux-vars aux-vals
+                                                         :post-binding-lexenv post-binding-lexenv
+                                                         :source-name source-name
+                                                         :debug-name debug-name
+                                                         :system-lambda system-lambda))
+                              (t
+                               (ir1-convert-lambda-body forms vars
+                                                        :aux-vars aux-vars
+                                                        :aux-vals aux-vals
+                                                        :post-binding-lexenv post-binding-lexenv
+                                                        :source-name source-name
+                                                        :debug-name debug-name
+                                                        :system-lambda system-lambda)))))
+          (when explicit-check
+            (setf (getf (functional-plist res) 'explicit-check) explicit-check))
+          (setf (functional-inline-expansion res) form)
+          (setf (functional-arg-documentation res)
+                (if (eq lambda-list :unspecified)
+                    (strip-lambda-list (cadr form) :arglist)
+                    lambda-list))
+          (setf (functional-documentation res) doc)
+          (when (boundp '*lambda-conversions*)
+            ;; KLUDGE: Not counting TL-XEPs is a lie, of course, but
+            ;; keeps things less confusing to users of TIME, where this
+            ;; count gets used.
+            (unless (and (consp debug-name) (eq 'tl-xep (car debug-name)))
+              (incf *lambda-conversions*)))
+          res)))))
 
 (defun wrap-forms-in-debug-catch (forms)
-  #!+unwind-to-frame-and-call-vop
+  #+unwind-to-frame-and-call-vop
   `((multiple-value-prog1
       (progn
         ,@forms)
       ;; Just ensure that there won't be any tail-calls, IR2 magic will
       ;; handle the rest.
       (values)))
-  #!-unwind-to-frame-and-call-vop
+  #-unwind-to-frame-and-call-vop
   `( ;; Normally, we'll return from this block with the below RETURN-FROM.
     (block
         return-value-tag
@@ -1080,13 +1081,11 @@
                        (:macro
                         (let ((macros
                                (mapcar (lambda (binding)
+                                         ;; XC compile-in-lexenv ignores its second arg
+                                         #+sb-xc-host (aver (null-lexenv-p lexenv))
                                          (list* (car binding) 'macro
-                                                #-sb-xc-host
-                                                (eval-in-lexenv (cdr binding) lexenv)
-                                                #+sb-xc-host ; no EVAL-IN-LEXENV
-                                                (if (null-lexenv-p lexenv)
-                                                    (eval (cdr binding))
-                                                    (bug "inline-lexenv?"))))
+                                                (compile-in-lexenv (cdr binding) lexenv
+                                                                   nil nil nil t nil)))
                                        bindings)))
                           (recurse body
                                    (make-lexenv :default lexenv
@@ -1268,30 +1267,42 @@
     fun))
 
 ;;; Store INLINE-LAMBDA as the inline expansion of NAME.
-(defun %set-inline-expansion (name defined-fun inline-lambda dxable-args)
-  (cond ((member inline-lambda '(:accessor :predicate))
-         ;; This special case implies a structure-related source transform.
-         ;; Warn if blowing away a previously existing inline expansion that
-         ;; came from an ordinary DEFUN that recorded an expansion.
-         (let ((old (info :function :inlining-data name)))
+;;; EXTRA-INFO is either a keyword denoting that NAME pertains to
+;;; an auto-generated defstruct function, or else it is the list of
+;;; funargs that could be auto-dxified.
+(defun %set-inline-expansion (name defined-fun inline-lambda extra-info
+                                   &aux (defstruct-snippet
+                                          (when (keywordp extra-info)
+                                            extra-info))
+                                        (dxable-args
+                                          (unless (keywordp extra-info)
+                                            extra-info)))
+  (cond (defstruct-snippet
+         ;; In this case, NAME is a system-generated function. Warn if blowing away
+         ;; a previously existing inline expansion coming from an ordinary DEFUN.
+         ;; FIXME: It's tricky to correctly warn about stomping on a constructor
+         ;; because it might actually be the right inline lambda.
+         ;; Probably should compare with EQUALP.
+         ;; FIXME: what does the below KLUDGE mean ?
+         (unless (eq defstruct-snippet :constructor)
+           (let ((old (info :function :inlining-data name)))
            ;; KLUDGE: This is like (NTH-VALUE 1 (FUN-NAME-INLINE-EXPANSION))
            ;; but expressed in a way that doesn't crash in cold-init.
-           (when (or (typep old 'inlining-data) (consp old))
+             (when (or (typep old 'inlining-data) (consp old))
              ;; Any inline expansion that existed can't be useful.
-             (warn "structure ~(~A~) ~S clobbers inline function"
-                   inline-lambda name))
-           (setq inline-lambda nil))) ; will be cleared below
+               (warn "structure ~(~A~) ~S clobbers inline function"
+                     defstruct-snippet name)))))
         (t
-         ;; Warn if stomping on a structure predicate or accessor
-         ;; whether or not we are about to install an inline-lambda.
          (let ((info (info :function :source-transform name)))
+           ;; If NAME was a defstruct snippet, and now it isn't, then warn
+           ;; and remove the transform.
            (when (consp info)
              (clear-info :function :source-transform name)
              ;; This is serious enough that you can get two warnings:
              ;; - one because you redefined a function at all,
              ;; - and one because the source-transform is erased.
-             (warn "redefinition of ~S clobbers structure ~:[accessor~;predicate~]"
-                   name (eq (cdr info) :predicate))))))
+             (warn "redefinition of ~S clobbers structure ~:[accessor~;~(~a~)~]"
+                   name (symbolp (cdr info)) (cdr info))))))
   ;; says CLHS: "Only an implementation that was willing to be responsible
   ;; for recompiling f if the definition of g changed incompatibly could
   ;; legitimately stack allocate the list argument to g in f."
@@ -1319,35 +1330,34 @@ is potentially harmful to any already-compiled callers using (SAFETY 0)."
 
 ;;; the even-at-compile-time part of DEFUN
 ;;;
-;;; The INLINE-LAMBDA is either a symbol in {:ACCESSOR, :PREDICATE} meaning
-;;; that the function is a structure accessor or predicate respectively,
-;;; or a LAMBDA-WITH-LEXENV, or NIL if there is no inline expansion.
-(defun %compiler-defun (name compile-toplevel inline-lambda
-                             &optional (dxable-args nil dxable-args-supplied-p))
-  (unless dxable-args-supplied-p
-    ; TEMPORARY KLUDGE to avoid compilation failure in hu.hu.dwim.delico
-    ; which causes a cascade of problems in quicklisp.
-    ; The call must match "(sb-c:%compiler-defun {x} nil t)"
-    (aver (and (not compile-toplevel) (eq inline-lambda t)))
-    ; It was inside (EVAL-WHEN (:compile-toplevel) ...) so now fix the
-    ; arguments to reflect that.
-    (setq compile-toplevel t inline-lambda nil))
+;;; INLINE-LAMBDA is either (LAMBDA (...) ...) or (LAMBDA-WITH-LEXENV ...)
+;;; EXTRA-INFO is one of:
+;;; * a symbol in {:ACCESSOR, :PREDICATE, :COPIER, :CONSTRUCTOR} if the function
+;;;   came from defstruct; or
+;;; * a possibly empty list of dynamic extent arguments.
+;;; The inline lambda will be NIL for a structure accessor, predicate, or copier
+;;; since those can always be reconstructed from a defstruct description.
+(defun %compiler-defun (name compile-toplevel inline-lambda extra-info)
   (let ((defined-fun nil)) ; will be set below if we're in the compiler
     (when compile-toplevel
       (with-single-package-locked-error
           (:symbol name "defining ~S as a function")
         (setf defined-fun
-              (if (consp inline-lambda)
-                  ;; FIFTH as an accessor - how informative!
-                  ;; Obfuscation aside, I doubt this is even right.
-                  (get-defined-fun name (fifth inline-lambda))
-                  (get-defined-fun name))))
+              ;; Try to pass the lambda-list to GET-DEFINED-FUN if we can.
+              (if (atom inline-lambda)
+                  (get-defined-fun name)
+                  (get-defined-fun
+                   name (ecase (car inline-lambda)
+                         (lambda-with-lexenv (third inline-lambda))
+                         (lambda (second inline-lambda)))))))
       (when (boundp '*lexenv*)
         (aver (producing-fasl-file))
         (if (member name *fun-names-in-this-file* :test #'equal)
             (warn 'duplicate-definition :name name)
             (push name *fun-names-in-this-file*)))
-      (%set-inline-expansion name defined-fun inline-lambda dxable-args))
+      ;; I don't know why this is guarded by (WHEN compile-toplevel),
+      ;; because regular old %DEFUN is going to call this anyway.
+      (%set-inline-expansion name defined-fun inline-lambda extra-info))
 
     (become-defined-fun-name name)
 

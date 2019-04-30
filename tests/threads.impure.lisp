@@ -20,13 +20,6 @@
 
 (setf sb-unix::*on-dangerous-wait* :error)
 
-(defun wait-for-threads (threads)
-  (mapc (lambda (thread) (join-thread thread :default nil)) threads)
-  (assert (not (some #'thread-alive-p threads))))
-
-(defun process-all-interrupts (&optional (thread *current-thread*))
-  (sb-ext:wait-for (null (sb-thread::thread-interruptions thread))))
-
 (with-test (:name (:threads :trivia))
   (assert (eql 1 (length (list-all-threads))))
 
@@ -145,13 +138,16 @@
 
 (with-test (:name (:threads :more-trivia))
   (let ((old-threads (list-all-threads))
-        (thread (make-thread (lambda ()
-                               (assert (find *current-thread*
-                                             sb-thread::*all-threads*))
-                               (sleep 2))))
+        (thread (make-thread
+                 (lambda ()
+                   (assert (sb-thread::avl-find
+                            (sb-kernel:get-lisp-obj-address sb-vm:*control-stack-start*)
+                            sb-thread::*all-threads*))
+                   (sleep 2))))
         (new-threads (list-all-threads)))
     (assert (thread-alive-p thread))
-    (assert (eq thread (first new-threads)))
+    ;; there is no order guarantee
+    ;;(assert (eq thread (first new-threads)))
     (assert (= (1+ (length old-threads)) (length new-threads)))
     (sleep 3)
     (assert (not (thread-alive-p thread)))))
@@ -224,14 +220,20 @@
 
 #-win32
 (progn
-  (with-open-file (o "threads-foreign.c" :direction :output :if-exists :supersede)
-    (format o "void loop_forever() { while(1) ; }~%"))
-  (sb-ext:run-program "/bin/sh"
-                      '("run-compiler.sh" "-sbcl-pic" "-sbcl-shared"
-                        "-o" "threads-foreign.so" "threads-foreign.c"))
+  ;; When running from a read-only filesystem, and/or under a test scaffold in which
+  ;; no C compiler exists, we'll trust that the extra "test data file" was prepared
+  ;; already. Moreover we have to assume that it can't get out-of-date with respect
+  ;; to this lisp file. i.e. it always contains at least the one C function neccesary.
+  ;; (There's logically no "make clean ; make")
+  (unless (probe-file "threads-foreign.so")
+    (with-open-file (o "threads-foreign.c" :direction :output :if-exists :supersede)
+      (format o "void loop_forever() { while(1) ; }~%"))
+    (sb-ext:run-program "/bin/sh"
+                        '("run-compiler.sh" "-sbcl-pic" "-sbcl-shared"
+                          "-o" "threads-foreign.so" "threads-foreign.c"))
+    (delete-file "threads-foreign.c"))
   (sb-alien:load-shared-object (truename "threads-foreign.so"))
-  (sb-alien:define-alien-routine loop-forever sb-alien:void)
-  (delete-file "threads-foreign.c"))
+  (sb-alien:define-alien-routine loop-forever sb-alien:void))
 
 ;;; elementary "can we get a lock and release it again"
 (with-test (:name (:mutex :basics))
@@ -300,15 +302,6 @@
     (with-mutex (l)
       (with-recursive-lock (l)))))
 
-;; test that SLEEP actually sleeps for at least the given time, even
-;; if interrupted by another thread exiting/a gc/anything
-(with-test (:name (sleep :continue-sleeping-after-interrupt))
-  (let ((start-time (get-universal-time)))
-    (make-join-thread (lambda () (sleep 1) (sb-ext:gc :full t)))
-    (sleep 5)
-    (assert (>= (get-universal-time) (+ 5 start-time)))))
-
-
 (with-test (:name (condition-wait :basics-1))
   (let ((queue (make-waitqueue :name "queue"))
         (lock (make-mutex :name "lock"))
@@ -355,21 +348,6 @@
       (with-recursive-lock (lock)
         (condition-notify queue))
       (sleep 1))))
-
-(with-test (:name (:mutex :contention))
-  (let ((mutex (make-mutex :name "contended")))
-    (labels ((run ()
-               (let ((me *current-thread*))
-                 (dotimes (i 100)
-                   (with-mutex (mutex)
-                     (sleep .03)
-                     (assert (eql (mutex-value mutex) me)))
-                   (assert (not (eql (mutex-value mutex) me))))
-                 (format t "done ~A~%" *current-thread*))))
-      (let ((kid1 (make-thread #'run))
-            (kid2 (make-thread #'run)))
-        (format t "contention ~A ~A~%" kid1 kid2)
-        (wait-for-threads (list kid1 kid2))))))
 
 ;;; GRAB-MUTEX
 
@@ -565,16 +543,6 @@
     (setf done t)
     (join-thread thread)))
 
-(defun test-interrupt (function-to-interrupt &optional quit-p)
-  (let ((child  (make-kill-thread function-to-interrupt)))
-    (format t "interrupting child ~A~%" child)
-    (interrupt-thread child
-                      (lambda ()
-                        (format t "child pid ~A~%" *current-thread*)
-                        (when quit-p (abort-thread))))
-    (process-all-interrupts child)
-    child))
-
 ;; separate tests for (a) interrupting Lisp code, (b) C code, (c) a syscall,
 ;; (d) waiting on a lock, (e) some code which we hope is likely to be
 ;; in pseudo-atomic
@@ -594,95 +562,6 @@
   (let ((child (test-interrupt (lambda () (loop (sleep 2000))))))
     (terminate-thread child)
     (wait-for-threads (list child))))
-
-(with-test (:name (interrupt-thread :interrupt-mutex-acquisition)
-                  :broken-on :win32)
-  (let ((lock (make-mutex :name "loctite"))
-        child)
-    (with-mutex (lock)
-      (setf child (test-interrupt
-                   (lambda ()
-                     (with-mutex (lock)
-                       (assert (eql (mutex-value lock) *current-thread*)))
-                     (assert (not (eql (mutex-value lock) *current-thread*)))
-                     (sleep 10))))
-      ;;hold onto lock for long enough that child can't get it immediately
-      (sleep 5)
-      (interrupt-thread child (lambda () (format t "l ~A~%" (mutex-value lock))))
-      (format t "parent releasing lock~%"))
-    (process-all-interrupts child)
-    (terminate-thread child)
-    (wait-for-threads (list child))))
-
-(defun alloc-stuff () (copy-list '(1 2 3 4 5)))
-
-(with-test (:name (interrupt-thread :interrupt-consing-child)
-                  :broken-on :win32)
-  (let ((thread (make-thread (lambda () (loop (alloc-stuff))))))
-    (let ((killers
-           (loop repeat 4 collect
-                 (make-thread
-                  (lambda ()
-                    (loop repeat 25 do
-                          (sleep (random 0.1d0))
-                          (princ ".")
-                          (force-output)
-                          (interrupt-thread thread (lambda ()))))))))
-      (wait-for-threads killers)
-      (process-all-interrupts thread)
-      (terminate-thread thread)
-      (wait-for-threads (list thread))))
-  (sb-ext:gc :full t))
-
-#+(or x86 x86-64) ;; x86oid-only, see internal commentary.
-(with-test (:name (interrupt-thread :interrupt-consing-child :again)
-                  :broken-on :win32)
-  (let ((c (make-thread (lambda () (loop (alloc-stuff))))))
-    ;; NB this only works on x86: other ports don't have a symbol for
-    ;; pseudo-atomic atomicity
-    (dotimes (i 100)
-      (sleep (random 0.1d0))
-      (interrupt-thread c
-                        (lambda ()
-                          (princ ".") (force-output)
-                          (assert (thread-alive-p *current-thread*))
-                          (assert
-                           (not (logbitp 0 SB-KERNEL:*PSEUDO-ATOMIC-BITS*))))))
-    (process-all-interrupts c)
-    (terminate-thread c)
-    (wait-for-threads (list c))))
-
-(defstruct counter (n 0 :type sb-vm:word))
-(defvar *interrupt-counter* (make-counter))
-
-(declaim (notinline check-interrupt-count))
-(defun check-interrupt-count (i)
-  (declare (optimize (debug 1) (speed 1)))
-  ;; This used to lose if eflags were not restored after an interrupt.
-  (unless (typep i 'fixnum)
-    (error "!!!!!!!!!!!")))
-
-(with-test (:name (interrupt-thread :interrupt-ATOMIC-INCF)
-                  :broken-on :win32)
-  (let ((c (make-thread
-            (lambda ()
-              (handler-bind ((error #'(lambda (cond)
-                                        (princ cond)
-                                        (sb-debug:print-backtrace
-                                         :count most-positive-fixnum))))
-                (loop (check-interrupt-count
-                       (counter-n *interrupt-counter*))))))))
-    (let ((func (lambda ()
-                  (princ ".")
-                  (force-output)
-                  (sb-ext:atomic-incf (counter-n *interrupt-counter*)))))
-      (setf (counter-n *interrupt-counter*) 0)
-      (dotimes (i 100)
-        (sleep (random 0.1d0))
-        (interrupt-thread c func))
-      (loop until (= (counter-n *interrupt-counter*) 100) do (sleep 0.1))
-      (terminate-thread c)
-      (wait-for-threads (list c)))))
 
 (defvar *runningp* nil)
 
@@ -759,45 +638,6 @@
         (let ((*aaa* (waste)))
           (waste))
         (sb-ext:gc)))
-
-(defun exercise-syscall (fn reference-errno)
-  (make-kill-thread
-   (lambda ()
-     (loop do
-          (funcall fn)
-          (let ((errno (sb-unix::get-errno)))
-            (sleep (random 0.1d0))
-            (unless (eql errno reference-errno)
-              (format t "Got errno: ~A (~A) instead of ~A~%"
-                      errno
-                      (sb-unix::strerror)
-                      reference-errno)
-              (force-output)
-              (abort-thread)))))))
-
-;; (nanosleep -1 0) does not fail on FreeBSD
-(with-test (:name (:exercising-concurrent-syscalls)
-            :broken-on :win32)
-  (let* (#-freebsd
-         (nanosleep-errno (progn
-                            (sb-unix:nanosleep -1 0)
-                            (sb-unix::get-errno)))
-         (open-errno (progn
-                       (open "no-such-file"
-                             :if-does-not-exist nil)
-                       (sb-unix::get-errno)))
-         (threads
-          (list
-           #-freebsd
-           (exercise-syscall (lambda () (sb-unix:nanosleep -1 0)) nanosleep-errno)
-           (exercise-syscall (lambda () (open "no-such-file"
-                                              :if-does-not-exist nil))
-                             open-errno)
-           (make-join-thread (lambda () (loop (sb-ext:gc) (sleep 1)))))))
-    (sleep 10)
-    (princ "terminating threads")
-    (dolist (thread threads)
-      (terminate-thread thread))))
 
 (with-test (:name :all-threads-have-abort-restart
                   :broken-on :win32)
@@ -887,18 +727,12 @@
            (sleep 4))
       (mapc #'terminate-thread threads))))
 
-;; No interpreter stub
-(defun symbol-tls-index (symbol)
-  (sb-kernel:symbol-tls-index symbol))
-(compile 'symbol-tls-index)
-
 (with-test (:name :test-%thread-local-references)
-
   (let ((mysym (gensym))
         (fool1 (cons 1 2))
         (fool2 (cons 2 3)))
     (progv (list mysym) '(nil)
-      (let* ((i (sb-kernel:get-lisp-obj-address (symbol-tls-index mysym)))
+      (let* ((i (sb-kernel:symbol-tls-index mysym))
              (j (+ i sb-vm:n-word-bytes)))
         (assert (eql (sap-ref-word (sb-thread::current-thread-sap) j)
                      sb-vm:no-tls-value-marker-widetag))
@@ -914,153 +748,6 @@
         (setf (sap-ref-word (sb-thread::current-thread-sap) j)
               sb-vm:no-tls-value-marker-widetag)))))
 
-;;; HASH TABLES
-
-(defvar *errors* nil)
-
-(defun oops (e)
-  (setf *errors* e)
-  (format t "~&oops: ~A in ~S~%" e *current-thread*)
-  (sb-debug:print-backtrace)
-  (catch 'done))
-
-(with-test (:name (hash-table :unsynchronized)
-                  ;; FIXME: This test occasionally eats out craploads
-                  ;; of heap instead of expected error early. Not 100%
-                  ;; sure if it would finish as expected, but since it
-                  ;; hits swap on my system I'm not likely to find out
-                  ;; soon. Disabling for now. -- nikodemus
-            :broken-on :sbcl)
-  ;; We expect a (probable) error here: parellel readers and writers
-  ;; on a hash-table are not expected to work -- but we also don't
-  ;; expect this to corrupt the image.
-  (let* ((hash (make-hash-table))
-         (*errors* nil)
-         (threads (list (make-kill-thread
-                         (lambda ()
-                           (catch 'done
-                             (handler-bind ((serious-condition 'oops))
-                               (loop
-                                 ;;(princ "1") (force-output)
-                                 (setf (gethash (random 100) hash) 'h)))))
-                         :name "writer")
-                        (make-kill-thread
-                         (lambda ()
-                           (catch 'done
-                             (handler-bind ((serious-condition 'oops))
-                               (loop
-                                 ;;(princ "2") (force-output)
-                                 (remhash (random 100) hash)))))
-                         :name "reader")
-                        (make-kill-thread
-                         (lambda ()
-                           (catch 'done
-                             (handler-bind ((serious-condition 'oops))
-                               (loop
-                                 (sleep (random 1.0))
-                                 (sb-ext:gc :full t)))))
-                         :name "collector"))))
-    (unwind-protect
-         (sleep 10)
-      (mapc #'terminate-thread threads))))
-
-(with-test (:name (hash-table :synchronized)
-            :broken-on :win32)
-  (let* ((hash (make-hash-table :synchronized t))
-         (*errors* nil)
-         (threads (list (make-join-thread
-                         (lambda ()
-                           (catch 'done
-                             (handler-bind ((serious-condition 'oops))
-                               (loop
-                                 ;;(princ "1") (force-output)
-                                 (setf (gethash (random 100) hash) 'h)))))
-                         :name "writer")
-                        (make-join-thread
-                         (lambda ()
-                           (catch 'done
-                             (handler-bind ((serious-condition 'oops))
-                               (loop
-                                 ;;(princ "2") (force-output)
-                                 (remhash (random 100) hash)))))
-                         :name "reader")
-                        (make-join-thread
-                         (lambda ()
-                           (catch 'done
-                             (handler-bind ((serious-condition 'oops))
-                               (loop
-                                 (sleep (random 1.0))
-                                 (sb-ext:gc :full t)))))
-                         :name "collector"))))
-    (unwind-protect
-         (sleep 10)
-      (mapc #'terminate-thread threads))
-    (assert (not *errors*))))
-
-(with-test (:name (hash-table :parallel-readers)
-                  :broken-on :win32)
-  (let ((hash (make-hash-table))
-        (*errors* nil))
-    (loop repeat 50
-          do (setf (gethash (random 100) hash) 'xxx))
-    (let ((threads (list (make-kill-thread
-                          (lambda ()
-                            (catch 'done
-                              (handler-bind ((serious-condition 'oops))
-                                (loop
-                                      until (eq t (gethash (random 100) hash))))))
-                          :name "reader 1")
-                         (make-kill-thread
-                          (lambda ()
-                            (catch 'done
-                              (handler-bind ((serious-condition 'oops))
-                                (loop
-                                      until (eq t (gethash (random 100) hash))))))
-                          :name "reader 2")
-                         (make-kill-thread
-                          (lambda ()
-                            (catch 'done
-                              (handler-bind ((serious-condition 'oops))
-                                (loop
-                                      until (eq t (gethash (random 100) hash))))))
-                          :name "reader 3")
-                         (make-kill-thread
-                          (lambda ()
-                            (catch 'done
-                              (handler-bind ((serious-condition 'oops))
-                               (loop
-                                 (sleep (random 1.0))
-                                 (sb-ext:gc :full t)))))
-                          :name "collector"))))
-      (unwind-protect
-           (sleep 10)
-        (mapc #'terminate-thread threads))
-      (assert (not *errors*)))))
-
-(with-test (:name (hash-table :single-accessor :parallel-gc)
-                  :broken-on :win32)
-  (let ((hash (make-hash-table))
-        (*errors* nil))
-    (let ((threads (list (make-kill-thread
-                          (lambda ()
-                            (handler-bind ((serious-condition 'oops))
-                              (loop
-                                (let ((n (random 100)))
-                                  (if (gethash n hash)
-                                      (remhash n hash)
-                                      (setf (gethash n hash) 'h))))))
-                          :name "accessor")
-                         (make-kill-thread
-                          (lambda ()
-                            (handler-bind ((serious-condition 'oops))
-                              (loop
-                                (sleep (random 1.0))
-                                (sb-ext:gc :full t))))
-                          :name "collector"))))
-      (unwind-protect
-           (sleep 10)
-        (mapc #'terminate-thread threads))
-      (assert (not *errors*)))))
 
 #|  ;; a cll post from eric marsden
 | (defun crash ()
@@ -1074,42 +761,6 @@
 |     (mp:make-process #'roomy)
 |     (mp:make-process #'roomy)))
 |#
-
-(with-test (:name (:condition-variable :notify-multiple)
-                  :broken-on :win32)
-  (flet ((tester (notify-fun)
-           (let ((queue (make-waitqueue :name "queue"))
-                 (lock (make-mutex :name "lock"))
-                 (data nil))
-             (labels ((test (x)
-                        (loop
-                           (with-mutex (lock)
-                             (format t "condition-wait ~a~%" x)
-                             (force-output)
-                             (condition-wait queue lock)
-                             (format t "woke up ~a~%" x)
-                             (force-output)
-                             (push x data)))))
-               (let ((threads (loop for x from 1 to 10
-                                    collect
-                                    (let ((x x))
-                                      (make-kill-thread (lambda ()
-                                                          (test x)))))))
-                 (sleep 5)
-                 (with-mutex (lock)
-                   (funcall notify-fun queue))
-                 (sleep 5)
-                 (mapcar #'terminate-thread threads)
-                 ;; Check that all threads woke up at least once
-                 (assert (= (length (remove-duplicates data)) 10)))))))
-    (tester (lambda (queue)
-              (format t "~&(condition-notify queue 10)~%")
-              (force-output)
-              (condition-notify queue 10)))
-    (tester (lambda (queue)
-              (format t "~&(condition-broadcast queue)~%")
-              (force-output)
-              (condition-broadcast queue)))))
 
 ;;; Make sure that a deadline handler is not invoked twice in a row in
 ;;; CONDITION-WAIT. See LP #512914 for a detailed explanation.
@@ -1232,109 +883,7 @@
                                        (sb-debug:print-backtrace :count 10))))))))
     (wait-for-threads threads)))
 
-(with-test (:name :gc-deadlock
-            :broken-on :win32)
-  (write-line "WARNING: THIS TEST WILL HANG ON FAILURE!")
-  ;; Prior to 0.9.16.46 thread exit potentially deadlocked the
-  ;; GC due to *all-threads-lock* and session lock. On earlier
-  ;; versions and at least on one specific box this test is good enough
-  ;; to catch that typically well before the 1500th iteration.
-  (loop
-     with i = 0
-     with n = 3000
-     while (< i n)
-     do
-       (incf i)
-       (when (zerop (mod i 100))
-         (write-char #\.)
-         (force-output))
-       (handler-case
-           (if (oddp i)
-               (make-join-thread
-                (lambda ()
-                  (sleep (random 0.001)))
-                :name (format nil "SLEEP-~D" i))
-               (make-join-thread
-                (lambda ()
-                  ;; KLUDGE: what we are doing here is explicit,
-                  ;; but the same can happen because of a regular
-                  ;; MAKE-THREAD or LIST-ALL-THREADS, and various
-                  ;; session functions.
-                  (sb-thread::with-all-threads-lock
-                    (sb-thread::with-session-lock (sb-thread::*session*)
-                      (sb-ext:gc))))
-                :name (format nil "GC-~D" i)))
-         (error (e)
-           (format t "~%error creating thread ~D: ~A -- backing off for retry~%" i e)
-           (sleep 0.1)
-           (incf i)))))
-
 
-(let ((count (make-array 8 :initial-element 0)))
-  (defun closure-one ()
-    (declare (optimize safety))
-    (values (incf (aref count 0)) (incf (aref count 1))
-            (incf (aref count 2)) (incf (aref count 3))
-            (incf (aref count 4)) (incf (aref count 5))
-            (incf (aref count 6)) (incf (aref count 7))))
-  (defun no-optimizing-away-closure-one ()
-    (setf count (make-array 8 :initial-element 0))))
-
-(defstruct box
-  (count 0))
-
-(let ((one (make-box))
-      (two (make-box))
-      (three (make-box)))
-  (defun closure-two ()
-    (declare (optimize safety))
-    (values (incf (box-count one)) (incf (box-count two)) (incf (box-count three))))
-  (defun no-optimizing-away-closure-two ()
-    (setf one (make-box)
-          two (make-box)
-          three (make-box))))
-
-;;; PowerPC safepoint builds occasionally hang or busy-loop (or
-;;; sometimes run out of memory) in the following test.  For developers
-;;; interested in debugging this combination of features, it might be
-;;; fruitful to concentrate their efforts around this test...
-
-(with-test (:name (:funcallable-instances)
-            :broken-on (or :win32
-                           (and :sb-safepoint
-                                (not :c-stack-is-control-stack))))
-  ;; the funcallable-instance implementation used not to be threadsafe
-  ;; against setting the funcallable-instance function to a closure
-  ;; (because the code and lexenv were set separately).
-  (let ((fun (sb-kernel:%make-funcallable-instance 0))
-        (condition nil))
-    (setf (sb-kernel:%funcallable-instance-fun fun) #'closure-one)
-    (flet ((changer ()
-             (loop (setf (sb-kernel:%funcallable-instance-fun fun) #'closure-one)
-                   (setf (sb-kernel:%funcallable-instance-fun fun) #'closure-two)))
-           (test ()
-             (handler-case (loop (funcall fun))
-               (serious-condition (c) (setf condition c)))))
-      (let ((changer (make-thread #'changer))
-            (test (make-thread #'test)))
-        (handler-case
-            (progn
-              ;; The two closures above are fairly carefully crafted
-              ;; so that if given the wrong lexenv they will tend to
-              ;; do some serious damage, but it is of course difficult
-              ;; to predict where the various bits and pieces will be
-              ;; allocated.  Five seconds failed fairly reliably on
-              ;; both my x86 and x86-64 systems.  -- CSR, 2006-09-27.
-              (sb-ext:with-timeout 5
-                (wait-for-threads (list test)))
-              (error "~@<test thread got condition:~2I~_~A~@:>" condition))
-          (sb-ext:timeout ()
-            (terminate-thread changer)
-            (terminate-thread test)
-            (wait-for-threads (list changer test))))))))
-
-(defun random-type (n)
-  `(integer ,(random n) ,(+ n (random n))))
 
 (defun subtypep-hash-cache-test ()
   (dotimes (i 10000)
@@ -1439,28 +988,6 @@
                      (sb-thread:join-thread t2))))
       (assert (equal '(:ok1 :ok2) res)))))
 
-(with-test (:name (:deadlock-detection :gc))
-  ;; To semi-reliably trigger the error (in SBCL's where)
-  ;; it was present you had to run this for > 30 seconds,
-  ;; but that's a bit long for a single test.
-  (let* ((stop (+ 5 (get-universal-time)))
-         (m1 (sb-thread:make-mutex :name "m1"))
-         (t1 (sb-thread:make-thread
-              (lambda ()
-                (loop until (> (get-universal-time) stop)
-                      do (sb-thread:with-mutex (m1)
-                           (eval `(make-array 24))))
-                :ok)))
-         (t2 (sb-thread:make-thread
-              (lambda ()
-                (loop until (> (get-universal-time) stop)
-                      do (sb-thread:with-mutex (m1)
-                           (eval `(make-array 24))))
-                :ok))))
-    (let ((res (list (sb-thread:join-thread t1)
-                     (sb-thread:join-thread t2))))
-      (assert (equal '(:ok :ok) res)))))
-
 (with-test (:name :spinlock-api)
   (handler-bind ((warning #'error))
     (destructuring-bind (with make get release)
@@ -1528,12 +1055,12 @@
     (assert (eq result :ok))))
 
 (with-test (:name :thread-alloca)
-  (sb-ext:run-program "sh"
-                      '("run-compiler.sh" "-sbcl-pic" "-sbcl-shared"
-                        "alloca.c" "-o" "alloca.so")
-                      :search t)
+  (unless (probe-file "alloca.so")
+    (sb-ext:run-program "sh"
+                        '("run-compiler.sh" "-sbcl-pic" "-sbcl-shared"
+                          "alloca.c" "-o" "alloca.so")
+                        :search t))
   (load-shared-object (truename "alloca.so"))
-
   (alien-funcall (extern-alien "alloca_test" (function void)))
   (sb-thread:join-thread
    (sb-thread:make-thread

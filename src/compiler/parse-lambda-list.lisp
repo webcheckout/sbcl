@@ -275,9 +275,11 @@
 
       #-sb-xc-host ;; Supress &OPTIONAL + &KEY syle-warning on xc host
       (when (and (logtest (bits &key) seen) optional (not silent))
-        ;; FIXME: add a condition class for this
         (style-warn-once
-         list "&OPTIONAL and &KEY found in the same lambda list: ~S" list))
+         list
+         (make-condition '&optional-and-&key-in-lambda-list
+                         :format-control "&OPTIONAL and &KEY found in the same lambda list: ~S"
+                         :format-arguments (list list))))
 
       ;; For CONTEXT other than :VALUES-TYPE/:FUNCTION-TYPE we reject
       ;; illegal list elements. Type specifiers have arbitrary shapes,
@@ -903,7 +905,7 @@
                       :kind "special operator" :name name
                       :args input :lambda-list lambda-list
                       :minimum min :maximum max))
-     #!+sb-eval
+     #+sb-eval
      (:eval
       (error 'sb-eval::arg-count-program-error
              ;; This is stupid. Maybe we should just say
@@ -1127,6 +1129,11 @@
                       (when whole `((,(car whole) ,ll-whole)))))
              ;; Drop &WHOLE and &ENVIRONMENT
              (new-ll (make-lambda-list llks nil req opt rest keys aux))
+             #-sb-xc-host
+             (*lexenv* (process-muffle-decls decls
+                                             (if (boundp '*lexenv*)
+                                                 *lexenv*
+                                                 (make-null-lexenv))))
              (parse (parse-ds-lambda-list new-ll))
              ((declared-lambda-list decls)
               (let ((ll
@@ -1158,7 +1165,7 @@
                                (car tail))))
           (append whole env (ds-lambda-list-variables parse nil)))
     ;; Maybe kill docstring, but only under the cross-compiler.
-    #!+(and (not sb-doc) (host-feature sb-xc-host)) (setq docstring nil)
+    #+(and (not sb-doc) sb-xc-host) (setq docstring nil)
     ;; Note that we *NEVER* declare macro lambdas as a toplevel named lambda.
     ;; Code such as:
     ;;  `(setf (symbol-function ',myfun) ,(make-macro-lambda whatever))

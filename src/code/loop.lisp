@@ -9,7 +9,7 @@
 ;;;; bootstrap issues, SBCLification (e.g. DECLARE used to check
 ;;;; argument types), and other maintenance. Whether or not it then
 ;;;; supported all the environments implied by the reader conditionals
-;;;; in the source code (e.g. #!+CLOE-RUNTIME) before that
+;;;; in the source code (e.g. #+CLOE-RUNTIME) before that
 ;;;; modification, it sure doesn't now. It might perhaps, by blind
 ;;;; luck, be appropriate for some other CMU-CL-derived system, but
 ;;;; really it only attempts to be appropriate for SBCL.
@@ -177,7 +177,7 @@ constructed.
 (defconstant-eqx +loop-minimax-type-infinities-alist+
   ;; FIXME: Now that SBCL supports floating point infinities again, we
   ;; should have floating point infinities here, as cmucl-2.4.8 did.
-  '((fixnum most-positive-fixnum most-negative-fixnum))
+  '((fixnum sb-xc:most-positive-fixnum sb-xc:most-negative-fixnum))
   #'equal)
 
 (defun make-loop-minimax (answer-variable type)
@@ -761,7 +761,7 @@ code to be loaded.
               (let ((etype (type-*-to-t
                             (array-type-specialized-element-type ctype))))
                 (make-array 0 :element-type (type-specifier etype)))))
-           #!+sb-unicode
+           #+sb-unicode
            ((csubtypep ctype (specifier-type 'extended-char))
             (code-char base-char-code-limit))
            ((csubtypep ctype (specifier-type 'character))
@@ -1598,8 +1598,8 @@ code to be loaded.
          (limit-given nil) ; T when prep phrase has specified end
          (limit-constantp nil)
          (limit-value nil))
-     ;; Work around some "Unused" (rather, assigned-but-never-set) warnings
-     #+(or ccl clisp) (declare (ignorable start-constantp start-value))
+     ;; Silence the assigned-but-never-set warnings that CCL and CLISP emit
+     (declare (ignorable start-constantp start-value))
      (flet ((assert-index-for-arithmetic (index)
               (unless (atom index)
                 (loop-error "Arithmetic index must be an atom."))))

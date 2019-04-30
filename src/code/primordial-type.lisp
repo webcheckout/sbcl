@@ -11,7 +11,7 @@
 
 (!begin-collecting-cold-init-forms)
 
-(!define-type-class named :enumerable nil :might-contain-other-types nil)
+(define-type-class named :enumerable nil :might-contain-other-types nil)
 
 (macrolet ((frob (type global-sym)
             `(progn
@@ -52,11 +52,6 @@
    ;; a dedicated FUNDAMENTAL-SEQUENCE class for this.)
    (frob extended-sequence *extended-sequence-type*))
 
-;;; a vector that maps type codes to layouts, used for quickly finding
-;;; the layouts of built-in classes
-(defglobal **built-in-class-codes** #()) ; initialized in cold load
-(declaim (type simple-vector **built-in-class-codes**))
-
 (!defun-from-collected-cold-init-forms !primordial-type-cold-init)
 
 ;;; A HAIRY-TYPE represents anything too weird to be described
@@ -79,7 +74,6 @@
                        (:constructor %make-hairy-type (specifier))
                        (:constructor !make-interned-hairy-type
                            (specifier &aux (hash-value (interned-type-hash))))
-                       (:copier nil)
-                       #!+cmu (:pure nil))
+                       (:copier nil))
   ;; the Common Lisp type-specifier of the type we represent
   (specifier nil :type t :read-only t))

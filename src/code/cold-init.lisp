@@ -53,7 +53,7 @@
   ;; not to use it for the COLD-INIT-OR-REINIT functions.)
 (defmacro show-and-call (name)
     `(progn
-       (/primitive-print ,(symbol-name name))
+       (/show "Calling" ,(symbol-name name))
        (,name)))
 
 (defun !c-runtime-noinform-p () (/= (extern-alien "lisp_startup_options" char) 0))
@@ -96,10 +96,7 @@
   ;; Printing of symbols requires that packages be filled in, because
   ;; OUTPUT-SYMBOL calls FIND-SYMBOL to determine accessibility.
   (show-and-call !package-cold-init)
-  ;; Fill in the printer's character attribute tables now.
-  ;; If Genesis could write constant arrays into a target core,
-  ;; that would be nice, and would tidy up some other things too.
-  (show-and-call !printer-cold-init)
+  (setq *print-pprint-dispatch* (sb-pretty::make-pprint-dispatch-table))
   ;; Because L-T-V forms have not executed, CHOOSE-SYMBOL-OUT-FUN doesn't work.
   (setf (symbol-function 'choose-symbol-out-fun)
         (lambda (&rest args) (declare (ignore args)) #'output-preserve-symbol))
@@ -125,6 +122,7 @@
   (show-and-call !type-class-cold-init)
   (show-and-call sb-kernel::!primordial-type-cold-init)
   (show-and-call !classes-cold-init)
+  (show-and-call !pred-cold-init)
   (show-and-call !early-type-cold-init)
   (show-and-call !late-type-cold-init)
   (show-and-call !alien-type-cold-init)
@@ -172,10 +170,9 @@
         for toplevel-thing in (prog1 *!cold-toplevels*
                                  (makunbound '*!cold-toplevels*))
         do
-      #!+sb-show
-      (when (zerop (mod index-in-cold-toplevels 1024))
-        (/show0 "INDEX-IN-COLD-TOPLEVELS=..")
-        (/hexstr index-in-cold-toplevels))
+      #+sb-show
+      (when (zerop (mod index-in-cold-toplevels 1000))
+        (/show index-in-cold-toplevels))
       (typecase toplevel-thing
         (function
          (funcall toplevel-thing))
@@ -224,7 +221,7 @@
   (/show "Enabled buffered streams")
   (show-and-call !loader-cold-init)
   (show-and-call !foreign-cold-init)
-  #!-(and win32 (not sb-thread))
+  #-(and win32 (not sb-thread))
   (show-and-call signal-cold-init-or-reinit)
 
   (show-and-call float-cold-init-or-reinit)
@@ -272,7 +269,7 @@
       (logically-readonlyize (sb-c::sc-move-costs sc))))
 
   ; hppa heap is segmented, lisp and c uses a stub to call eachother
-  #!+hpux (%primitive sb-vm::setup-return-from-lisp-stub)
+  #+hpux (%primitive sb-vm::setup-return-from-lisp-stub)
   ;; The system is finally ready for GC.
   (/show0 "enabling GC")
   (setq *gc-inhibit* nil)
@@ -349,7 +346,7 @@ process to continue normally."
   (sb-thread::get-foreground))
 
 (defun reinit ()
-  #!+win32
+  #+win32
   (setf sb-win32::*ansi-codepage* nil)
   (setf *default-external-format* nil)
   (setf sb-alien::*default-c-string-external-format* nil)
@@ -364,7 +361,7 @@ process to continue normally."
     (stream-reinit t)
     (os-cold-init-or-reinit)
     (thread-init-or-reinit)
-    #!-(and win32 (not sb-thread))
+    #-(and win32 (not sb-thread))
     (signal-cold-init-or-reinit)
     (setf (extern-alien "internal_errors_enabled" int) 1)
     (float-cold-init-or-reinit))
@@ -382,7 +379,7 @@ process to continue normally."
 
 ;;; Decode THING into hexadecimal notation using only machinery
 ;;; available early in cold init.
-#!+sb-show
+#+sb-show
 (defun hexstr (thing)
   (/noshow0 "entering HEXSTR")
   (let* ((addr (get-lisp-obj-address thing))
@@ -404,7 +401,7 @@ process to continue normally."
     str))
 
 ;; But: you almost never need this. Just use WRITE in all its glory.
-#!+sb-show
+#+sb-show
 (defun cold-print (x)
   (labels ((%cold-print (obj depthoid)
              (if (> depthoid 4)
@@ -428,7 +425,6 @@ process to continue normally."
   '("SB-INT"
     defenum defun-cached with-globaldb-name def!type def!struct
     .
-    #!+sb-show ()
-    #!-sb-show (/hexstr /nohexstr /noshow /noshow0
-                /primitive-print /show /show0))
+    #+sb-show ()
+    #-sb-show (/noshow /noshow0 /show /show0))
   *!removable-symbols*)

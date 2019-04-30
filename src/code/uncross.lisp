@@ -19,14 +19,14 @@
 ;;; In the target system's compiler, uncrossing is just identity.
 #-sb-xc-host
 (progn
-  #!-sb-fluid (declaim (inline uncross))
+  #-sb-fluid (declaim (inline uncross))
   (defun uncross (x) x))
 ;;; In the cross-compiler, uncrossing is slightly less trivial.
 
 ;;; This condition is only a STYLE-WARNING because generally it isn't important
 ;;; in practice to recurse through anything except CONSes anyway.
 #|
-#!+sb-show
+#+sb-show
 (define-condition uncross-rcr-failure (style-warning)
   ((form :initarg :form :reader uncross-rcr-failure-form))
   (:report (lambda (c s)
@@ -65,11 +65,17 @@
        inside? (make-hash-table)))
   (defun uncross (form)
     (labels ((uncross-symbol (symbol)
-               (let ((old-symbol-package (cl:symbol-package symbol)))
-                 (if (and old-symbol-package
-                          (string= (package-name old-symbol-package) "SB-XC"))
-                     (values (intern (symbol-name symbol) *cl-package*))
-                     symbol)))
+               ;; If SYMBOL's logical home package is CL: (meaning that its physical
+               ;; home package is XC-STRICT-CL or SB-XC or CL, or depending on
+               ;; the host's design, some other package exposed via CL:),
+               ;; then return the symbol as found via XC-STRICT-CL.
+               ;; This ensures that symbols that are used for their identity and
+               ;; not function compare as EQ after uncrossing, which they would not
+               ;; if for example, we altered (EQ (FLONUM-FORMAT x) 'SHORT-FLOAT)
+               ;; to compare against CL:SHORT-FLOAT.
+               (if (eq (sb-xc:symbol-package symbol) *cl-package*)
+                   (find-symbol (symbol-name symbol) "XC-STRICT-CL")
+                   symbol))
              (rcr (form) ; recursive part
                (cond ((symbolp form)
                       (uncross-symbol form))
@@ -92,7 +98,8 @@
                       (setf (gethash form inside?) t)
                       (unwind-protect
                           (typecase form
-                            (cons (rcr-cons form))
+                            (cons
+                             (recons form (rcr (car form)) (rcr (cdr form))))
                             (t
                              ;; KLUDGE: There are other types
                              ;; (especially (ARRAY T) and
@@ -109,15 +116,6 @@
                              ;; warnings off. -- WHN 20001105
                              #+nil (warn 'uncross-rcr-failure :form form)
                              form))
-                        (remhash form inside?)))))
-             (rcr-cons (form)
-               (declare (type cons form))
-               (let* ((car (car form))
-                      (rcr-car (rcr car))
-                      (cdr (cdr form))
-                      (rcr-cdr (rcr cdr)))
-                 (if (and (eq rcr-car car) (eq rcr-cdr cdr))
-                   form
-                   (cons rcr-car rcr-cdr)))))
+                        (remhash form inside?))))))
       (clrhash inside?)
       (rcr form))))

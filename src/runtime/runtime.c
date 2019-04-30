@@ -181,6 +181,7 @@ Common runtime options:\n\
   --core <filename>          Use the specified core file instead of the default.\n\
   --dynamic-space-size <MiB> Size of reserved dynamic space in megabytes.\n\
   --control-stack-size <MiB> Size of reserved control stack in megabytes.\n\
+  --tls-limit                Maximum number of thread-local symbols.\n\
 \n\
 Common toplevel options:\n\
   --sysinit <filename>       System-wide init-file to use instead of default.\n\
@@ -499,6 +500,7 @@ sbcl_main(int argc, char *argv[], char *envp[])
     if (memsize_options.present_in_core) {
         dynamic_space_size = memsize_options.dynamic_space_size;
         thread_control_stack_size = memsize_options.thread_control_stack_size;
+        dynamic_values_bytes = memsize_options.thread_tls_bytes;
         sbcl_argv = argv;
     } else {
         int argi = 1;
@@ -566,6 +568,13 @@ sbcl_main(int argc, char *argv[], char *envp[])
                     lose("missing argument for --control-stack-size");
                 errno = 0;
                 thread_control_stack_size = parse_size_arg(argv[argi++], "--control-stack-size");
+            } else if (0 == strcmp(arg, "--tls-limit")) {
+                // this is not named "tls-size" because "size" is not the
+                // best measurement for how many symbols to allow
+                ++argi;
+                if (argi >= argc)
+                    lose("missing argument for --tls-limit");
+                dynamic_values_bytes = N_WORD_BYTES * atoi(argv[argi++]);
             } else if (0 == strcmp(arg, "--debug-environment")) {
                 debug_environment_p = 1;
                 ++argi;
@@ -727,7 +736,7 @@ sbcl_main(int argc, char *argv[], char *envp[])
 #endif
 #ifdef LISP_FEATURE_HPUX
     /* -1 = CLOSURE_FUN_OFFSET, 23 = SIMPLE_FUN_CODE_OFFSET, we are
-     * not in LANGUAGE_ASSEMBLY so we cant reach them. */
+     * not in __ASSEMBLER__ so we cant reach them. */
     return_from_lisp_stub = (void *) ((char *)*((unsigned long *)
                  ((char *)initial_function + -1)) + 23);
 #endif

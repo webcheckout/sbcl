@@ -63,7 +63,9 @@
   (use nil :type (or node null))
   ;; the basic block this continuation is in. This is null only in
   ;; :UNUSED continuations.
-  (block nil :type (or cblock null)))
+  (block nil :type (or cblock null))
+  ;; Entries created by the BLOCK special operator
+  (entries nil :type list))
 
 (defmethod print-object ((x ctran) stream)
   (print-unreadable-object (x stream :type t :identity t)
@@ -94,7 +96,6 @@
   (dependent-casts nil)
   (annotations nil)
   (dependent-annotations nil))
-(!set-load-form-method lvar (:xc :target) :ignore-it)
 
 ;;; These are used for annottating a LVAR with information that can't
 ;;; be expressed using types.
@@ -152,16 +153,16 @@
     (when (boundp '*compiler-ir-obj-map*)
       (format stream "~D" (cont-num x)))))
 
-#!-sb-fluid (declaim (inline lvar-has-single-use-p))
+#-sb-fluid (declaim (inline lvar-has-single-use-p))
 (defun lvar-has-single-use-p (lvar)
   (typep (lvar-uses lvar) '(not list)))
 
 ;;; Return the unique node, delivering a value to LVAR.
-#!-sb-fluid (declaim (inline lvar-use))
+#-sb-fluid (declaim (inline lvar-use))
 (defun lvar-use (lvar)
   (the (not list) (lvar-uses lvar)))
 
-#!-sb-fluid (declaim (inline lvar-derived-type))
+#-sb-fluid (declaim (inline lvar-derived-type))
 (defun lvar-derived-type (lvar)
   (declare (type lvar lvar))
   (or (lvar-%derived-type lvar)
@@ -174,7 +175,7 @@
                                       (incf *compiler-sset-counter*))))
                   (:copier nil))
   ;; unique ID for debugging
-  #!+sb-show (id (new-object-id) :read-only t)
+  #+sb-show (id (new-object-id) :read-only t)
   ;; True if this node needs to be optimized. This is set to true
   ;; whenever something changes about the value of an lvar whose DEST
   ;; is this node.
@@ -222,7 +223,7 @@
   ;; can null out this slot.
   (tail-p nil :type boolean))
 
-#!-sb-fluid (declaim (inline node-block))
+#-sb-fluid (declaim (inline node-block))
 (defun node-block (node)
   (ctran-block (node-prev node)))
 
@@ -245,7 +246,7 @@
   ;; the value is unused.
   (lvar nil :type (or lvar null)))
 
-#!-sb-fluid (declaim (inline node-dest))
+#-sb-fluid (declaim (inline node-dest))
 (defun node-dest (node)
   (awhen (node-lvar node) (lvar-dest it)))
 
@@ -428,8 +429,7 @@
   ;; the INFO slot as :type (or (satisfies ir2-component-p) ...)
   ;; During make-host-2, the solution to this is the same hack
   ;; as for everything else: use DEF!STRUCT for IR2-COMPONENT.
-  #!+(and (host-feature sb-xc-host) (host-feature sbcl))
-  (declare (host-sb-ext:muffle-conditions style-warning))
+  #+host-quirks-sbcl (declare (host-sb-ext:muffle-conditions style-warning))
 (def!struct (component (:copier nil)
                        (:constructor
                         make-component
@@ -438,7 +438,7 @@
                          (last-block tail)
                          (outer-loop (make-loop :kind :outer :head head)))))
   ;; unique ID for debugging
-  #!+sb-show (id (new-object-id) :read-only t)
+  #+sb-show (id (new-object-id) :read-only t)
   ;; space where this component will be allocated in
   ;; :auto won't make any codegen optimizations pertinent to immobile space,
   ;; but will place the code there given sufficient available space.
@@ -547,7 +547,7 @@
   (sset-number 0 :type fixnum)))
 (defprinter (component :identity t)
   name
-  #!+sb-show id
+  #+sb-show id
   (reanalyze :test reanalyze))
 
 (declaim (inline reoptimize-component))
@@ -586,7 +586,7 @@
   (kind (missing-arg)
         :type (member :special-bind :catch :unwind-protect
                       :block :tagbody :dynamic-extent
-                      #!-c-stack-is-control-stack :restore-nsp))
+                      #-c-stack-is-control-stack :restore-nsp))
   ;; the node that messes things up. This is the last node in the
   ;; non-messed-up environment. Null only temporarily. This could be
   ;; deleted due to unreachability.
@@ -716,7 +716,6 @@
   (safe-p nil :type boolean)
   ;; some kind of info used by the back end
   info)
-(!set-load-form-method nlx-info (:xc :target) :ignore-it)
 (defprinter (nlx-info :identity t)
   block
   target
@@ -734,7 +733,7 @@
                   (:copier nil)
                   (:constructor nil))
   ;; unique ID for debugging
-  #!+sb-show (id (new-object-id) :read-only t)
+  #+sb-show (id (new-object-id) :read-only t)
   ;; (For public access to this slot, use LEAF-SOURCE-NAME.)
   ;;
   ;; the name of LEAF as it appears in the source, e.g. 'FOO or '(SETF
@@ -782,7 +781,6 @@
   (extent nil :type (member nil :maybe-dynamic :always-dynamic :indefinite))
   ;; some kind of info used by the back end
   (info nil))
-(!set-load-form-method leaf (:xc :target) :ignore-it)
 
 (defun leaf-dynamic-extent (leaf)
   (let ((extent (leaf-extent leaf)))
@@ -823,7 +821,7 @@
              :pretty-ir-printer
              (pretty-print-global-var structure stream))
   %source-name
-  #!+sb-show id
+  #+sb-show id
   (type :test (not (eq type *universal-type*)))
   (defined-type :test (not (eq defined-type *universal-type*)))
   (where-from :test (not (eq where-from :assumed)))
@@ -832,7 +830,7 @@
 (defun fun-locally-defined-p (name env)
   (typecase env
     (null nil)
-    #!+(and sb-fasteval (host-feature sb-xc))
+    #+(and sb-fasteval (not sb-xc-host))
     (sb-interpreter:basic-env
      (values (sb-interpreter:find-lexical-fun env name)))
     (t
@@ -860,7 +858,7 @@
 (defprinter (defined-fun :identity t
              :pretty-ir-printer (pretty-print-global-var structure stream))
   %source-name
-  #!+sb-show id
+  #+sb-show id
   inlinep
   (functionals :test functionals))
 
@@ -1034,7 +1032,7 @@
              :pretty-ir-printer (pretty-print-functional structure stream))
   %source-name
   %debug-name
-  #!+sb-show id)
+  #+sb-show id)
 
 (defun leaf-debug-name (leaf)
   (if (functional-p leaf)
@@ -1155,7 +1153,7 @@
              :pretty-ir-printer (pretty-print-functional structure stream))
   %source-name
   %debug-name
-  #!+sb-show id
+  #+sb-show id
   kind
   (type :test (not (eq type *universal-type*)))
   (where-from :test (not (eq where-from :assumed)))
@@ -1237,7 +1235,7 @@
              :pretty-ir-printer (pretty-print-functional structure stream))
   %source-name
   %debug-name
-  #!+sb-show id
+  #+sb-show id
   (type :test (not (eq type *universal-type*)))
   (where-from :test (not (eq where-from :assumed)))
   arglist
@@ -1345,7 +1343,7 @@
   (fop-value nil))
 (defprinter (lambda-var :identity t)
   %source-name
-  #!+sb-show id
+  #+sb-show id
   (type :test (not (eq type *universal-type*)))
   (where-from :test (not (eq where-from :assumed)))
   (flags :test (not (zerop flags))
@@ -1384,7 +1382,7 @@
   ;; Constraints that cannot be expressed as NODE-DERIVED-TYPE
   constraints)
 (defprinter (ref :identity t)
-  #!+sb-show id
+  #+sb-show id
   (%source-name :test (neq %source-name '.anonymous.))
   leaf)
 
@@ -1462,7 +1460,7 @@
                          (:constructor make-combination (fun))
                          (:copier nil)))
 (defprinter (combination :identity t)
-  #!+sb-show id
+  #+sb-show id
   (fun :prin1 (lvar-uses fun))
   (args :prin1 (mapcar (lambda (x)
                          (if x
@@ -1586,7 +1584,7 @@
   ;; The cleanup for this entry. NULL only temporarily.
   (cleanup nil :type (or cleanup null)))
 (defprinter (entry :identity t)
-  #!+sb-show id)
+  #+sb-show id)
 
 ;;; The EXIT node marks the place at which exit code would be emitted,
 ;;; if necessary. This is interposed between the uses of the exit
@@ -1607,7 +1605,7 @@
   (value nil :type (or lvar null))
   (nlx-info nil :type (or nlx-info null)))
 (defprinter (exit :identity t)
-  #!+sb-show id
+  #+sb-show id
   (entry :test entry)
   (value :test value))
 
@@ -1627,7 +1625,7 @@
 (defun %coerce-to-policy (thing)
   (typecase thing
     (policy thing)
-    #!+(and sb-fasteval (host-feature sb-xc))
+    #+(and sb-fasteval (not sb-xc-host))
     (sb-interpreter:basic-env (sb-interpreter:env-policy thing))
     (null **baseline-policy**)
     (t (lexenv-policy (etypecase thing
@@ -1641,6 +1639,6 @@
 ;; until this file is compiled by the cross-compiler.
 ;; Anything compiled prior to then uses the non-frozen classoid as existed
 ;; at load-time of the cross-compiler. SB-XC:PROCLAIM would likely work here.
-#!-sb-fluid
+#-sb-fluid
 (declaim (freeze-type node lexenv ctran lvar cblock component cleanup
                       physenv tail-set nlx-info))

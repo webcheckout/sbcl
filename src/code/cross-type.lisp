@@ -14,7 +14,7 @@
 (define-condition cross-type-warning (warning)
   ((call :initarg :call :reader cross-type-warning-call)
    (message :reader cross-type-warning-message
-            #+cmu :initarg #+cmu :message ; (to stop bogus non-STYLE WARNING)
+            #+host-quirks-cmu :initarg #+host-quirks-cmu :message ; (to stop bogus non-STYLE WARNING)
             ))
   (:report (lambda (c s)
              (format
@@ -27,33 +27,8 @@
 ;;; during cross-compilation.
 (define-condition cross-type-giving-up (cross-type-warning)
   ((message :initform "giving up conservatively"
-            #+cmu :reader #+cmu #.(gensym) ; (to stop bogus non-STYLE WARNING)
+            #+host-quirks-cmu :reader #+host-quirks-cmu #.(gensym) ; (to stop bogus non-STYLE WARNING)
             )))
-
-;;; This warning refers to the flexibility in the ANSI spec with
-;;; regard to run-time distinctions between floating point types.
-;;; (E.g. the cross-compilation host might not even distinguish
-;;; between SINGLE-FLOAT and DOUBLE-FLOAT, so a DOUBLE-FLOAT number
-;;; would test positive as SINGLE-FLOAT.) If the target SBCL does make
-;;; this distinction, then information is lost. It's not too hard to
-;;; contrive situations where this would be a problem. In practice we
-;;; don't tend to run into them because all widely used Common Lisp
-;;; environments do recognize the distinction between SINGLE-FLOAT and
-;;; DOUBLE-FLOAT, and we don't really need the other distinctions
-;;; (e.g. between SHORT-FLOAT and SINGLE-FLOAT), so we call
-;;; WARN-POSSIBLE-CROSS-TYPE-FLOAT-INFO-LOSS to test at runtime
-;;; whether we need to worry about this at all, and not warn unless we
-;;; do. If we *do* have to worry about this at runtime, my (WHN
-;;; 19990808) guess is that the system will break in multiple places,
-;;; so this is a real WARNING, not just a STYLE-WARNING.
-;;;
-;;; KLUDGE: If we ever try to support LONG-FLOAT or SHORT-FLOAT, this
-;;; situation will get a lot more complicated.
-(defun warn-possible-cross-type-float-info-loss (caller host-object ctype)
-  (when (or (subtypep 'single-float 'double-float)
-            (subtypep 'double-float 'single-float))
-    (warn "possible floating point information loss in ~S"
-          (list caller host-object ctype))))
 
 ;; Return T if SYMBOL is a predicate acceptable for use in a SATISFIES type
 ;; specifier. We assume that anything in CL: is allowed.
@@ -75,26 +50,6 @@
            (awhen (info :function :info symbol)
              (sb-c::ir1-attributep (sb-c::fun-info-attributes it) sb-c:foldable)))))
 
-(defun complex-num-fmt-match-p (num fmt)
-  (aver (memq fmt '(single-float double-float rational)))
-  (and (complexp num)
-       (let ((yesp (eq (etypecase (realpart num)
-                         (single-float 'single-float)
-                         (double-float 'double-float)
-                         (rational 'rational))
-                       fmt)))
-         (when yesp
-           (aver (typep (imagpart num) fmt)))
-         yesp)))
-
-(defun flonum-fmt-match-p (num fmt)
-  (aver (memq fmt '(single-float double-float)))
-  (and (floatp num)
-       (eq (etypecase num
-            (single-float 'single-float)
-            (double-float 'double-float))
-           fmt)))
-
 ;;; This is like TYPEP, except that it asks whether HOST-OBJECT would
 ;;; be of type TYPE when instantiated on the target SBCL. Since this
 ;;; is hard to determine in some cases, and since in other cases we
@@ -107,6 +62,8 @@
 ;;; The order of clauses is fairly symmetrical with that of %%TYPEP.
 (defun cross-typep (caller host-object type)
   (declare (type (member sb-xc:typep ctypep) caller))
+  (when (or (cl:floatp host-object) (cl:complexp host-object))
+    (error "Can't happen"))
   (named-let recurse ((obj host-object) (type type))
     (flet ((unimplemented ()
              (bug "Incomplete implementation of ~S ~S ~S" caller obj type))
@@ -120,37 +77,7 @@
           ((nil extended-sequence funcallable-instance)
            (values nil t)))) ; nothing could be these
        (numeric-type
-        (flet ((bound-test (val)
-                 (let ((low (numeric-type-low type))
-                       (high (numeric-type-high type)))
-                   (and (cond ((null low) t)
-                              ((listp low) (> val (car low)))
-                              (t (>= val low)))
-                        (cond ((null high) t)
-                              ((listp high) (< val (car high)))
-                              (t (<= val high)))))))
-          (if (not (numberp obj))
-              (values nil t) ; false certainly
-              (let ((fmt (numeric-type-format type)))
-                (case (numeric-type-class type)
-                 ((nil)
-                  (if (and (null (numeric-type-complexp type)) (null fmt))
-                      (values (numberp obj) t)
-                      (unimplemented)))
-                 (float
-                  (warn-possible-cross-type-float-info-loss caller host-object type)
-                  (values (ecase (numeric-type-complexp type)
-                           (:complex (complex-num-fmt-match-p obj fmt))
-                           (:real (and (flonum-fmt-match-p obj fmt) (bound-test obj))))
-                          t))
-                 (t ; integer or rational
-                  (values (ecase (numeric-type-complexp type)
-                           (:complex (complex-num-fmt-match-p obj 'rational))
-                           (:real (and (if (eq (numeric-type-class type) 'integer)
-                                           (integerp obj)
-                                           (rationalp obj))
-                                       (bound-test obj))))
-                          t)))))))
+        (values (number-typep obj type) t))
        (array-type
         ;; Array types correspond fairly closely between host and target, but
         ;; asking whether an array is definitely non-simple is a nonsensical
@@ -161,12 +88,11 @@
         (when (and (arrayp obj) (eq (array-type-complexp type) t))
           (bug "Should not call cross-typep with definitely-non-simple array type"))
         ;; This is essentially just the ARRAY-TYPE case of %%TYPEP
-        ;; using !SPECIALIZED-ARRAY-ELEMENT-TYPE, not ARRAY-ELEMENT-TYPE,
+        ;; using SB-XC:ARRAY-ELEMENT-TYPE, not CL:ARRAY-ELEMENT-TYPE,
         ;; and disregarding simple-ness.
         (values (and (arrayp obj)
                      (or (eq (array-type-element-type type) *wild-type*)
-                         (type= (specifier-type
-                                 (!specialized-array-element-type obj))
+                         (type= (specifier-type (sb-xc:array-element-type obj))
                                 (array-type-specialized-element-type type)))
                      (or (eq (array-type-dimensions type) '*)
                          (and (= (length (array-type-dimensions type))
@@ -193,22 +119,12 @@
               (if result
                   (recurse (cdr obj) (cons-type-cdr-type type))
                   (values nil certain)))))
-       ((or #!+sb-simd-pack simd-pack-type
-            #!+sb-simd-pack-256 simd-pack-256-type)
+       ((or #+sb-simd-pack simd-pack-type
+            #+sb-simd-pack-256 simd-pack-256-type)
         (values nil t))
        (character-set-type
-        (cond ((not (characterp obj)) (values nil t)) ; certainly no
-              ;; Return yes if the type is:
-              ;;  - BASE-CHAR, and SB-XC:CHAR-CODE is within BASE-CHAR-CODE-LIMIT
-              ;;  - STANDARD-CHAR and the host says that the char is standard
-              ;;  - the full set of characters
-              ((or (and (type= type (specifier-type 'base-char))
-                        (< (sb-xc:char-code obj) base-char-code-limit))
-                   (and (type= type (specifier-type 'standard-char))
-                        (cl:standard-char-p obj))
-                   (type= type (specifier-type 'character)))
-               (values t t)) ; certainly yes
-              (t (uncertain))))
+        ;; provided that SB-XC:CHAR-CODE doesn't fail, the answer is certain
+        (values (and (characterp obj) (character-in-charset-p obj type)) t))
        (negation-type
         (multiple-value-bind (res win) (recurse obj (negation-type-type type))
           (if win
@@ -284,8 +200,7 @@
                                      condition restart
                                      sb-assem::label
                                      ;; in addition to the above, these occur in make-host-2
-                                     #!+sb-fasteval sb-interpreter:interpreted-function
-                                     #!+sb-eval sb-eval:interpreted-function
+                                     interpreted-function
                                      synonym-stream
                                      )))
                  (values nil t))
@@ -367,7 +282,7 @@
      (ctype-of-number x))
     (array
      ;; It is critical not to inquire of the host for the array's element type.
-     (let ((etype (specifier-type (!specialized-array-element-type x))))
+     (let ((etype (specifier-type (sb-xc:array-element-type x))))
        (make-array-type (array-dimensions x)
                         ;; complexp relies on the host implementation,
                         ;; but in practice any array for which we need to
@@ -379,16 +294,11 @@
     (character
      (cond ((typep x 'standard-char)
             (specifier-type 'base-char))
-           ((not (characterp x))
-            nil)
            (t
             ;; Beyond this, there seems to be no portable correspondence.
             (error "can't map host Lisp CHARACTER ~S to target Lisp" x))))
-    (structure!object
-     (find-classoid (uncross (class-name (class-of x))))) ; FIXME: TYPE-OF?
-    ;; host packages obviously don't inherit from STRUCTURE!OBJECT
-    ;; but we can use them as if part of our type system for fasl dumping.
-    (package (find-classoid 'package))
+    (sb-c::opaque-box (find-classoid 'structure-object))
+    (instance (find-classoid (type-of x)))
     (t
      ;; There might be more cases which we could handle with
      ;; sufficient effort; since all we *need* to handle are enough

@@ -17,6 +17,30 @@
 
 (in-package "SB-IMPL")
 
+;;; like (DELETE .. :TEST #'EQ):
+;;;   Delete all LIST entries EQ to ITEM (destructively modifying
+;;;   LIST), and return the modified LIST.
+(defun delq (item list)
+  (declare (explicit-check))
+  (let ((list list))
+    (do ((x list (cdr x))
+         (splice '()))
+        ((endp x) list)
+      (cond ((eq item (car x))
+             (if (null splice)
+                 (setq list (cdr x))
+                 (rplacd splice (cdr x))))
+            (t (setq splice x)))))) ; Move splice along to include element.
+
+;;; like (POSITION .. :TEST #'EQ):
+;;;   Return the position of the first element EQ to ITEM.
+(defun posq (item list)
+  (do ((i list (cdr i))
+       (j 0 (1+ j)))
+      ((null i))
+    (when (eq (car i) item)
+      (return j))))
+
 ;;;; variables initialization and shutdown sequences
 
 ;;; (Most of the save-a-core functionality is defined later, in its
@@ -167,3 +191,101 @@ unspecified."
   `(sb-thread::with-recursive-system-lock
        ((hash-table-lock ,hash-table))
      ,@body))
+
+(defmacro find-package-restarts ((package-designator &optional reader)
+                                 &body body)
+  (let ((package `(or ,(if reader
+                           '*reader-package*
+                           '*package*)
+                      (sane-package))))
+    `(locally
+       (restart-case ,@body
+         (continue ()
+           :report (lambda (stream)
+                     (format stream "Use the current package, ~a."
+                             (package-name ,package)))
+           (return (values ,package
+                           ,@(and reader
+                                  '(:current)))))
+         (retry ()
+           :report "Retry finding the package.")
+         (use-value (value)
+           :report "Specify a different package"
+           :interactive
+           (lambda ()
+             (read-evaluated-form-of-type 'package-designator))
+           (when (packagep value)
+             (return (values value ,@(and reader
+                                          '(nil)))))
+           (setf ,package-designator (the package-designator value)))
+         ,@(and reader
+             `((unintern ()
+                         :report "Read the symbol as uninterned."
+                         (return (values nil :uninterned)))))
+         ,@(and reader
+             `((symbol (value)
+                       :report "Specify a symbol to return"
+                       :interactive
+                       (lambda ()
+                         (read-evaluated-form-of-type 'symbol))
+                       (values value :symbol)))))
+       (go retry))))
+
+;;;; Deprecating stuff
+
+(defun print-deprecation-replacements (stream replacements &optional colonp atp)
+  (declare (ignore colonp atp))
+  ;; I don't think this is callable during cross-compilation, is it?
+  ;; Anyway, the format string tokenizer can not handle APPLY on its own.
+  (apply #'format stream
+         (sb-format:tokens "~#[~;~
+             Use ~/sb-ext:print-symbol-with-prefix/ instead.~;~
+             Use ~/sb-ext:print-symbol-with-prefix/ or ~
+             ~/sb-ext:print-symbol-with-prefix/ instead.~:;~
+             Use~@{~#[~; or~] ~
+             ~/sb-ext:print-symbol-with-prefix/~^,~} instead.~
+           ~]")
+         replacements))
+
+(defun print-deprecation-message (namespace name software version
+                                  &optional replacements stream)
+  (format stream
+           "The ~(~A~) ~/sb-ext:print-symbol-with-prefix/ has been ~
+            deprecated as of ~@[~A ~]version ~A.~
+            ~@[~2%~/sb-impl::print-deprecation-replacements/~]"
+          namespace name software version replacements))
+
+(defmacro define-deprecated-function (state version name replacements lambda-list
+                                      &body body)
+  (declare (type deprecation-state state)
+           (type string version)
+           (type function-name name)
+           (type (or function-name list) replacements)
+           (type list lambda-list))
+  `(progn
+     (declaim (deprecated
+               ,state ("SBCL" ,version)
+               (function ,name ,@(when replacements
+                                   `(:replacement ,replacements)))))
+     ,(ecase state
+        ((:early :late)
+         `(defun ,name ,lambda-list
+            ,@body))
+        ((:final)
+         `',name))))
+
+(defmacro define-deprecated-variable (state version name
+                                      &key (value nil valuep) replacement)
+  (declare (type deprecation-state state)
+           (type string version)
+           (type symbol name))
+  `(progn
+     (declaim (deprecated
+               ,state ("SBCL" ,version)
+               (variable ,name ,@(when replacement
+                                   `(:replacement ,replacement)))))
+     ,(ecase state
+        ((:early :late)
+         `(defvar ,name ,@(when valuep (list value))))
+        ((:final)
+         `',name))))

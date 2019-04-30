@@ -189,7 +189,8 @@
                                   ;; scope, and I can't find anything under PROCLAIM or
                                   ;; COMPILE-FILE or LOAD or OPTIMIZE which justifies this
                                   ;; behavior. Hmm. -- WHN 2001-04-06
-                                  (sb-c::*policy* sb-c::*policy*))
+                                  (sb-c::*policy* sb-c::*policy*)
+                                  (sb-c::*handled-conditions* sb-c::*handled-conditions*))
                               (if faslp
                                   (load-as-fasl stream verbose print)
                                   (sb-c:with-compiler-error-resignalling
@@ -319,7 +320,7 @@
   (restart-case (let ((sb-c::*source-namestring*
                        (format nil "SYS:~A" (substitute #\; #\/ file))))
                   (load file))
-    (abort ()
+    (abort-build ()
       :report "Abort building SBCL."
       (sb-ext:exit :code 1))))
 

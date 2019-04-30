@@ -81,7 +81,7 @@
   ;; PURIFY).
   ;; This is only meaningful if DD-CLASS-P = T.
   (pure nil :type (member t nil)))
-#!-sb-fluid (declaim (freeze-type defstruct-description))
+#-sb-fluid (declaim (freeze-type defstruct-description))
 (!set-load-form-method defstruct-description (:host :xc :target))
 
 ;;;; basic LAYOUT stuff
@@ -115,10 +115,47 @@
 ;;; well, since the initialization of layout slots is hardcoded there.
 ;;;
 ;;; FIXME: ...it would be better to automate this, of course...
-(def!struct (layout #-sb-xc-host (:constructor #!+immobile-space nil)
+
+;;; 64-bit layout %BITS slot:
+;;;
+;;; | 4 bytes  | 28 bits | 4 bits |
+;;; +----------+---------+--------+
+;;;  depthoid    length     flags
+;;;
+;;; depthoid is stored as a tagged fixnum in its 4 byte field.
+;;; I suspect that by further limiting the max depthoid and length
+;;; we could shove the random CLOS-HASH into some unused bits while
+;;; utilizing the entire 64-bit word as the random bit string for hashing.
+;;; Checking for an invalid layout would need to mask out the
+;;; length, depthoid, and flags since they have to stay correct at all times.
+;;;
+;;; 32-bit layout %BITS slot:
+;;;
+;;; | 2 bytes | 2 bytes |
+;;; +---------+---------+
+;;;  depthoid    length
+;;; (FLAGS will remain as a separate slot)
+
+;;; 32-bit is not done yet. Three slots are still used, instead of two.
+
+(def!struct (layout #+64-bit
+                    (:constructor
+                        ;; Accept a specific subset of keywords
+                     %make-layout (classoid %bits &key inherits bitmap info invalid
+                                            depth2-ancestor depth3-ancestor depth4-ancestor))
+                    #-64-bit
+                    (:constructor
+                     make-layout (classoid &key flags clos-hash invalid
+                                  inherits depthoid length info bitmap
+                                  depth2-ancestor depth3-ancestor depth4-ancestor))
                     (:copier nil))
+
+  ;; A packed field containing the DEPTHOID, LENGTH, and FLAGS
+  #+64-bit (%bits 0 :type (signed-byte #.sb-vm:n-word-bits))
+
   ;; one +something-LAYOUT-FLAG+ bit or none of them
-  (%flags 0 :type fixnum :read-only nil)
+  #-64-bit (flags 0 :type fixnum :read-only nil)
+
   ;; a pseudo-random hash value for use by CLOS.
   (clos-hash (random-layout-clos-hash) :type layout-clos-hash)
   ;; the class that this is a layout for
@@ -149,14 +186,14 @@
   ;;  (2) This was called INHERITANCE-DEPTH in classic CMU CL. It was
   ;;      renamed because some of us find it confusing to call something
   ;;      a depth when it isn't quite.
-  (depthoid -1 :type layout-depthoid)
+  #-64-bit (depthoid -1 :type layout-depthoid)
   ;; the number of top level descriptor cells in each instance
   ;; For [FUNCALLABLE-]STANDARD-OBJECT instances, this is the slot vector
   ;; length, not the primitive object length.
   ;; I tried making a structure of this many slots, and the compiler blew up;
   ;; so it's fair to say this limit is sufficient for practical purposes,
   ;; Let's be consistent here between the two choices of word size.
-  (length 0 :type (unsigned-byte 28)) ; smaller than SB-INT:INDEX
+  #-64-bit (length 0 :type layout-length) ; smaller than SB-INT:INDEX
   ;; If this layout has some kind of compiler meta-info, then this is
   ;; it. If a structure, then we store the DEFSTRUCT-DESCRIPTION here.
   (info nil :type (or null defstruct-description))
@@ -182,28 +219,57 @@
   (depth4-ancestor 0))
 (declaim (freeze-type layout))
 
+#+64-bit
+(progn
+(defmacro pack-layout-bits (depthoid length flags)
+  `(logior (ash ,(or depthoid -1) (+ 32 sb-vm:n-fixnum-tag-bits))
+           (ash ,(or length 0) 4)
+           ,(or flags 0)))
+(defmacro unpack-layout-bits (bits field)
+  (ecase field
+    (:depthoid `(ash ,bits (- -32 sb-vm:n-fixnum-tag-bits)))
+    (:length   `(ldb (byte 28 4) ,bits))
+    (:flags    `(ldb (byte 4 0) ,bits))))
+
+(defmacro make-layout (classoid &rest rest &key depthoid length flags &allow-other-keys)
+  (setq rest (copy-list rest))
+  (remf rest :depthoid)
+  (remf rest :length)
+  (remf rest :flags)
+  `(%make-layout ,classoid (pack-layout-bits ,depthoid ,length ,flags) ,@rest))
+
+(declaim (inline layout-length layout-flags))
+#+sb-xc-host
+(defun layout-depthoid (layout)
+  (unpack-layout-bits (layout-%bits layout) :depthoid))
+(defun layout-length (layout)
+  (unpack-layout-bits (layout-%bits layout) :length))
+(defun layout-flags (layout)
+  (unpack-layout-bits (layout-%bits layout) :flags))
+
+(declaim (inline (setf layout-depthoid) (setf layout-length) (setf layout-flags)))
+(defun (setf layout-depthoid) (val layout)
+  (declare (type (integer -1 #x7fff) val))
+  (setf (layout-%bits layout) (logior (ash val (+ 32 sb-vm:n-fixnum-tag-bits))
+                                      (ldb (byte 32 0) (layout-%bits layout)))))
+(defun (setf layout-length) (val layout)
+  (setf (unpack-layout-bits (layout-%bits layout) :length) val))
+(defun (setf layout-flags) (val layout)
+  (setf (unpack-layout-bits (layout-%bits layout) :flags) val))
+) ; end PROGN
+
+#-64-bit
+(progn
+(defmacro layout-%bits (x) `(layout-flags ,x))
+)
+
 (declaim (inline layout-for-std-class-p))
 (defun layout-for-std-class-p (x)
-  (logtest (layout-%flags x) +pcl-object-layout-flag+))
+  (logtest (layout-%bits x) +pcl-object-layout-flag+))
 
-#!+(and immobile-space (host-feature sb-xc))
-(macrolet ((def-layout-maker ()
-             (let ((slots (dd-slots (find-defstruct-description 'layout))))
-               `(defun make-layout
-                    (&key ,@(mapcar (lambda (s) `(,(dsd-name s) ,(dsd-default s)))
-                                    slots))
-                  (declare ,@(mapcar (lambda (s) `(type ,(dsd-type s) ,(dsd-name s)))
-                                     slots))
-                  ;; After calling into C, registers are trashed,
-                  ;; so we pass everything as a single vector,
-                  ;; and don't rely on Lisp to write the slots of the layout.
-                  (dx-let ((data (vector ,@(mapcar #'dsd-name slots))))
-                    (truly-the layout
-                     (values (%primitive sb-vm::alloc-immobile-layout data))))))))
-   (assert (<= (* sb-vm:n-word-bytes
-                 (1+ (dd-length (find-defstruct-description 'layout))))
-              sb-vm::layout-align))
-  (def-layout-maker))
+(declaim (inline sb-fasl:dumpable-layout-p))
+(defun sb-fasl:dumpable-layout-p (x)
+  (and (typep x 'layout) (not (layout-for-std-class-p x))))
 
 ;;; The CLASSOID structure is a supertype of all classoid types.  A
 ;;; CLASSOID is also a CTYPE structure as recognized by the type
@@ -254,6 +320,9 @@
   ;; we don't just call it the CLASS slot) object for this class, or
   ;; NIL if none assigned yet
   (pcl-class nil))
+
+(defun layout-classoid-name (x)
+  (classoid-name (layout-classoid x)))
 
 ;;; A helper to make classoid (and named-type) hash values stable.
 ;;; For other ctypes, generally improve the randomness of the hash.
@@ -424,16 +493,12 @@
           (specifier-type (sb-impl::%fun-type fun)))
         (specifier-type 'function)))))
 
-;;; The type specifier or parsed type specifier for this function,
-;;; or a DEFSTRUCT-DESCRIPTION or the symbol :GENERIC-FUNCTION.
+;;; The parsed or unparsed type for this function, or the symbol :GENERIC-FUNCTION.
 ;;; Ordinarily a parsed type is stored. Only if the parsed type contains
 ;;; an unknown type will the original specifier be stored; we attempt to reparse
 ;;; on each lookup, in the hope that the type becomes known at some point.
-;;; If a DD, it must contain a constructor whose name is
-;;; the one being sought in globaldb, which is used to derive the type.
-;;; If :GENERIC-FUNCTION, the info is recomputed from existing methods
-;;; and stored back into globaldb.
+;;; If :GENERIC-FUNCTION, the info is recomputed from methods at the time of lookup
+;;; and stored back. Method redefinition resets the value to :GENERIC-FUNCTION.
 (define-info-type (:function :type)
-  :type-spec (or ctype defstruct-description (member :generic-function)
-                 (cons (eql function)))
+  :type-spec (or ctype (cons (eql function)) (member :generic-function))
   :default #'ftype-from-fdefn)

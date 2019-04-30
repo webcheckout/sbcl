@@ -95,7 +95,7 @@
     (link-blocks node-block next-block)))
 
 ;;; an annotated lvar's primitive-type
-#!-sb-fluid (declaim (inline lvar-ptype))
+#-sb-fluid (declaim (inline lvar-ptype))
 (defun lvar-ptype (lvar)
   (declare (type lvar lvar))
   (ir2-lvar-primitive-type (lvar-info lvar)))
@@ -334,7 +334,7 @@
          (mapcar (lambda (var)
                    (cond
                      ;; Needs support from the CALL VOPs, default-unknown-values specifically
-                     #!+(or x86-64 arm64)
+                     #+(or x86-64 arm64)
                      ((not (lambda-var-refs var))
                       nil)
                      (t

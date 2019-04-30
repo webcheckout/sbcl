@@ -43,7 +43,9 @@
     ;;
     ;; doesn't go beyond the INTERNAL-TIME range due to rounding
     ;; errors.
-    (floor (ash 1 (1- sb-kernel::internal-time-bits))
+  ;; #. is needed to make the value constant per se as opposed to
+  ;; constant by decree, otherwise genesis runs into a problem.
+  #.(floor (ash 1 (1- sb-kernel::internal-time-bits))
            sb-xc:internal-time-units-per-second)))
 
 (declaim (inline seconds-to-maybe-internal-time))
@@ -54,7 +56,7 @@
      (locally ; FIXME compiler should learn to figure that out
          (declare (type (integer 0 #.internal-seconds-limit) seconds))
        (seconds-to-internal-time seconds)))
-    ((single-float 0.0f0 #.(float safe-internal-seconds-limit 1.0f0))
+    ((single-float $0.0f0 #.(float safe-internal-seconds-limit $1.0f0))
      (seconds-to-internal-time seconds))
     ((and (not single-float) (real 0 #.safe-internal-seconds-limit))
      (seconds-to-internal-time seconds))))

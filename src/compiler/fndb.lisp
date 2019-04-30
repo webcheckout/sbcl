@@ -87,7 +87,7 @@
   (movable foldable flushable commutative))
 (defknown (equal equalp) (t t) boolean (foldable flushable recursive))
 
-#!+(or x86 x86-64 arm arm64)
+#+(or x86 x86-64 arm arm64)
 (defknown fixnum-mod-p (t fixnum) boolean
   (movable foldable flushable always-translatable))
 
@@ -99,6 +99,8 @@
   (or classoid null) ())
 (defknown classoid-of (t) classoid (flushable))
 (defknown layout-of (t) layout (flushable))
+#+64-bit (defknown layout-depthoid (layout) fixnum (flushable always-translatable))
+(defknown layout-depthoid-gt (layout integer) boolean (flushable))
 (defknown copy-structure (structure-object) structure-object
   (flushable)
   :derive-type #'result-type-first-arg)
@@ -187,7 +189,7 @@
 (defknown sb-vm::%%make-symbol (simple-string) symbol (flushable))
 (defknown copy-symbol (symbol &optional t) symbol (flushable))
 (defknown gensym (&optional (or string unsigned-byte)) symbol ())
-(defknown sb-xc:symbol-package (symbol) (or package null) (flushable))
+(defknown symbol-package (symbol) (or package null) (flushable))
 (defknown keywordp (t) boolean (flushable))       ; If someone uninterns it...
 
 ;;;; from the "Packages" chapter:
@@ -307,7 +309,7 @@
 #+sb-xc-host ; (See CROSS-FLOAT-INFINITY-KLUDGE.)
 (progn
 (defknown (sin cos) (number)
-  (or (float -1.0 1.0) (complex float))
+  (or (float $-1.0 $1.0) (complex float))
   (movable foldable flushable recursive)
   :derive-type #'result-type-float-contagion)
 
@@ -324,7 +326,7 @@
 #-sb-xc-host ; (See CROSS-FLOAT-INFINITY-KLUDGE.)
 (progn
 (defknown (sin cos) (number)
-  (or (float -1.0 1.0) (complex float))
+  (or (float $-1.0 $1.0) (complex float))
   (movable foldable flushable recursive))
 
 (defknown atan
@@ -437,8 +439,8 @@
   (movable foldable flushable))
 (defknown deposit-field (integer byte-specifier integer) integer
   (movable foldable flushable))
-(defknown random ((or (float (0.0)) (integer 1)) &optional random-state)
-  (or (float 0.0) (integer 0))
+(defknown random ((or (float ($0.0f0)) (integer 1)) &optional random-state)
+  (or (float $0.0f0) (integer 0))
   ())
 (defknown make-random-state (&optional (or random-state (member nil t)))
   random-state (flushable))
@@ -1029,7 +1031,7 @@
 
 (defknown make-hash-table
   (&key (:test function-designator) (:size unsigned-byte)
-        (:rehash-size (or (integer 1) (float (1.0))))
+        (:rehash-size (or (integer 1) (float ($1.0))))
         (:rehash-threshold (real 0 1))
         (:hash-function (or null function-designator))
         (:weakness (member nil :key :value :key-and-value :key-or-value))
@@ -1047,9 +1049,9 @@
 (defknown maphash ((function-designator (t t)) hash-table) null (flushable call))
 (defknown clrhash ((modifying hash-table)) hash-table ())
 (defknown hash-table-count (hash-table) index (flushable))
-(defknown hash-table-rehash-size (hash-table) (or index (single-float (1.0)))
+(defknown hash-table-rehash-size (hash-table) (or index (single-float ($1.0)))
   (foldable flushable))
-(defknown hash-table-rehash-threshold (hash-table) (single-float (0.0) 1.0)
+(defknown hash-table-rehash-threshold (hash-table) (single-float ($0.0) $1.0)
   (foldable flushable))
 (defknown hash-table-size (hash-table) index (flushable))
 (defknown hash-table-test (hash-table) symbol (foldable flushable))
@@ -1568,7 +1570,7 @@
                                            :append :supersede nil))
                        (:if-does-not-exist (member :error :create nil))
                        (:external-format external-format-designator)
-                       #!+win32 (:overlapped t))
+                       #+win32 (:overlapped t))
   (or stream null))
 
 (defknown rename-file (pathname-designator filename)
@@ -1629,7 +1631,7 @@
 
 ;;;; from the "Miscellaneous" Chapter:
 
-(defknown compile ((or symbol cons) &optional (or list function null))
+(defknown compile ((or symbol cons) &optional (or list function))
   (values (or function symbol cons) boolean boolean))
 
 (defknown compile-file
@@ -1769,7 +1771,7 @@
 (defknown %listify-rest-args (t index) list (flushable))
 (defknown %more-arg-context (t t) (values t index) (flushable))
 (defknown %more-arg (t index) t)
-#!+stack-grows-downward-not-upward
+#+stack-grows-downward-not-upward
 ;;; FIXME: The second argument here should really be NEGATIVE-INDEX, but doing that
 ;;; breaks the build, and I cannot seem to figure out why. --NS 2006-06-29
 (defknown %more-kw-arg (t fixnum) (values t t))
@@ -1946,11 +1948,11 @@
 (defknown %alien-funcall ((or string system-area-pointer) alien-type &rest *) *)
 
 ;; Used by WITH-PINNED-OBJECTS
-#!+(or x86 x86-64)
+#+(or x86 x86-64)
 (defknown sb-vm::touch-object (t) (values)
   (always-translatable))
 
-#!+linkage-table
+#+linkage-table
 (defknown foreign-symbol-dataref-sap (simple-string)
   system-area-pointer
   (movable flushable))
@@ -2018,7 +2020,7 @@
 (defknown sb-vm:%write-barrier () (values) ())
 (defknown sb-vm:%data-dependency-barrier () (values) ())
 
-#!+sb-safepoint
+#+sb-safepoint
 ;;; Note: This known function does not have an out-of-line definition;
 ;;; and if such a definition were needed, it would not need to "call"
 ;;; itself inline, but could be a no-op, because the compiler inserts a
@@ -2029,7 +2031,7 @@
 (defknown %compare-and-swap-svref (simple-vector index t t) t
     ())
 (defknown (%compare-and-swap-symbol-value
-           #!+x86-64 %cas-symbol-global-value)
+           #+x86-64 %cas-symbol-global-value)
     (symbol t t) t
     (unwind))
 (defknown (%atomic-dec-symbol-global-value %atomic-inc-symbol-global-value)

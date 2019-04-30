@@ -33,8 +33,8 @@
 ;;;
 ;;; Lists to which *HANDLER-CLUSTERS* is bound generally have dynamic
 ;;; extent.
-#!+sb-thread (!define-thread-local *handler-clusters* **initial-handler-clusters**)
-#!-sb-thread (defvar *handler-clusters* **initial-handler-clusters**)
+#+sb-thread (!define-thread-local *handler-clusters* **initial-handler-clusters**)
+#-sb-thread (defvar *handler-clusters* **initial-handler-clusters**)
 
 ;;; a list of lists of currently active RESTART instances. maintained
 ;;; by RESTART-BIND.
@@ -250,16 +250,27 @@ with that condition (or with no condition) will be returned."
 (defun read-evaluated-form (&optional (prompt-control nil promptp)
                             &rest prompt-args)
   (apply #'format *query-io*
-         (if promptp prompt-control "~&Type a form to be evaluated: ")
+         (if promptp prompt-control "~&Enter a form to be evaluated: ")
          prompt-args)
   (finish-output *query-io*)
   (list (eval (read *query-io*))))
 
+(defun read-evaluated-form-of-type (type &optional (prompt-control nil promptp)
+                                    &rest prompt-args)
+  (loop (apply #'format *query-io*
+               (if promptp prompt-control "~&Enter a form evaluating to a value of type ~a: ")
+               (if promptp prompt-args (list type)))
+        (finish-output *query-io*)
+        (let ((result (eval (read *query-io*))))
+          (when (typep result type)
+            (return (list result)))
+          (format *query-io* "~s is not of type ~s" result type))))
+
 ;;; Same as above but returns multiple values
 (defun mv-read-evaluated-form (&optional (prompt-control nil promptp)
-                            &rest prompt-args)
+                               &rest prompt-args)
   (apply #'format *query-io*
-         (if promptp prompt-control "~&Type a form to be evaluated: ")
+         (if promptp prompt-control "~&Enter a form to be evaluated: ")
          prompt-args)
   (finish-output *query-io*)
   (multiple-value-list (eval (read *query-io*))))

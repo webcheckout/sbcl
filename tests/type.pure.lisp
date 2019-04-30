@@ -233,13 +233,13 @@
                                  '(member #c(1 1) #c(1 2) #c(2 1) #c(2 2)))))
 
 (with-test (:name (typep real))
-  (assert (typep 0 '(real #.(ash -1 10000) #.(ash 1 10000)))))
+  (assert (typep 0 `(real ,(ash -1 10000) ,(ash 1 10000)))))
 
 (with-test (:name (subtypep real))
-  (assert-tri-eq t t (subtypep '(real #.(ash -1 1000) #.(ash 1 1000))
-                               '(real #.(ash -1 10000) #.(ash 1 10000))))
-  (assert-tri-eq t t (subtypep '(real (#.(ash -1 1000)) (#.(ash 1 1000)))
-                               '(real #.(ash -1 1000) #.(ash 1 1000)))))
+  (assert-tri-eq t t (subtypep `(real ,(ash -1 1000) ,(ash 1 1000))
+                               `(real ,(ash -1 10000) ,(ash 1 10000))))
+  (assert-tri-eq t t (subtypep `(real (,(ash -1 1000)) (,(ash 1 1000)))
+                               `(real ,(ash -1 1000) ,(ash 1 1000)))))
 
 ;;; Bug, found by Paul F. Dietz
 (with-test (:name (typep subtypep complex rational))
@@ -554,12 +554,28 @@
                         (sb-kernel:specifier-type '(not bad)))
                  sb-kernel:parse-unknown-type 2)) ; expect 2 signals
 
-(in-package "SB-KERNEL")
+(with-test (:name (typep :complex-integer))
+  (assert (not (eval '(typep #c(0 1/2) '(complex integer))))))
+
+(with-test (:name :typep-satisfies-boolean)
+  (assert (eq (eval '(typep 1 '(satisfies eval))) t)))
+
+(import '(sb-kernel:specifier-type
+          sb-kernel:type-specifier
+          sb-kernel:type-intersection
+          #+sb-unicode sb-kernel::character-string
+          sb-kernel:simple-character-string
+          sb-kernel:type=
+          sb-kernel:find-classoid
+          sb-kernel:make-numeric-type
+          sb-kernel::numeric-types-adjacent
+          sb-kernel::numeric-types-intersect
+          sb-kernel:*empty-type*))
 
 (test-util:with-test (:name :partition-array-into-simple/hairy)
   ;; Some tests that (simple-array | hairy-array) = array
   ;; At present this works only for wild element-type.
-  (cl-user::assert-tri-eq
+  (test-util:assert-tri-eq
    t t (type= (specifier-type '(not (and array (not simple-array))))
               (specifier-type '(or (not array) simple-array))))
 
@@ -647,11 +663,3 @@
             (b (specifier-type `(single-float (,y) 20s0))))
         (assert (not (numeric-types-intersect a b)))
         (assert (numeric-types-adjacent a b))))))
-
-(in-package "CL-USER")
-
-(with-test (:name (typep :complex-integer))
-  (assert (not (eval '(typep #c(0 1/2) '(complex integer))))))
-
-(with-test (:name :typep-satisfies-boolean)
-  (assert (eq (eval '(typep 1 '(satisfies eval))) t)))

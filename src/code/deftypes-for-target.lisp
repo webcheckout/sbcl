@@ -65,7 +65,7 @@
 (sb-xc:deftype atom () '(not cons))
 
 (sb-xc:deftype base-char ()
-  '(character-set ((0 . #.(1- base-char-code-limit)))))
+  `(character-set ((0 . ,(1- base-char-code-limit)))))
 
 (sb-xc:deftype extended-char ()
   "Type of CHARACTERs that aren't BASE-CHARs."
@@ -109,7 +109,7 @@
 ;;; On Unicode builds, SIMPLE-CHARACTER-STRING is a builtin type.
 ;;; For non-Unicode it is convenient to be able to use the type name
 ;;; as an alias of SIMPLE-BASE-STRING.
-#!-sb-unicode
+#-sb-unicode
 (sb-xc:deftype simple-character-string (&optional size)
   `(simple-base-string ,size))
 
@@ -120,9 +120,10 @@
   `(simple-array bit (,size)))
 
 (sb-xc:deftype compiled-function ()
-  '(and function
-        #!+sb-fasteval (not sb-interpreter:interpreted-function)
-        #!+sb-eval (not sb-eval:interpreted-function)))
+  '(and function #+(or sb-eval sb-fasteval) (not interpreted-function)))
+
+;;; Stub type in case there are no interpreted functions
+#-(or sb-eval sb-fasteval) (sb-xc:deftype interpreted-function () nil)
 
 (sb-xc:deftype simple-fun () '(satisfies simple-fun-p))
 
@@ -243,5 +244,52 @@
   `(integer 0 (,(ash 1 sb-vm:single-float-digits))))
 (sb-xc:deftype double-float-significand ()
   `(integer 0 (,(ash 1 sb-vm:double-float-digits))))
+
+;;; Common logic for %%TYPEP and CROSS-TYPEP
+(defmacro number-typep (object type)
+  `(let ((object ,object) (type ,type))
+     (and (numberp object)
+          (let ((num (if (complexp object) (realpart object) object)))
+            (ecase (numeric-type-class type)
+              (integer (and (integerp num)
+                            ;; If the type is (COMPLEX INTEGER), it can
+                            ;; only match the object if both real and imag
+                            ;; parts are integers.
+                            (or (not (complexp object))
+                                (integerp (imagpart object)))))
+              (rational (rationalp num))
+              (float
+               (ecase (numeric-type-format type)
+                 ;; (short-float (typep num 'short-float))
+                 (single-float (typep num 'single-float))
+                 (double-float (typep num 'double-float))
+                 ;; (long-float (typep num 'long-float))
+                 ((nil) (floatp num))))
+              ((nil) t)))
+          (flet ((bound-test (val)
+                   (let ((low (numeric-type-low type))
+                         (high (numeric-type-high type)))
+                     (and (cond ((null low) t)
+                                ((listp low) (sb-xc:> val (car low)))
+                                (t (sb-xc:>= val low)))
+                          (cond ((null high) t)
+                                ((listp high) (sb-xc:< val (car high)))
+                                (t (sb-xc:<= val high)))))))
+            (ecase (numeric-type-complexp type)
+              ((nil) t)
+              (:complex
+               (and (complexp object)
+                    (bound-test (realpart object))
+                    (bound-test (imagpart object))))
+              (:real
+               (and (not (complexp object))
+                    (bound-test object))))))))
+
+(declaim (inline character-in-charset-p))
+(defun character-in-charset-p (char set &aux (code (sb-xc:char-code char)))
+  (dolist (pair (character-set-type-pairs set) nil)
+    (destructuring-bind (low . high) pair
+      (when (<= low code high)
+        (return t)))))
 
 (/show0 "deftypes-for-target.lisp end of file")

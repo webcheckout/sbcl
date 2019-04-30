@@ -283,7 +283,7 @@ doing so may interfere with results reported by eg. TIME.")
             ;; Round up so we don't mislead by saying 0.0 seconds of non-GC time...
             (- (ceiling total-run-time-us 1000) gc-run-time-ms)
             (if (zerop real-time-ms)
-                100.0
+                $100.0
                 (float (* 100 (/ (round total-run-time-us 1000) real-time-ms))))
             eval-calls
             lambdas-converted
@@ -317,16 +317,16 @@ normally during operations like SLEEP."
 
 (defun elapsed-cycles (h0 l0 h1 l1)
   (declare (ignorable h0 l0 h1 l1))
-  #!+cycle-counter
+  #+cycle-counter
   (+ (ash (- h1 h0) 32)
      (- l1 l0))
-  #!-cycle-counter
+  #-cycle-counter
   nil)
 (declaim (inline read-cycle-counter))
 (defun read-cycle-counter ()
-  #!+cycle-counter
+  #+cycle-counter
   (sb-vm::%read-cycle-counter)
-  #!-cycle-counter
+  #-cycle-counter
   (values 0 0))
 
 ;;; This is so that we don't have to worry about the vagaries of

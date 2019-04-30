@@ -139,16 +139,10 @@
      (every #'internal-name-p what))
     (symbol
      (or (eq '.anonymous. what)
-         #!-sb-xref-for-internals
-         (member (sb-xc:symbol-package what)
-                 (load-time-value
-                  (cons *cl-package*
-                        (remove-if-not
-                         (lambda (package)
-                           (= (mismatch "SB-" (package-name package))
-                              3))
-                         (list-all-packages)))
-                  t))))
+         #-sb-xref-for-internals
+         (let ((pkg (sb-xc:symbol-package what)))
+           (or (and pkg (system-package-p pkg))
+               (eq pkg *cl-package*)))))
     (t t)))
 
 (defun record-xref (kind what context node path)
@@ -304,8 +298,8 @@
              (loop for (index . numbers) in kind-entries
                 do (dolist (number numbers)
                      (write-var-integer (funcall encoder index number) vector))))
-        (setf (aref result 0) (!make-specialized-array
-                               (length vector) '(unsigned-byte 8) vector)))
+        (setf (aref result 0)
+              (sb-xc:coerce vector '(simple-array (unsigned-byte 8) 1))))
       ;; RESULT is adjustable. Make it simple.
       (coerce result 'simple-vector)))
 

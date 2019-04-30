@@ -15,6 +15,16 @@
 
 (in-package "SB-C")
 
+;;; An OPAQUE-BOX instance is used to pass data from IR1 to IR2 as
+;;; a quoted object in a "source form" (not user-written) such that the
+;;; contained object is in a for-evaluation position but ignored by
+;;; the compiler's constant-dumping logic. In addition to this structure
+;;; type, a few other IR1 object types are implicitly opaque.
+(defstruct (opaque-box (:constructor opaquely-quote (value))
+                       (:copier nil)
+                       (:predicate opaque-box-p))
+  value)
+
 ;;; ANSI limits on compilation
 (defconstant sb-xc:call-arguments-limit sb-xc:most-positive-fixnum
   "The exclusive upper bound on the number of arguments which may be passed
@@ -41,12 +51,15 @@
 ;;;; somewhere else, not "early-c", since they're after all not part
 ;;;; of the compiler.
 
-;;; the type of LAYOUT-DEPTHOID slot values
-(def!type layout-depthoid () '(or index (integer -1 -1)))
+;;; the type of LAYOUT-DEPTHOID and LAYOUT-LENGTH values.
+;;; Each occupies two bytes of the %BITS slot when possible,
+;;; otherwise a slot unto itself.
+(def!type layout-depthoid () '(integer -1 #x7FFF))
+(def!type layout-length () '(integer 0 #xFFFF))
 (def!type layout-bitmap ()
   ;; FIXME: Probably should exclude negative bignum
-  #!+compact-instance-header 'integer
-  #!-compact-instance-header '(and integer (not (eql 0))))
+  #+compact-instance-header 'integer
+  #-compact-instance-header '(and integer (not (eql 0))))
 
 ;;; An INLINEP value describes how a function is called. The values
 ;;; have these meanings:
@@ -99,7 +112,7 @@
 (defvar *allow-instrumenting*)
 
 ;;; miscellaneous forward declarations
-#!+sb-dyncount (defvar *collect-dynamic-statistics*)
+#+sb-dyncount (defvar *collect-dynamic-statistics*)
 (defvar *component-being-compiled*)
 (defvar *compiler-error-context*)
 (defvar *compiler-error-count*)
@@ -111,7 +124,7 @@
 (defvar *current-path*)
 (defvar *current-component*)
 (defvar *delayed-ir1-transforms*)
-#!+sb-dyncount
+#+sb-dyncount
 (defvar *dynamic-counts-tn*)
 (defvar *elsewhere-label*)
 (defvar *event-note-threshold*)
@@ -152,7 +165,7 @@ the stack without triggering overflow protection.")
 ;;; identity even across GC, useful for understanding weird compiler
 ;;; bugs where something is supposed to be unique but is instead
 ;;; exists as duplicate objects)
-#!+sb-show
+#+sb-show
 (progn
   (defvar *object-id-counter* 0)
   (defun new-object-id ()
@@ -229,6 +242,8 @@ the stack without triggering overflow protection.")
   (values))
 
 (defstruct (debug-name-marker (:print-function print-debug-name-marker)
+                              ;; make these satisfy SB-XC:INSTANCEP
+                              #+sb-xc-host (:include structure!object)
                               (:copier nil)))
 
 (defvar *debug-name-level* 4)
@@ -236,14 +251,6 @@ the stack without triggering overflow protection.")
 (defvar *debug-name-punt*)
 (define-load-time-global *debug-name-sharp* (make-debug-name-marker))
 (define-load-time-global *debug-name-ellipsis* (make-debug-name-marker))
-
-(defmethod make-load-form ((marker debug-name-marker) &optional env)
-  (declare (ignore env))
-  (cond ((eq marker *debug-name-sharp*) '*debug-name-sharp*)
-        ((eq marker *debug-name-ellipsis*) '*debug-name-ellipsis*)
-        (t
-         (warn "Dumping unknown debug-name marker.")
-         '(make-debug-name-marker))))
 
 (defun print-debug-name-marker (marker stream level)
   (declare (ignore level))
@@ -292,7 +299,7 @@ the stack without triggering overflow protection.")
 (defvar *compile-time-eval* nil)
 (declaim (always-bound *compile-time-eval*))
 
-#!-immobile-code (defmacro code-immobile-p (thing) `(progn ,thing nil))
+#-immobile-code (defmacro code-immobile-p (thing) `(progn ,thing nil))
 
 ;;; Various error-code generating helpers
 (defvar *adjustable-vectors*)
@@ -320,7 +327,7 @@ the stack without triggering overflow protection.")
 
 ;;; The allocation quantum for boxed code header words.
 ;;; 2 implies an even length boxed header; 1 implies no restriction.
-(defconstant code-boxed-words-align (+ 2 #!+(or x86 x86-64) -1))
+(defconstant code-boxed-words-align (+ 2 #+(or x86 x86-64) -1))
 
 ;;; Used as the CDR of the code coverage instrumentation records
 ;;; (instead of NIL) to ensure that any well-behaving user code will
@@ -357,5 +364,5 @@ the stack without triggering overflow protection.")
 
 ;; from 'llvm/projects/compiler-rt/lib/msan/msan.h':
 ;;  "#define MEM_TO_SHADOW(mem) (((uptr)(mem)) ^ 0x500000000000ULL)"
-#!+linux ; shadow space differs by OS
+#+linux ; shadow space differs by OS
 (defconstant sb-vm::msan-mem-to-shadow-xor-const #x500000000000)

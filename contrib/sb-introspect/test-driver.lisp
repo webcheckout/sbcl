@@ -24,7 +24,7 @@
 ;; definitive answer, and sb-eval always answers with just FUNCTION.
 (defun expect-wild-return-type-p (f)
   (declare (ignorable f))
-  (or #+sb-fasteval (typep f 'sb-interpreter:interpreted-function)))
+  (or #+sb-fasteval (typep f 'sb-kernel:interpreted-function)))
 
 (deftest function-lambda-list.1
     (function-lambda-list 'cl-user::one)
@@ -242,6 +242,7 @@
     (matchp-name :function 'cl-user::compile-time-too-fun 28)
   t)
 
+(load "load-test.lisp")
 (deftest find-source-stuff.32
     (matchp-name :function 'cl-user::loaded-as-source-fun 3)
   t)
@@ -293,7 +294,8 @@
 ;;;; Check correctness of DEFTYPE-LAMBDA-LIST.
 (deftype foobar-type
     (&whole w &environment e r1 r2 &optional o &rest rest &key k1 k2 k3)
-  (declare (ignore w e r1 r2 o rest k1 k2 k3))
+  (declare (ignore w e r1 r2 o rest k1 k2 k3)
+           (sb-ext:muffle-conditions sb-kernel:&optional-and-&key-in-lambda-list))
   nil)
 
 (deftest deftype-lambda-list.1
@@ -375,9 +377,8 @@
            :fails-on (or :win32 (and :sparc :gencgc)))
     #+gencgc
     (tai (make-list 1) :heap
-         `(:space :dynamic :generation 0 :write-protected nil
-           :boxed t :pinned nil :large nil)
-         :ignore (list :page))
+         `(:space :dynamic :boxed t :large nil)
+         :ignore (list :page :pinned :generation :write-protected))
     #-gencgc
     (tai :cons :heap
          ;; FIXME: Figure out what's the right cheney-result. SPARC at least
@@ -420,7 +421,7 @@
          (= (getf props :generation) gen)
          (eq (getf props :boxed :missing) boxedp))))
 #+gencgc
-(deftest* (allocation-information.6 :fails-on (or :sparc :x86))
+(deftest* (allocation-information.6 :fails-on :sbcl)
     ;; Remember, all tests run after all toplevel forms have executed,
     ;; so if this were (DEFGLOBAL *LARGE-CODE* ... ) or something,
     ;; the garbage collection explicitly requested for ALLOCATION-INFORMATION.5
@@ -634,15 +635,6 @@
                      (:copier copy-our-struct))
     (a 42 :type fixnum))
 
-  ;; This test doesn't work because the XEP for the out-of-line accessor
-  ;; does not include the type test, and the function gets a signature
-  ;; of (FUNCTION (T) (VALUES FIXNUM &OPTIONAL)). This can easily be fixed
-  ;; by deleting (THE <struct> INSTANCE) from the access form
-  ;; and correspondingly adding a declaration on the type of INSTANCE.
-  ;;
-  ;; Yes, it can be fixed, but it is done this way because it produces
-  ;; smaller code.
-  #+nil
   (deftest function-type+defstruct.1
       (values (type-equal (function-type 'struct-a)
                           (function-type #'struct-a))

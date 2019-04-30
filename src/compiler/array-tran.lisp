@@ -238,7 +238,7 @@
   (define hairy-data-vector-ref/check-bounds)
   (define data-vector-ref))
 
-#!+(or x86 x86-64)
+#+(or x86 x86-64)
 (defoptimizer (data-vector-ref-with-offset derive-type) ((array index offset))
   (declare (ignore index offset))
   (derive-aref-type array))
@@ -254,7 +254,7 @@
   (define hairy-data-vector-set/check-bounds)
   (define data-vector-set))
 
-#!+(or x86 x86-64)
+#+(or x86 x86-64)
 (defoptimizer (data-vector-set-with-offset derive-type) ((array index offset new-value))
   (declare (ignore index offset))
   (assert-new-value-type new-value array))
@@ -301,7 +301,10 @@
                       (unsupplied-or-nil fill-pointer)))
          (spec
            (or `(,(if simple 'simple-array 'array)
-                 ,(cond ((not element-type) t)
+                 ;; element-type is usually an LVAR or nil,
+                 ;; but MAKE-WEAK-VECTOR derive-type passes in 'T.
+                 ,(cond ((or (not element-type) (eq element-type 't))
+                         t)
                         ((ctype-p element-type)
                          (type-specifier element-type))
                         ((constant-lvar-p element-type)
@@ -1387,12 +1390,17 @@
              (ref-p array-ref)
              (ref-p index-ref)
              (or
-              (loop for constraint in (ref-constraints array-ref)
-                    thereis (and (eq (constraint-y constraint)
-                                     (ref-leaf index-ref))))
+              (let ((index-leaf (ref-leaf index-ref)))
+                (loop for constraint in (ref-constraints array-ref)
+                      for y = (constraint-y constraint)
+                      thereis (if (constant-p index-leaf)
+                                  (and (constant-p y)
+                                       (<= (constant-value index-leaf)
+                                           (constant-value y)))
+                                  (eq index-leaf y))))
               (loop for constraint in (ref-constraints index-ref)
-                    thereis (and (eq (constraint-y constraint)
-                                     (ref-leaf array-ref))))))
+                    thereis (eq (constraint-y constraint)
+                                (ref-leaf array-ref)))))
       (give-up-ir1-transform)))
   ;; It's in bounds but it may be of the wrong type
   `(the (and fixnum unsigned-byte) index))

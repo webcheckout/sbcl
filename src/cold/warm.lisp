@@ -13,10 +13,25 @@
 
 ;;;; general warm init compilation policy
 
-(let ((s (find-symbol "*/SHOW*" "SB-INT")))
+;;;; Use the same settings as PROCLAIM-TARGET-OPTIMIZATION
+;;;; I could not think of a trivial way to ensure that this stays functionally
+;;;; identical to the corresponding code in 'compile-cold-sbcl'.
+;;;; (One possibility would be to read this form from a lisp-expr file)
+;;;; The intent is that we should generate identical code if a file is moved
+;;;; from the cross-compiled sources to warm-compiled or vice-versa.
+(proclaim '(optimize
+            #+sb-show (debug 2)
+            (safety 2) (speed 2)
+            ;; never insert stepper conditions
+            (sb-c:insert-step-conditions 0)
+            (sb-c:alien-funcall-saves-fp-and-pc #+x86 3 #-x86 0)))
+
+(locally
+    (declare (notinline find-symbol)) ; don't ask
+  (let ((s (find-symbol "*/SHOW*" "SB-INT")))
   ;; If you made it this far, chances are that you no longer wish to see
   ;; whatever it is that show would have shown. Comment this out if you need.
-  (when s (set s nil)))
+    (when s (set s nil))))
 
 (assert (zerop (deref (extern-alien "lowtag_for_widetag" (array char 64))
                       (ash sb-vm:character-widetag -2))))
@@ -34,17 +49,30 @@
         (push (sb-kernel:dd-name dd) result))))
   (assert (equal result '(sb-c::conset))))
 
-(proclaim '(optimize (compilation-speed 1)
-                     (debug #+sb-show 2 #-sb-show 1)
-                     (safety 2)
-                     (space 1)
-                     (speed 2)))
-
 ;;; Assert that genesis preserved shadowing symbols.
 (let ((p sb-assem::*backend-instruction-set-package*))
   (unless (eq p (find-package "SB-VM"))
     (dolist (expect '("SEGMENT" "MAKE-SEGMENT"))
       (assert (find expect (package-shadowing-symbols p) :test 'string=)))))
+
+;;; Verify that compile-time floating-point math matches load-time.
+(defvar *compile-files-p*)
+(when (or (not (boundp '*compile-files-p*)) *compile-files-p*)
+  (with-open-file (stream "float-math.lisp-expr" :if-does-not-exist nil)
+    (when stream
+      (format t "; Checking ~S~%" (pathname stream))
+      ;; Ensure that we're reading the correct variant of the file
+      ;; in case there is more than one set of floating-point formats.
+      (assert (eq (read stream) :default))
+      (let ((*package* (find-package "SB-KERNEL")))
+        (dolist (expr (read stream))
+          (destructuring-bind (fun args result) expr
+            (let ((actual (apply fun (sb-int:ensure-list args))))
+              (unless (eql actual result)
+                (#+sb-devel error
+                 #-sb-devel format #-sb-devel t
+                 "FLOAT CACHE LINE ~S vs COMPUTED ~S~%"
+                 expr actual)))))))))
 
 
 ;;;; compiling and loading more of the system
@@ -73,10 +101,9 @@
 ;;;
 (let ((sources (with-open-file (f (merge-pathnames "../../build-order.lisp-expr"
                                                    *load-pathname*))
-                 (let ((*features* (cons :warm-build-phase *features*)))
-                   (read f))))
+                 (read f) ; skip over the make-host-{1,2} input files
+                 (read f)))
       (sb-c::*handled-conditions* sb-c::*handled-conditions*))
- (declare (special *compile-files-p*))
  (proclaim '(sb-ext:muffle-conditions compiler-note))
  (flet ((do-srcs (list)
          (dolist (stem list)
@@ -134,9 +161,13 @@
                     (error "LOAD of ~S failed." output-truename))
                   (sb-int:/show "done loading" output-truename))))))))
 
-  (let ((*print-length* 10)
-        (*print-level* 5)
-        (*print-circle* t)
-        (*compile-print* nil))
+  (let ((*compile-print* nil))
     (dolist (group sources)
-      (with-compilation-unit () (do-srcs group))))))
+      (handler-bind ((simple-warning
+                      (lambda (c)
+                        ;; escalate "undefined variable" warnings to errors.
+                        ;; There's no reason to allow them in our code.
+                        (when (search "undefined variable"
+                                      (write-to-string c :escape nil))
+                          (cerror "Finish warm compile ignoring the problem" c)))))
+        (with-compilation-unit () (do-srcs group)))))))

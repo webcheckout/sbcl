@@ -1,5 +1,5 @@
 #if defined LISP_FEATURE_DARWIN
-#if defined LANGUAGE_ASSEMBLY
+#if defined __ASSEMBLER__
 #define REG(num) r##num
 #define FREG(num) f##num
 #else
@@ -57,7 +57,7 @@
 #endif
 
 #define REGNAMES \
-        "ZERO",         "NSP",          "???",          "NL0", \
+        "ZERO",         "NSP",          "TOC",          "NL0", \
         "NL1",          "NL2",          "NL3P",         "NL4", \
         "NL5",          "NL6",          "FDEFN",        "NARGS", \
         "NFP",          "CFUNC",        "BSP",          "CFP", \

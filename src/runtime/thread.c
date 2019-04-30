@@ -66,7 +66,7 @@ static struct thread *postmortem_thread;
 
 #endif
 
-int dynamic_values_bytes=TLS_SIZE*sizeof(lispobj);  /* same for all threads */
+int dynamic_values_bytes = 4096 * sizeof(lispobj);  // same for all threads
 struct thread *all_threads;
 
 #ifdef LISP_FEATURE_SB_THREAD
@@ -76,8 +76,10 @@ static pthread_mutex_t create_thread_lock = PTHREAD_MUTEX_INITIALIZER;
 
 #ifdef LISP_FEATURE_GCC_TLS
 __thread struct thread *current_thread;
-#endif
+__thread int is_lisp_thread;
+#else
 pthread_key_t lisp_thread = 0;
+#endif
 #endif
 
 #if defined(LISP_FEATURE_X86) || defined(LISP_FEATURE_X86_64)
@@ -194,7 +196,11 @@ initial_thread_trampoline(struct thread *th)
     lispobj *args = NULL;
 #endif
 #ifdef LISP_FEATURE_SB_THREAD
+# ifdef LISP_FEATURE_GCC_TLS
+    is_lisp_thread = 1;
+# else
     pthread_setspecific(lisp_thread, (void *)1);
+# endif
 #endif
 #if defined(THREADS_USING_GCSIGNAL) && (defined(LISP_FEATURE_PPC) || defined(LISP_FEATURE_ARM64))
     /* SIG_STOP_FOR_GC defaults to blocked on PPC? */
@@ -343,7 +349,11 @@ init_new_thread(struct thread *th,
 {
     int lock_ret;
 
+#ifdef LISP_FEATURE_GCC_TLS
+    is_lisp_thread = 1;
+#else
     pthread_setspecific(lisp_thread, (void *)1);
+#endif
     if(arch_os_thread_init(th)==0) {
         /* FIXME: handle error */
         lose("arch_os_thread_init failed\n");
@@ -534,7 +544,7 @@ attach_os_thread(init_thread_data *scribble)
   stack_addr = (void*)((size_t)stack.ss_sp - stack_size);
 #elif defined(LISP_FEATURE_DARWIN)
     stack_size = pthread_get_stacksize_np(os);
-    stack_addr = pthread_get_stackaddr_np(os) - stack_size;
+    stack_addr = (char*)pthread_get_stackaddr_np(os) - stack_size;
 #else
     pthread_attr_t attr;
 #ifdef LISP_FEATURE_FREEBSD
@@ -568,7 +578,11 @@ detach_os_thread(init_thread_data *scribble)
     undo_init_new_thread(th, scribble);
 
     odxprint(misc, "deattach_os_thread: detached");
+#ifdef LISP_FEATURE_GCC_TLS
+    is_lisp_thread = 0;
+#else
     pthread_setspecific(lisp_thread, (void *)0);
+#endif
     thread_sigmask(SIG_SETMASK, &scribble->oldset, 0);
     free_thread_struct(th);
 }
@@ -702,19 +716,17 @@ create_thread_struct(lispobj initial_function) {
 
 #ifdef LISP_FEATURE_SB_THREAD
     lispobj* tls = (lispobj*)th;
-    for(i = 0; i < TLS_SIZE; i++)
+    for(i = 0; i < (unsigned int)(dynamic_values_bytes/N_WORD_BYTES); i++)
         tls[i] = NO_TLS_VALUE_MARKER_WIDETAG;
+    th->tls_size = dynamic_values_bytes;
 #endif
+    uword_t* __attribute__((__unused__)) constants = (uword_t*)th;
 #ifdef LISP_FEATURE_GENCGC
-#ifdef LISP_FEATURE_IMMOBILE_SPACE
+#ifdef THREAD_VARYOBJ_CARD_MARKS_SLOT
     extern unsigned int* varyobj_page_touched_bits;
-    th->varyobj_space_addr  = VARYOBJ_SPACE_START;
-    th->varyobj_card_count  = varyobj_space_size / IMMOBILE_CARD_BYTES;
-    th->varyobj_card_marks  = (lispobj)varyobj_page_touched_bits;
-#else
-    th->varyobj_space_addr  = 0;
-    th->varyobj_card_count  = 0;
-    th->varyobj_card_marks  = 0;
+    constants[THREAD_VARYOBJ_SPACE_ADDR_SLOT] = VARYOBJ_SPACE_START;
+    constants[THREAD_VARYOBJ_CARD_COUNT_SLOT] = varyobj_space_size / IMMOBILE_CARD_BYTES;
+    constants[THREAD_VARYOBJ_CARD_MARKS_SLOT] = (lispobj)varyobj_page_touched_bits;
 #endif
     th->dynspace_addr       = DYNAMIC_SPACE_START;
     th->dynspace_card_count = page_table_pages;
@@ -733,7 +745,7 @@ create_thread_struct(lispobj initial_function) {
     th->this=th;
     th->os_thread=0;
 #if defined(LAYOUT_OF_FUNCTION) && defined(LISP_FEATURE_SB_THREAD)
-    th->function_layout = LAYOUT_OF_FUNCTION << 32;
+    constants[THREAD_FUNCTION_LAYOUT_SLOT] = LAYOUT_OF_FUNCTION << 32;
 #endif
     // Once allocated, the allocation profiling buffer sticks around.
     // If present and enabled, assign into the new thread.
@@ -866,7 +878,7 @@ create_thread_struct(lispobj initial_function) {
 
 void create_initial_thread(lispobj initial_function) {
     struct thread *th = create_thread_struct(initial_function);
-#ifdef LISP_FEATURE_SB_THREAD
+#if defined(LISP_FEATURE_SB_THREAD) && !defined(LISP_FEATURE_GCC_TLS)
     pthread_key_create(&lisp_thread, 0);
 #endif
     if(th) {
@@ -1114,7 +1126,10 @@ kill_safely(os_thread_t os_thread, int signal)
          * would go wrong.  Why are we running interruptions while
          * stopping the world though?  Test case is (:ASYNC-UNWIND
          * :SPECIALS), especially with s/10/100/ in both loops. */
-        if (os_thread == pthread_self()) {
+        /* From the linux man page on pthread_self() -
+         * "variables  of  type  pthread_t  can't  portably be compared using
+         *  the C equality operator (==); use pthread_equal(3) instead." */
+        if (thread_equal(os_thread, pthread_self())) {
             pthread_kill(os_thread, signal);
 #ifdef LISP_FEATURE_WIN32
             check_pending_thruptions(NULL);

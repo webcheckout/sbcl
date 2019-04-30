@@ -49,13 +49,30 @@
     ;; We can't use both register and immediate offsets in the same
     ;; load/store instruction, so we need to bias our register offset
     ;; on big-endian systems.
-    #!+big-endian
+    #+big-endian
     (inst sub result result (1- n-word-bytes))
 
     ;; And, finally, pick out the widetag from the header.
     (inst neg result result)
     (inst ldrb result (@ object result))
     done))
+
+(define-vop (layout-depthoid)
+  (:translate layout-depthoid)
+  (:policy :fast-safe)
+  (:args (object :scs (descriptor-reg)))
+  (:results (value :scs (any-reg)))
+  (:result-types fixnum)
+  (:generator 1
+   ;; I have not tested this for big-endian aarch but it looks right.
+   (inst ldrsw value
+         (@ object
+            (load-store-offset
+             (- (+ #+little-endian 4
+                   (ash (+ instance-slots-offset
+                           (get-dsd-index layout sb-kernel::%bits))
+                        word-shift))
+                instance-pointer-lowtag))))))
 
 (define-vop (%other-pointer-widetag)
   (:translate %other-pointer-widetag)
@@ -238,7 +255,7 @@
 
 ;;;
 
-#!+sb-thread
+#+sb-thread
 (progn
   (defun ldr-str-word-offset-encodable (x)
     (ldr-str-offset-encodable (ash x word-shift)))

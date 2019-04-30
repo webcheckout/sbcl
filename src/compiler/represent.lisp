@@ -185,7 +185,7 @@
 ;;;; We do some checking of the consistency of the VM definition at
 ;;;; load time.
 
-;;; FIXME: should probably be conditional on #!+SB-SHOW
+;;; FIXME: should probably be conditional on #+SB-SHOW
 (defun check-move-fun-consistency ()
   (dotimes (i sb-vm:sc-number-limit)
     (let ((sc (svref *backend-sc-numbers* i)))
@@ -292,7 +292,7 @@
                             t)
 
 
-  (let ((min most-positive-fixnum)
+  (let ((min sb-xc:most-positive-fixnum)
         (min-scn nil)
         (unique nil))
     (dolist (scn scs)
@@ -641,7 +641,7 @@
 ;;; If TN is in a number stack SC, make all the right annotations.
 ;;; Note that this should be called after TN has been referenced,
 ;;; since it must iterate over the referencing environments.
-#!-sb-fluid (declaim (inline note-if-number-stack))
+#-sb-fluid (declaim (inline note-if-number-stack))
 (defun note-if-number-stack (tn 2comp restricted)
   (declare (type tn tn) (type ir2-component 2comp))
   (when (if restricted

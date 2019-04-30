@@ -139,7 +139,7 @@
   (with-single-package-locked-error
       (:symbol name "globally declaring the FTYPE of ~A")
     (when (eq (info :function :where-from name) :declared)
-      (let ((old-type (proclaimed-ftype name))
+      (let ((old-type (global-ftype name))
             (type (if (ctype-p type-oid)
                       type-oid
                       (specifier-type type-specifier))))
@@ -338,7 +338,7 @@
            (compiler-warn "unrecognized declaration ~S" raw-form)))))))
 
 (defun sb-xc:proclaim (raw-form)
-  (/show "PROCLAIM" raw-form)
+  (/noshow "PROCLAIM" raw-form)
   (%proclaim raw-form nil)
   (values))
 

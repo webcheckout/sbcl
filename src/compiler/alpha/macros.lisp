@@ -215,6 +215,16 @@
 
 ;;;; memory accessor vop generators
 
+(sb-xc:deftype load/store-index (scale lowtag min-offset
+                                 &optional (max-offset min-offset))
+  `(integer ,(- (truncate (+ (ash 1 16)
+                             (* min-offset sb-vm:n-word-bytes)
+                             (- lowtag))
+                          scale))
+            ,(truncate (- (+ (1- (ash 1 16)) lowtag)
+                          (* max-offset sb-vm:n-word-bytes))
+                       scale)))
+
 (defmacro define-full-reffer (name type offset lowtag scs el-type
                                    &optional translate)
   `(progn
@@ -251,7 +261,7 @@
              '((inst mskll value 4 value)))))))
 
 (defmacro define-full-setter (name type offset lowtag scs el-type
-                                   &optional translate #!+gengc (remember t))
+                                   &optional translate #+gengc (remember t))
   `(progn
      (define-vop (,name)
        ,@(when translate

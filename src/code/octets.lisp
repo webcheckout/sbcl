@@ -9,7 +9,7 @@
 ;;;; provided with absolutely no warranty. See the COPYING and CREDITS
 ;;;; files for more information.
 
-;;; FIXME: The latin9 stuff is currently #!+sb-unicode, because I
+;;; FIXME: The latin9 stuff is currently #+sb-unicode, because I
 ;;; don't like the idea of trying to do CODE-CHAR #x<big>.  Is that a
 ;;; justified fear?  Can we arrange that it's caught and converted to
 ;;; a decoding error error?  Or should we just give up on non-Unicode
@@ -174,17 +174,7 @@
          ;; Create the lookup table.
          (sorted-lookup-table
           (reduce #'append sorted-pairs :from-end t :initial-value nil)))
-    (flet ((pick-type (vector &optional missing-points-p)
-             (if missing-points-p
-                 (let ((max (reduce #'max (remove nil vector))))
-                   (cond ((<= max #x7F) '(signed-byte 8))
-                         ((<= max #x7FFF) '(signed-byte 16))
-                         (t '(signed-byte 32))))
-                 (let ((max (reduce #'max vector)))
-                   (cond ((<= max #xFF) '(unsigned-byte 8))
-                         ((<= max #xFFFF) '(unsigned-byte 16))
-                         (t '(unsigned-byte 32)))))))
-      `(progn
+    `(progn
          ;; We *could* inline this, but it's not obviously the right thing,
          ;; because each use of the inlined function in a different file
          ;; would be forced to dump the large-ish array. To do things like
@@ -205,14 +195,12 @@
                   ;; We could use a single otherwise-unused point to mean NIL,
                   ;; but it would be confusing if in one table #xFFFF represents
                   ;; NIL and another #xF00D represents NIL.
-                  `(let ((code (aref ,(!make-specialized-array
-                                       256 (pick-type byte-to-code t)
+                  `(let ((code (aref ,(sb-c::coerce-to-smallest-eltype
                                        (substitute -1 nil byte-to-code))
                                      byte)))
                      (if (>= code 0) code))
                   ;; Every byte has a translation
-                  `(aref ,(!make-specialized-array
-                           256 (pick-type byte-to-code) byte-to-code)
+                  `(aref ,(sb-c::coerce-to-smallest-eltype byte-to-code)
                          byte))))
          (defun ,code-byte-name (code)
            (declare (optimize speed (safety 0))
@@ -220,10 +208,7 @@
            (if (< code ,lowest-non-equivalent-code)
                code
                (loop with code-to-byte-table =
-                    ,(!make-specialized-array
-                      (length sorted-lookup-table)
-                      (pick-type sorted-lookup-table)
-                      sorted-lookup-table)
+                    ,(sb-c::coerce-to-smallest-eltype sorted-lookup-table)
                   with low = 0
                   with high = (- (length code-to-byte-table) 2)
                   while (< low high)
@@ -233,7 +218,7 @@
                            (setf low mid)))
                   finally (return (if (eql code (aref code-to-byte-table low))
                                       (aref code-to-byte-table (1+ low))
-                                      nil)))))))))
+                                      nil))))))))
 
 (declaim (inline get-latin-bytes))
 (defun get-latin-bytes (mapper external-format string pos)
@@ -347,9 +332,9 @@
       ;; the locale settings. Defaulting to an external-format which
       ;; can represent characters that the CHARACTER type can't
       ;; doesn't seem very sensible.
-      #!-sb-unicode
+      #-sb-unicode
       (setf *default-external-format* :latin-1)
-      (let ((external-format #!-win32 (intern (or #!-android
+      (let ((external-format #-win32 (intern (or #-android
                                                   (alien-funcall
                                                    (extern-alien
                                                     "nl_langinfo"
@@ -358,7 +343,7 @@
                                                    sb-unix:codeset)
                                                   "LATIN-1")
                                               "KEYWORD")
-                             #!+win32 (sb-win32::ansi-codepage)))
+                             #+win32 (sb-win32::ansi-codepage)))
         (let ((entry (get-external-format external-format)))
           (cond
             (entry
@@ -453,15 +438,15 @@ STRING (or the subsequence bounded by START and END)."
       (funcall (ef-string-to-octets-fun ef) string start end
                (if null-terminate 1 0)))))
 
-#!+sb-unicode
+#+sb-unicode
 (defvar +unicode-replacement-character+ (string (code-char #xfffd)))
-#!+sb-unicode
+#+sb-unicode
 (defun use-unicode-replacement-char (condition)
   (use-value +unicode-replacement-character+ condition))
 
 ;;; Utilities that maybe should be exported
 
-#!+sb-unicode
+#+sb-unicode
 (defmacro with-standard-replacement-character (&body body)
   `(handler-bind ((octet-encoding-error #'use-unicode-replacement-char))
     ,@body))

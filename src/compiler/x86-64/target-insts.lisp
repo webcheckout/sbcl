@@ -175,13 +175,13 @@
 ;;; Alternatively, the value might be an immediate operand to MOV,
 ;;; which in general decodes as a signed integer. So ignore it
 ;;; unless it looks like an address.
-#!+immobile-space
+#+immobile-space
 (defun maybe-note-lisp-callee (value dstate)
   (awhen (and (typep value 'word) (sb-vm::find-called-object value))
     (note (lambda (stream) (princ it stream)) dstate)))
 
 (defun print-imm/asm-routine (value stream dstate)
-  (if (or #!+immobile-space (maybe-note-lisp-callee value dstate)
+  (if (or #+immobile-space (maybe-note-lisp-callee value dstate)
           (maybe-note-assembler-routine value nil dstate)
           (maybe-note-static-symbol value dstate))
       (princ16 value stream)
@@ -235,12 +235,6 @@
   (decode-mod-r/m dstate mod r/m 'gpr))
 (defun prefilter-xmmreg/mem (dstate mod r/m)
   (decode-mod-r/m dstate mod r/m 'fpr))
-
-#!+sb-thread
-(defun static-symbol-from-tls-index (index)
-  (dovector (sym +static-symbols+)
-    (when (= (symbol-tls-index sym) index)
-      (return sym))))
 
 ;;; Return contents of memory if either it refers to an unboxed code constant
 ;;; or is RIP-relative with a displacement of 0.
@@ -342,7 +336,7 @@
                               (:qword
                                (unboxed-constant-ref dstate addr disp))))
                     dstate)))))
-    #!+sb-thread
+    #+sb-thread
     (flet ((guess-symbol (predicate)
              (binding* ((code-header (seg-code (dstate-segment dstate)) :exit-if-null)
                         (header-n-words (code-header-words code-header)))
@@ -371,11 +365,11 @@
                    (return-from print-mem-ref
                      (note (lambda (stream) (format stream "thread.~(~A~)" it))
                            dstate)))))
-             (let* ((tls-index (ash disp (- n-fixnum-tag-bits)))
-                    (symbol (or (guess-symbol
-                                 (lambda (s) (= (symbol-tls-index s) tls-index)))
-                                ;; static symbols aren't in the code header
-                                (static-symbol-from-tls-index tls-index))))
+             (let ((symbol (or (guess-symbol
+                                (lambda (s) (= (symbol-tls-index s) disp)))
+                               ;; static symbols aren't in the code header
+                               (find disp +static-symbols+
+                                     :key #'symbol-tls-index))))
                (when symbol
                  (return-from print-mem-ref
                    (note (lambda (stream) (format stream "tls: ~S" symbol))
@@ -427,8 +421,8 @@
 (defun break-control (chunk inst stream dstate)
   (declare (ignore inst))
   (flet ((nt (x) (if stream (note x dstate))))
-    (let ((trap #!-ud2-breakpoints (byte-imm-code chunk dstate)
-           #!+ud2-breakpoints (word-imm-code chunk dstate)))
+    (let ((trap #-ud2-breakpoints (byte-imm-code chunk dstate)
+           #+ud2-breakpoints (word-imm-code chunk dstate)))
      (case trap
        (#.breakpoint-trap
         (nt "breakpoint trap"))
@@ -497,8 +491,8 @@
                     (funcall function (+ (dstate-cur-offs dstate) 1)
                              operand inst))))
                ((eq inst cond-jmp-inst)
-                ;; TAIL-CALL-SYMBOL is invoked with a conditional jump
-                ;; (but not CALL-SYMBOL because only JMP can be conditional)
+                ;; jmp CALL-SYMBOL is invoked with a conditional jump
+                ;; (but not call CALL-SYMBOL because only JMP can be conditional)
                 (let ((operand (+ (near-cond-jump-displacement dchunk dstate)
                                   (dstate-next-addr dstate))))
                   (when (includep operand)
@@ -552,7 +546,7 @@
 ;;; Perform ICF on instructions of CODE
 (defun sb-vm::machine-code-icf (code mapper replacements print)
   (declare (ignorable code mapper replacements print))
-  #!+immobile-space
+  #+immobile-space
   (flet ((scan (sap length dstate segment)
            (scan-relative-operands
             code (sap-int sap) length dstate segment

@@ -636,8 +636,8 @@ We could try a few things to mitigate this:
 ;;; allocated in Space.
 (defun type-breakdown (space)
   (declare (muffle-conditions compiler-note))
-  (let ((sizes (make-array 256 :initial-element 0 :element-type '(unsigned-byte #.n-word-bits)))
-        (counts (make-array 256 :initial-element 0 :element-type '(unsigned-byte #.n-word-bits))))
+  (let ((sizes (make-array 256 :initial-element 0 :element-type 'word))
+        (counts (make-array 256 :initial-element 0 :element-type 'word)))
     (map-allocated-objects
      (lambda (obj type size)
        (declare (word size) (optimize (speed 3)) (ignore obj))
@@ -711,6 +711,12 @@ We could try a few things to mitigate this:
               (incf summary-total-objects total-objects))))
         (format t "~%Summary total:~%    ~:D bytes, ~:D objects.~%"
                 summary-total-bytes summary-total-objects)))))
+
+(declaim (ftype (sfunction (index &key (:comma-interval (and (integer 1) index))) index)
+                decimal-with-grouped-digits-width))
+(defun decimal-with-grouped-digits-width (value &key (comma-interval 3))
+  (let ((digits (length (write-to-string value :base 10))))
+    (+ digits (floor (1- digits) comma-interval))))
 
 ;;; Report object usage for a single space.
 (defun report-space-total (space-info cutoff)
@@ -1329,6 +1335,19 @@ We could try a few things to mitigate this:
              (setq addr (get-lisp-obj-address (fun-code-header object))))
            (logand #xF (sap-ref-8 (int-sap (logandc2 addr lowtag-mask)) 3))))))
 
+;;; Show objects in a much simpler way than print-allocated-objects.
+;;; Probably don't use this for generation 0 of dynamic space. Other spaces are ok.
+;;; (And this is removed from the image; it's meant for developers)
+#+gencgc
+(defun show-generation-objs (gen space)
+  (let ((*print-pretty* nil))
+    (map-allocated-objects
+     (lambda (obj type size)
+       (declare (ignore type))
+       (when (= (generation-of obj) gen)
+         (format t "~x ~3x ~s~%" (get-lisp-obj-address obj) size obj)))
+     space)))
+
 ;;; Unfortunately this is a near total copy of the test in gc.impure.lisp
 (defun !ensure-genesis-code/data-separation ()
   #+gencgc
@@ -1369,29 +1388,51 @@ We could try a few things to mitigate this:
 ;;; this is a valid test that genesis separated code and data.
 (!ensure-genesis-code/data-separation)
 
-(defun hexdump (obj &optional (n-words
-                               (if (and (typep obj 'code-component)
-                                        (plusp (code-n-entries obj)))
-                                   ;; Display up through the first fun header
-                                   (+ (code-header-words obj)
-                                      (ash (%code-fun-offset obj 0) (- word-shift))
-                                      simple-fun-code-offset)
-                                   ;; at most 16 words
-                                   (min 16 (ash (primitive-object-size obj)
-                                                (- word-shift)))))
-                              ;; pass NIL explicitly if T crashes on you
-                              (decode t))
-  (with-pinned-objects (obj)
-    (let ((a (logandc2 (get-lisp-obj-address obj) lowtag-mask)))
-      (dotimes (i n-words)
-        (let ((word (sap-ref-word (int-sap a) (ash i word-shift))))
+(defun hexdump (thing &optional (n-words nil wordsp)
+                                ;; pass NIL explicitly if T crashes on you
+                                (decode t))
+  (multiple-value-bind (obj addr count)
+      (if (integerp thing)
+          (values nil thing (if wordsp n-words 1))
+          (values
+           thing
+           (logandc2 (get-lisp-obj-address thing) lowtag-mask)
+           (if wordsp
+               n-words
+               (if (and (typep thing 'code-component) (plusp (code-n-entries thing)))
+                   ;; Display up through the first fun header
+                   (+ (code-header-words thing)
+                      (ash (%code-fun-offset thing 0) (- word-shift))
+                      simple-fun-code-offset)
+                   ;; at most 16 words
+                   (min 16 (ash (primitive-object-size thing) (- word-shift)))))))
+    (with-pinned-objects (obj)
+      (dotimes (i count)
+        (let ((word (sap-ref-word (int-sap addr) (ash i word-shift))))
           (multiple-value-bind (lispobj ok) (if decode (make-lisp-obj word nil))
             (let ((*print-lines* 1)
                   (*print-pretty* t))
               (format t "~x: ~v,'0x~:[~; = ~S~]~%"
-                      (+ a (ash i word-shift))
+                      (+ addr (ash i word-shift))
                       (* 2 n-word-bytes)
                       word ok lispobj))))))))
+#+sb-thread
+(defun show-tls-map ()
+  (let ((list
+         (sort (sb-vm::list-allocated-objects
+                :all
+                :type sb-vm:symbol-widetag
+                :test (lambda (x) (plusp (sb-kernel:symbol-tls-index x))))
+               #'<
+               :key #'sb-kernel:symbol-tls-index))
+        (prev 0))
+    (dolist (x list)
+      (let ((n  (ash (sb-kernel:symbol-tls-index x) (- sb-vm:word-shift))))
+        (when (and (> n sb-thread::tls-index-start)
+                   (> n (1+ prev)))
+          (format t "(unused)~%"))
+        (format t "~5d = ~s~%" n x)
+        (setq prev n)))))
 
 (in-package "SB-C")
 ;;; As soon as practical in warm build it makes sense to add

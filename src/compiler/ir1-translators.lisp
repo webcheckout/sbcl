@@ -116,6 +116,7 @@ RETURN-FROM can be used to exit the form."
     (let* ((env-entry (list entry next result))
            (*lexenv* (make-lexenv :blocks (list (cons name env-entry))
                                   :cleanup cleanup)))
+      (push env-entry (ctran-entries next))
       (ir1-convert-progn-body dummy next result forms))))
 
 (def-ir1-translator return-from ((name &optional value) start next result)
@@ -327,6 +328,12 @@ Evaluate the FORMS in the specified SITUATIONS (any of :COMPILE-TOPLEVEL,
             (fail "The local macro argument list ~S is not a list."
                   arglist))
           `(,name macro .
+                  ;; I guess the reason we want to compile here rather than possibly
+                  ;; using an interpreted lambda is that we generate the usual gamut
+                  ;; of style-warnings and such. One might wonder if this could somehow
+                  ;; go through the front-most part of the front-end, to deal with
+                  ;; semantics, but then generate an interpreted function or something
+                  ;; more quick to emit than machine code.
                   ,(compile-in-lexenv
                     (let (#-sb-xc-host
                           (*macro-policy*
@@ -337,7 +344,8 @@ Evaluate the FORMS in the specified SITUATIONS (any of :COMPILE-TOPLEVEL,
                              '(optimize (store-source-form 3))
                              *macro-policy*)))
                       (make-macro-lambda nil arglist body 'macrolet name))
-                    lexenv)))))))
+                    lexenv
+                    nil nil nil t nil))))))) ; name source-info tlf ephemeral errorp
 
 (defun funcall-in-macrolet-lexenv (definitions fun context)
   (%funcall-in-foomacrolet-lexenv
@@ -456,7 +464,7 @@ body, references to a NAME will effectively be replaced with the EXPANSION."
       (bug "%PRIMITIVE was used with an unknown values template."))
 
     (ir1-convert start next result
-                 `(%%primitive ',template
+                 `(%%primitive ',name
                                ',(eval-info-args
                                   (subseq args required min))
                                ,@(subseq args 0 required)
@@ -520,7 +528,7 @@ Return VALUE without evaluating it."
                                 (and name
                                      ;; KLUDGE: High debug adds this block on
                                      ;; some platforms.
-                                     #!-unwind-to-frame-and-call-vop
+                                     #-unwind-to-frame-and-call-vop
                                      (neq 'return-value-tag name)
                                      ;; KLUDGE: CATCH produces blocks whose
                                      ;; cleanup is :CATCH.
@@ -566,7 +574,9 @@ Return VALUE without evaluating it."
 (def-ir1-translator %%allocate-closures ((&rest leaves) start next result)
   (aver (eq result 'nil))
   (let ((lambdas leaves))
-    (ir1-convert start next result `(%allocate-closures ',lambdas))
+    ;; Opaquely quoting this list avoids recursing in find-constant
+    ;; to check for dumpability of sub-parts as it would otherwise do.
+    (ir1-convert start next result `(%allocate-closures ,(opaquely-quote lambdas)))
     (let ((allocator (node-dest (ctran-next start))))
       (dolist (lambda lambdas)
         (setf (functional-allocator lambda) allocator)))))
@@ -658,7 +668,8 @@ be a lambda expression."
 (def-ir1-translator %funcall ((function &rest args) start next result)
   ;; MACROEXPAND so that (LAMBDA ...) forms arriving here don't get an
   ;; extra cast inserted for them.
-  (let ((function (%macroexpand function *lexenv*)))
+  (let ((function (handler-case (%macroexpand function *lexenv*)
+                    (error () function))))
     (if (typep function '(cons (member function global-function) (cons t null)))
         (with-fun-name-leaf (leaf (cadr function) start
                                   :global-function (eq (car function)
@@ -748,7 +759,7 @@ have been evaluated."
          (ir1-translate-locally body start next result))
         ;; This is just to avoid leaking non-standard special forms
         ;; into macroexpanded code
-        #!-c-stack-is-control-stack
+        #-c-stack-is-control-stack
         ((and (equal bindings '((*alien-stack-pointer* *alien-stack-pointer*))))
          (ir1-convert start next result
                       (let ((nsp (gensym "NSP")))
@@ -1255,7 +1266,7 @@ the thrown values will be returned."
 ;;; The LET is needed because the cleanup can be emitted multiple
 ;;; times, but there's no reference to NSP before EMIT-CLEANUPS.
 ;;; Passing NSP to the dummy %CLEANUP-FUN keeps it alive.
-#!-c-stack-is-control-stack
+#-c-stack-is-control-stack
 (def-ir1-translator restoring-nsp
     ((nsp &body body) start next result)
   (let ((cleanup (make-cleanup :kind :restore-nsp))

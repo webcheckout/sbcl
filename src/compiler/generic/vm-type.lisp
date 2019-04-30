@@ -25,15 +25,15 @@
 
 ;;; worst-case values for float attributes
 (sb-xc:deftype float-exponent ()
-  #!-long-float 'double-float-exponent
-  #!+long-float 'long-float-exponent)
+  #-long-float 'double-float-exponent
+  #+long-float 'long-float-exponent)
 (sb-xc:deftype float-digits ()
-  #!-long-float `(integer 0 ,sb-vm:double-float-digits)
-  #!+long-float `(integer 0 ,sb-vm:long-float-digits))
+  #-long-float `(integer 0 ,sb-vm:double-float-digits)
+  #+long-float `(integer 0 ,sb-vm:long-float-digits))
 (sb-xc:deftype float-radix () '(integer 2 2))
 (sb-xc:deftype float-int-exponent ()
-  #!-long-float 'double-float-int-exponent
-  #!+long-float 'long-float-int-exponent)
+  #-long-float 'double-float-int-exponent
+  #+long-float 'long-float-int-exponent)
 
 ;;; a code for BOOLE
 (sb-xc:deftype boole-code () '(unsigned-byte 4))
@@ -65,25 +65,20 @@
 
 ;;; an index into an integer
 (sb-xc:deftype bit-index ()
-  `(integer 0 #.(* (1- (ash 1 (- sb-vm:n-word-bits sb-vm:n-widetag-bits)))
-                   sb-vm:n-word-bits)))
+  `(integer 0 ,(* (1- (ash 1 (- sb-vm:n-word-bits sb-vm:n-widetag-bits)))
+                  sb-vm:n-word-bits)))
 
 
 ;;;; hooks into the type system
 
 (sb-xc:deftype unboxed-array (&optional dims)
-  (collect ((types (list 'or)))
-    (dolist (type *specialized-array-element-types*)
-      (when (subtypep type '(or integer character float (complex float)))
-        (types `(array ,type ,dims))))
-    (types)))
-
+  (cons 'or (mapcar (lambda (type) `(array ,type ,dims))
+                    '#.(delete t (map 'list 'sb-vm:saetp-specifier
+                                      sb-vm:*specialized-array-element-type-properties*)))))
 (sb-xc:deftype simple-unboxed-array (&optional dims)
-  (collect ((types (list 'or)))
-    (dolist (type *specialized-array-element-types*)
-      (when (subtypep type '(or integer character float (complex float)))
-        (types `(simple-array ,type ,dims))))
-    (types)))
+  (cons 'or (mapcar (lambda (type) `(simple-array ,type ,dims))
+                    '#.(delete t (map 'list 'sb-vm:saetp-specifier
+                                      sb-vm:*specialized-array-element-type-properties*)))))
 
 (sb-xc:deftype complex-vector (&optional element-type length)
   `(and (vector ,element-type ,length) (not simple-array)))
@@ -94,7 +89,7 @@
   (etypecase x
     (single-float 'single-float)
     (double-float 'double-float)
-    #!+long-float (long-float 'long-float)))
+    #+long-float (long-float 'long-float)))
 
 (declaim (ftype (sfunction (ctype) ctype) %upgraded-array-element-type))
 (defun %upgraded-array-element-type (eltype)
@@ -288,8 +283,8 @@
   (let (widetags remainder)
     ;; A little optimization for (OR BIGNUM other). Without this, there would
     ;; be a two-sided GENERIC-{<,>} test plus whatever test(s) "other" entails.
-    (let ((neg-bignum (specifier-type `(integer * (,most-negative-fixnum))))
-          (pos-bignum (specifier-type `(integer (,most-positive-fixnum) *))))
+    (let ((neg-bignum (specifier-type `(integer * (,sb-xc:most-negative-fixnum))))
+          (pos-bignum (specifier-type `(integer (,sb-xc:most-positive-fixnum) *))))
       (when (and (member neg-bignum types :test #'type=)
                  (member pos-bignum types :test #'type=))
         (push sb-vm:bignum-widetag widetags)
@@ -306,7 +301,7 @@
                     ;; could be done, but probably no merit to implementing
                     ;; maybe/definitely-complex wild-type.
                     (unless (array-type-complexp x)
-                      (map 'list #'sb-vm::saetp-typecode
+                      (map 'list #'sb-vm:saetp-typecode
                            sb-vm:*specialized-array-element-type-properties*))
                     (let ((saetp
                            (find
@@ -356,17 +351,7 @@
     (or (fixnump where) ; thread slots
         (eq where :always-thread-local)))) ; everything else
 
-(sb-xc:deftype load/store-index (scale lowtag min-offset
-                                 &optional (max-offset min-offset))
-  `(integer ,(- (truncate (+ (ash 1 16)
-                             (* min-offset sb-vm:n-word-bytes)
-                             (- lowtag))
-                          scale))
-            ,(truncate (- (+ (1- (ash 1 16)) lowtag)
-                          (* max-offset sb-vm:n-word-bytes))
-                       scale)))
-
-#!+(or x86 x86-64)
+#+(or x86 x86-64)
 (defun sb-vm::displacement-bounds (lowtag element-size data-offset)
   (let* (;; The minimum immediate offset in a memory-referencing instruction.
          (minimum-immediate-offset (- (expt 2 31)))
@@ -380,7 +365,7 @@
                         bytes-per-element)))
     (values min max)))
 
-#!+(or x86 x86-64)
+#+(or x86 x86-64)
 (sb-xc:deftype constant-displacement (lowtag element-size data-offset)
   (flet ((integerify (x)
            (etypecase x

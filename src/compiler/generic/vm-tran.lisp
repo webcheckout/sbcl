@@ -15,14 +15,14 @@
 ;;; transform picks whichever predicate was defined last when there
 ;;; are multiple predicates for equivalent types.
 (define-source-transform short-float-p (x) `(single-float-p ,x))
-#!-long-float
+#-long-float
 (define-source-transform long-float-p (x) `(double-float-p ,x))
 
 (define-source-transform compiled-function-p (x)
   (once-only ((x x))
     `(and (functionp ,x)
-          #!+sb-fasteval (not (sb-interpreter:interpreted-function-p ,x))
-          #!+sb-eval (not (sb-eval:interpreted-function-p ,x)))))
+          #+(or sb-fasteval sb-eval)
+          (not (typep ,x 'interpreted-function)))))
 
 (define-source-transform char-int (x)
   `(char-code ,x))
@@ -33,14 +33,14 @@
 (deftransform make-symbol ((string) (simple-string))
   `(%make-symbol 0 string))
 
-#!-immobile-space
+#-immobile-space
 (define-source-transform %make-symbol (kind string)
   (declare (ignore kind))
   ;; Set "logically read-only" bit in pname.
   `(sb-vm::%%make-symbol (set-header-data ,string ,sb-vm:+vector-shareable+)))
 
 ;;; We don't want to clutter the bignum code.
-#!+(or x86 x86-64)
+#+(or x86 x86-64)
 (define-source-transform sb-bignum:%bignum-ref (bignum index)
   ;; KLUDGE: We use TRULY-THE here because even though the bignum code
   ;; is (currently) compiled with (SAFETY 0), the compiler insists on
@@ -52,7 +52,7 @@
   `(sb-bignum:%bignum-ref-with-offset ,bignum
                                       (truly-the bignum-index ,index) 0))
 
-#!+(or x86 x86-64)
+#+(or x86 x86-64)
 (defun fold-index-addressing (fun-name element-size lowtag data-offset
                               index offset &optional setter-p)
   (multiple-value-bind (func index-args) (extract-fun-args index '(+ -) 2)
@@ -76,7 +76,7 @@
            (,fun-name thing index ',new-offset ,@(when setter-p
                                                    '(value))))))))
 
-#!+(or x86 x86-64)
+#+(or x86 x86-64)
 (deftransform sb-bignum:%bignum-ref-with-offset
     ((bignum index offset) * * :node node)
   (fold-index-addressing 'sb-bignum:%bignum-ref-with-offset
@@ -87,7 +87,7 @@
 ;;; The layout is stored in slot 0.
 ;;; *** These next two transforms should be the only code, aside from
 ;;;     some parts of the C runtime, with knowledge of the layout index.
-#!-compact-instance-header
+#-compact-instance-header
 (progn
   (define-source-transform %instance-layout (x)
     `(truly-the layout (%instance-ref ,x 0)))
@@ -108,7 +108,7 @@
         `(etypecase string
           ((simple-array character (*))
            (data-vector-ref string index))
-          #!+sb-unicode
+          #+sb-unicode
           ((simple-array base-char (*))
            (data-vector-ref string index))
           ((simple-array nil (*))
@@ -165,11 +165,11 @@
 ;;; Transform data vector access to a form that opens up optimization
 ;;; opportunities. On platforms that support DATA-VECTOR-REF-WITH-OFFSET
 ;;; DATA-VECTOR-REF is not supported at all.
-#!+(or x86 x86-64)
+#+(or x86 x86-64)
 (define-source-transform data-vector-ref (array index)
   `(data-vector-ref-with-offset ,array ,index 0))
 
-#!+(or x86 x86-64)
+#+(or x86 x86-64)
 (deftransform data-vector-ref-with-offset ((array index offset))
   (let ((array-type (lvar-type array)))
     (when (or (not (array-type-p array-type))
@@ -198,7 +198,7 @@
         `(typecase string
            ((simple-array character (*))
             (data-vector-set string index (the* (character :context :aref) new-value)))
-           #!+sb-unicode
+           #+sb-unicode
            ((simple-array base-char (*))
             (data-vector-set string index (the* (base-char :context :aref
                                                            :silent-conflict t)
@@ -255,11 +255,11 @@
 
 ;;; Transform data vector access to a form that opens up optimization
 ;;; opportunities.
-#!+(or x86 x86-64)
+#+(or x86 x86-64)
 (define-source-transform data-vector-set (array index new-value)
   `(data-vector-set-with-offset ,array ,index 0 ,new-value))
 
-#!+(or x86 x86-64)
+#+(or x86 x86-64)
 (deftransform data-vector-set-with-offset ((array index offset new-value))
   (let ((array-type (lvar-type array)))
     (when (or (not (array-type-p array-type))
@@ -450,8 +450,7 @@
                     (end-1 (floor (1- length) sb-vm:n-word-bits)))
                    ((>= i end-1)
                     (let* ((extra (1+ (mod (1- length) sb-vm:n-word-bits)))
-                           (mask (ash #.(1- (ash 1 sb-vm:n-word-bits))
-                                      (- extra sb-vm:n-word-bits)))
+                           (mask (ash sb-ext:most-positive-word (- extra sb-vm:n-word-bits)))
                            (numx
                             (logand
                              (ash mask
@@ -497,8 +496,7 @@
              ;; Does it have to do with %shrink-vector, perhaps?
              ;; Some rationale would be nice...
              (let* ((extra (1+ (mod (1- length) sb-vm:n-word-bits)))
-                    (mask (ash #.(1- (ash 1 sb-vm:n-word-bits))
-                               (- extra sb-vm:n-word-bits)))
+                    (mask (ash most-positive-word (- extra sb-vm:n-word-bits)))
                     ;; The above notwithstanding, for big-endian wouldn't it
                     ;; be possible to write this expression as a single shift?
                     ;;  (LOGAND MOST-POSITIVE-WORD (ASH most-positive-word (- n-word-bits extra)))
@@ -529,8 +527,8 @@
   (let ((value (if (constant-lvar-p item)
                    (if (= (lvar-value item) 0)
                        0
-                       #.(1- (ash 1 sb-vm:n-word-bits)))
-                   `(if (= item 0) 0 #.(1- (ash 1 sb-vm:n-word-bits))))))
+                       most-positive-word)
+                   `(if (= item 0) 0 ,most-positive-word))))
     `(let ((length (length sequence))
            (value ,value))
        (if (= length 0)
@@ -612,7 +610,7 @@
       ;; Prevent failure caused by memmove() hitting a write-protected page
       ;; and the fault handler losing, since it thinks you're not in Lisp.
       ;; This is wasteful, but better than being randomly broken (lp#1366263).
-      #!+cheneygc
+      #+cheneygc
       (let ((dst (sapify dst)))
         (setf (sap-ref-8 dst dst-start) (sap-ref-8 dst dst-start)
               (sap-ref-8 dst (1- dst-end)) (sap-ref-8 dst (1- dst-end))))
@@ -622,15 +620,15 @@
      (values)))
 
 ;;;; transforms for EQL of floating point values
-#!-(vop-named sb-vm::eql/single-float)
+#-(vop-named sb-vm::eql/single-float)
 (deftransform eql ((x y) (single-float single-float))
   '(= (single-float-bits x) (single-float-bits y)))
 
-#!-(vop-named sb-vm::eql/double-float)
+#-(vop-named sb-vm::eql/double-float)
 (deftransform eql ((x y) (double-float double-float))
-  #!-64-bit '(and (= (double-float-low-bits x) (double-float-low-bits y))
+  #-64-bit '(and (= (double-float-low-bits x) (double-float-low-bits y))
                   (= (double-float-high-bits x) (double-float-high-bits y)))
-  #!+64-bit '(= (double-float-bits x) (double-float-bits y)))
+  #+64-bit '(= (double-float-bits x) (double-float-bits y)))
 
 
 ;;;; modular functions
@@ -663,37 +661,37 @@
 ;;; generate efficient code.
 
 (define-source-transform word-logical-not (x)
-  `(logand (lognot (the sb-vm:word ,x)) #.(1- (ash 1 sb-vm:n-word-bits))))
+  `(logand (lognot (the sb-vm:word ,x)) ,most-positive-word))
 
 (deftransform word-logical-and ((x y))
   '(logand x y))
 
 (deftransform word-logical-nand ((x y))
-  '(logand (lognand x y) #.(1- (ash 1 sb-vm:n-word-bits))))
+  `(logand (lognand x y) ,most-positive-word))
 
 (deftransform word-logical-or ((x y))
   '(logior x y))
 
 (deftransform word-logical-nor ((x y))
-  '(logand (lognor x y) #.(1- (ash 1 sb-vm:n-word-bits))))
+  `(logand (lognor x y) ,most-positive-word))
 
 (deftransform word-logical-xor ((x y))
   '(logxor x y))
 
 (deftransform word-logical-eqv ((x y))
-  '(logand (logeqv x y) #.(1- (ash 1 sb-vm:n-word-bits))))
+  `(logand (logeqv x y) ,most-positive-word))
 
 (deftransform word-logical-orc1 ((x y))
-  '(logand (logorc1 x y) #.(1- (ash 1 sb-vm:n-word-bits))))
+  `(logand (logorc1 x y) ,most-positive-word))
 
 (deftransform word-logical-orc2 ((x y))
-  '(logand (logorc2 x y) #.(1- (ash 1 sb-vm:n-word-bits))))
+  `(logand (logorc2 x y) ,most-positive-word))
 
 (deftransform word-logical-andc1 ((x y))
-  '(logand (logandc1 x y) #.(1- (ash 1 sb-vm:n-word-bits))))
+  `(logand (logandc1 x y) ,most-positive-word))
 
 (deftransform word-logical-andc2 ((x y))
-  '(logand (logandc2 x y) #.(1- (ash 1 sb-vm:n-word-bits))))
+  `(logand (logandc2 x y) ,most-positive-word))
 
 
 ;;; There are two different ways the multiplier can be recoded. The

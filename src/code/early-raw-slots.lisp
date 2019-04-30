@@ -74,7 +74,7 @@
        (defun raw-slot-data-accessor-name (rsd)
          (%simple-fun-name (raw-slot-data-accessor-fun rsd))))
 
-#!-sb-fluid (declaim (freeze-type raw-slot-data))
+#-sb-fluid (declaim (freeze-type raw-slot-data))
 
 ;; Simulate DEFINE-LOAD-TIME-GLOBAL - always bound in the image
 ;; but not eval'd in the compiler.
@@ -100,9 +100,9 @@
                    ,@args :allow-other-keys t))))
     (let ((double-float-alignment
             ;; white list of architectures that can load unaligned doubles:
-            #!+(or x86 x86-64 ppc arm64) 1
+            #+(or x86 x86-64 ppc arm64) 1
             ;; at least sparc, mips and alpha can't:
-            #!-(or x86 x86-64 ppc arm64) 2))
+            #-(or x86 x86-64 ppc arm64) 2))
      (setq *raw-slot-data*
       (vector
        (make-raw-slot-data :raw-type 'sb-vm:word
@@ -111,7 +111,7 @@
                            :n-words 1)
        ;; If this list of architectures is changed, then also change the test
        ;; for :DEFINE-STRUCTURE-SLOT-ADDRESSOR in raw-slots-interleaved.impure
-       #!+(or arm64 x86 x86-64)
+       #-(or alpha hppa sparc)
        (make-raw-slot-data :raw-type 'sb-vm:signed-word
                            :accessor-name '%raw-instance-ref/signed-word
                            :init-vop 'sb-vm::raw-instance-init/signed-word
@@ -144,16 +144,16 @@
                            :init-vop 'sb-vm::raw-instance-init/complex-double
                            :alignment double-float-alignment
                            :n-words (/ 16 sb-vm:n-word-bytes))
-       #!+long-float
+       #+long-float
        (make-raw-slot-data :raw-type long-float
                            :accessor-name '%raw-instance-ref/long
                            :init-vop 'sb-vm::raw-instance-init/long
-                           :n-words #!+x86 3 #!+sparc 4)
-       #!+long-float
+                           :n-words #+x86 3 #+sparc 4)
+       #+long-float
        (make-raw-slot-data :raw-type complex-long-float
                            :accessor-name '%raw-instance-ref/complex-long
                            :init-vop 'sb-vm::raw-instance-init/complex-long
-                           :n-words #!+x86 6 #!+sparc 8))))))
+                           :n-words #+x86 6 #+sparc 8))))))
 
 #+sb-xc-host (!raw-slot-data-init)
 #+sb-xc

@@ -22,7 +22,7 @@
 
 (defun guess-alignment (bits)
   (cond ((null bits) nil)
-        #!-(or (and x86 (not win32)) (and ppc darwin)) ((> bits 32) 64)
+        #-(or (and x86 (not win32)) (and ppc darwin)) ((> bits 32) 64)
         ((> bits 16) 32)
         ((> bits 8) 16)
         ((> bits 1) 8)
@@ -464,10 +464,10 @@
   ;; of return values and override the naturalize method to perform
   ;; the sign extension (in compiler/target/c-call.lisp).
   (ecase context
-    ((:normal #!-(or alpha x86 x86-64) :result)
+    ((:normal #-(or alpha x86 x86-64) :result)
      (list (if (alien-integer-type-signed type) 'signed-byte 'unsigned-byte)
            (alien-integer-type-bits type)))
-    #!+(or alpha x86 x86-64)
+    #+(or alpha x86 x86-64)
     (:result
      (list (if (alien-integer-type-signed type) 'signed-byte 'unsigned-byte)
            (max (alien-integer-type-bits type)
@@ -475,7 +475,7 @@
 
 ;;; As per the comment in the :ALIEN-REP method above, this is defined
 ;;; elsewhere for alpha and x86oids.
-#!-(or alpha x86 x86-64)
+#-(or alpha x86 x86-64)
 (define-alien-type-method (integer :naturalize-gen) (type alien)
   (declare (ignore type))
   alien)
@@ -607,7 +607,7 @@
        ;; If range is at least 20% dense, use vector mapping. Crossover
        ;; point solely on basis of space would be 25%. Vector mapping
        ;; is always faster, so give the benefit of the doubt.
-       ((< 0.2 (/ (float (length from-alist)) (float (1+ (- max min)))))
+       ((>= (/ (length from-alist) (1+ (- max min))) 2/10)
         ;; If offset is small and ignorable, ignore it to save time.
         (when (< 0 min 10) (setq min 0))
         (let ((to (make-array (1+ (- max min)))))
@@ -1158,9 +1158,9 @@
 (in-package "SB-IMPL")
 
 (defun extern-alien-name (name)
- (handler-case (coerce name 'base-string)
-   (error ()
-     (error "invalid external alien name: ~S" name))))
+  (handler-case (cl:coerce name 'base-string)
+    (error ()
+      (error "invalid external alien name: ~S" name))))
 
 (declaim (ftype (sfunction (string hash-table) (or integer null))
                 find-foreign-symbol-in-table))
@@ -1174,7 +1174,7 @@
 ;;; as opposed to C's "extern"). The table contains symbols known at
 ;;; the time that the program was built, but not symbols defined in
 ;;; object files which have been loaded dynamically since then.
-#!-sb-dynamic-core
+#-sb-dynamic-core
 (progn
   (declaim (type hash-table *static-foreign-symbols*))
   (defvar *static-foreign-symbols* (make-hash-table :test 'equal)))

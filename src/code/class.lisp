@@ -27,6 +27,10 @@
         `(find-classoid ',name)
         (error "can't use anonymous or undefined class as constant:~%  ~S"
                self))))
+#+sb-xc-host
+(defmethod sb-xc:make-load-form ((self classoid) &optional env)
+  (declare (ignore env))
+  `(find-classoid ',(classoid-name self)))
 
 
 ;;;; basic LAYOUT stuff
@@ -114,7 +118,6 @@
         (or (and classoid (classoid-layout classoid))
             (values (ensure-gethash name table
                                     (make-layout
-                                     :classoid
                                      (or classoid
                                          (make-undefined-classoid name))))))))))
 
@@ -127,9 +130,9 @@
 ;;; preexisting class slot value is OK, and if it's not initialized,
 ;;; its class slot value is set to an UNDEFINED-CLASS. -- FIXME: This
 ;;; is no longer true, :UNINITIALIZED used instead.
-(declaim (ftype (function (layout classoid index fixnum simple-vector
-                           layout-depthoid layout-bitmap)
-                          layout) %init-or-check-layout))
+(declaim (ftype (sfunction (layout classoid layout-length fixnum simple-vector
+                            layout-depthoid layout-bitmap) layout)
+                %init-or-check-layout))
 (defun %init-or-check-layout (layout classoid length flags inherits depthoid bitmap)
   (cond ((eq (layout-invalid layout) :uninitialized)
          ;; There was no layout before, we just created one which
@@ -140,7 +143,7 @@
            (let ((struct-depth
                   (if (logtest +structure-layout-flag+ flags) depthoid 0)))
              (setf (layout-length layout) length
-                   (layout-%flags layout) flags
+                   (layout-flags layout) flags
                    (layout-inherits layout) inherits
                    (layout-depthoid layout) depthoid
                    (layout-depth2-ancestor layout) (inherit 2)
@@ -176,7 +179,7 @@
                           (layout-classoid layout)))
   (let* ((classoid (layout-classoid layout))
          (name (classoid-name classoid)))
-    (aver (= (layout-%flags layout)
+    (aver (= (layout-flags layout)
              (typecase classoid
                (structure-classoid +structure-layout-flag+)
                (condition-classoid +condition-layout-flag+)
@@ -197,11 +200,10 @@
      `(%init-or-check-layout ',layout
                              ',(layout-classoid layout)
                              ',(layout-length layout)
-                             ',(layout-%flags layout)
+                             ',(layout-flags layout)
                              ',(layout-inherits layout)
                              ',(layout-depthoid layout)
                              ',(layout-bitmap layout)))))
-(!set-load-form-method layout (:xc :target) :ignore-it)
 
 ;;; If LAYOUT's slot values differ from the specified slot values in
 ;;; any interesting way, then give a warning and return T.
@@ -290,10 +292,7 @@ between the ~A definition and the ~A definition"
 ;;; Used by the loader to forward-reference layouts for classes whose
 ;;; definitions may not have been loaded yet. This allows type tests
 ;;; to be loaded when the type definition hasn't been loaded yet.
-(declaim (ftype (function (symbol index fixnum simple-vector layout-depthoid layout-bitmap)
-                          layout)
-                find-and-init-or-check-layout))
-(defun find-and-init-or-check-layout (name length flags inherits depthoid bitmap)
+(defun find-and-init-or-check-layout (name depthoid flags length bitmap inherits)
   (truly-the ; avoid an "assertion too complex to check" optimizer note
    (values layout &optional)
    (with-world-lock ()
@@ -352,7 +351,7 @@ between the ~A definition and the ~A definition"
           ;; Use at your own risk (interactive use only).
           (let ((inherits (layout-inherits layout))
                 (depthoid (layout-depthoid layout)))
-            (aver (logtest +structure-layout-flag+ (layout-%flags layout)))
+            (aver (logtest +structure-layout-flag+ (layout-%bits layout)))
             (aver (= (length inherits) depthoid))
             (macrolet ((inherit (n) `(if (> depthoid ,n) (svref inherits ,n) 0)))
               (setf (layout-invalid destruct-layout) nil
@@ -674,7 +673,7 @@ between the ~A definition and the ~A definition"
   ;; Perhaps a better definition of this function would be
   ;;   (if (classoid-translation x) (bug "enumerable-p classoid?") nil)
   (defun classoid-enumerable-p (x) (eq (classoid-name x) 'character)))
-(!define-type-class classoid :enumerable #'classoid-enumerable-p
+(define-type-class classoid :enumerable #'classoid-enumerable-p
                     :might-contain-other-types nil)
 
 (defun classoid-inherits-from (sub super-or-name)
@@ -738,11 +737,11 @@ between the ~A definition and the ~A definition"
 ;;; Simple methods for TYPE= and SUBTYPEP should never be called when
 ;;; the two classes are equal, since there are EQ checks in those
 ;;; operations.
-(!define-type-method (classoid :simple-=) (type1 type2)
+(define-type-method (classoid :simple-=) (type1 type2)
   (aver (not (eq type1 type2)))
   (values nil t))
 
-(!define-type-method (classoid :simple-subtypep) (class1 class2)
+(define-type-method (classoid :simple-subtypep) (class1 class2)
   (aver (not (eq class1 class2)))
   (with-world-lock ()
     (if (%ensure-both-classoids-valid class1 class2)
@@ -778,7 +777,7 @@ between the ~A definition and the ~A definition"
           (res))
         *empty-type*)))
 
-(!define-type-method (classoid :simple-intersection2) (class1 class2)
+(define-type-method (classoid :simple-intersection2) (class1 class2)
   (declare (type classoid class1 class2))
   (with-world-lock ()
     (%ensure-both-classoids-valid class1 class2 "type intersection")
@@ -825,7 +824,7 @@ between the ~A definition and the ~A definition"
 (declaim (type cons **non-instance-classoid-types**))
 (defglobal **non-instance-classoid-types**
   '(symbol system-area-pointer weak-pointer code-component
-    #!-(or x86 x86-64) lra
+    #-(or x86 x86-64) lra
     fdefn random-class))
 
 (defun classoid-non-instance-p (classoid)
@@ -842,15 +841,15 @@ between the ~A definition and the ~A definition"
 ;;; use INVOKE-COMPLEX-SUBTYPEP-ARG1-METHOD, in HAIRY methods and the
 ;;; like, classes are in their own hierarchy with no possibility of
 ;;; mixtures with other type classes.
-(!define-type-method (classoid :complex-subtypep-arg2) (type1 class2)
+(define-type-method (classoid :complex-subtypep-arg2) (type1 class2)
   (if (and (intersection-type-p type1)
            (> (count-if #'classoid-p (intersection-type-types type1)) 1))
       (values nil nil)
       (invoke-complex-subtypep-arg1-method type1 class2 nil t)))
 
-(!define-type-method (classoid :negate) (type) (make-negation-type type))
+(define-type-method (classoid :negate) (type) (make-negation-type type))
 
-(!define-type-method (classoid :unparse) (type)
+(define-type-method (classoid :unparse) (type)
   (classoid-proper-name type))
 
 ;;;; built-in classes
@@ -898,11 +897,11 @@ between the ~A definition and the ~A definition"
              :prototype-form '*)
 
      (system-area-pointer :codes (,sb-vm:sap-widetag)
-                          :prototype-form (int-sap 42))
+                          :prototype-form (int-sap 0))
      (weak-pointer :codes (,sb-vm:weak-pointer-widetag)
       :prototype-form (make-weak-pointer (find-package "CL")))
      (code-component :codes (,sb-vm:code-header-widetag))
-     #!-(or x86 x86-64) (lra :codes (,sb-vm:return-pc-widetag))
+     #-(or x86 x86-64) (lra :codes (,sb-vm:return-pc-widetag))
      (fdefn :codes (,sb-vm:fdefn-widetag)
             :prototype-form (make-fdefn nil))
      (random-class) ; used for unknown type codes
@@ -917,29 +916,29 @@ between the ~A definition and the ~A definition"
       :translation complex
       :inherits (number)
       :codes (,sb-vm:complex-widetag)
-      :prototype-form (complex 42 42))
+      :prototype-form ,(complex 0 1))
      (complex-single-float
       :translation (complex single-float)
       :inherits (complex number)
       :codes (,sb-vm:complex-single-float-widetag)
-      :prototype-form (complex 42f0 42f0))
+      :prototype-form ,(complex $0f0 $0f0))
      (complex-double-float
       :translation (complex double-float)
       :inherits (complex number)
       :codes (,sb-vm:complex-double-float-widetag)
-      :prototype-form (complex 42d0 42d0))
-     #!+long-float
+      :prototype-form ,(complex $0d0 $0d0))
+     #+long-float
      (complex-long-float
       :translation (complex long-float)
       :inherits (complex number)
       :codes (,sb-vm:complex-long-float-widetag)
-      :prototype-form (complex 42l0 42l0))
-     #!+sb-simd-pack
+      :prototype-form ,(complex $0L0 $0L0))
+     #+sb-simd-pack
      (simd-pack
       :translation simd-pack
       :codes (,sb-vm:simd-pack-widetag)
       :prototype-form (%make-simd-pack-ub64 42 42))
-     #!+sb-simd-pack-256
+     #+sb-simd-pack-256
      (simd-pack-256
       :translation simd-pack-256
       :codes (,sb-vm:simd-pack-256-widetag)
@@ -955,18 +954,18 @@ between the ~A definition and the ~A definition"
       :translation single-float
       :inherits (float real number)
       :codes (,sb-vm:single-float-widetag)
-      :prototype-form 42f0)
+      :prototype-form $0f0)
      (double-float
       :translation double-float
       :inherits (float real number)
       :codes (,sb-vm:double-float-widetag)
-      :prototype-form 42d0)
-     #!+long-float
+      :prototype-form $0d0)
+     #+long-float
      (long-float
       :translation long-float
       :inherits (float real number)
       :codes (,sb-vm:long-float-widetag)
-      :prototype-form 42l0)
+      :prototype-form $0L0)
      (rational
       :translation rational
       :inherits (real number))
@@ -1053,14 +1052,14 @@ between the ~A definition and the ~A definition"
       :inherits (base-string simple-string string vector simple-array
                  array sequence)
       :prototype-form (make-array 0 :element-type 'base-char))
-     #!+sb-unicode
+     #+sb-unicode
      (character-string
       :translation (vector character)
       :codes (,sb-vm:complex-character-string-widetag)
       :direct-superclasses (string)
       :inherits (string vector array sequence)
       :prototype-form (make-array 0 :element-type 'character :fill-pointer t))
-     #!+sb-unicode
+     #+sb-unicode
      (simple-character-string
       :translation (simple-array character (*))
       :codes (,sb-vm:simple-character-string-widetag)
@@ -1108,20 +1107,20 @@ between the ~A definition and the ~A definition"
       :depth 4
       :inherits (stream))
      ,@(loop for x across sb-vm:*specialized-array-element-type-properties*
-             unless (member (sb-vm::saetp-specifier x) '(t character base-char nil bit))
+             unless (member (sb-vm:saetp-specifier x) '(t character base-char nil bit))
              collect
              ;; I'm not sure if it's an accident that there are distinct SB-KERNEL
              ;; versus SB-VM symbols for the specialized arrays. The former are types
              ;; in the language, and the latter are primitive object types,
              ;; but istm they should be designated by the same symbols.
-             `(,(intern (string (sb-vm::saetp-primitive-type-name x)) *package*)
-               :translation (simple-array ,(sb-vm::saetp-specifier x) (*))
-               :codes (,(sb-vm::saetp-typecode x))
+             `(,(intern (string (sb-vm:saetp-primitive-type-name x)) *package*)
+               :translation (simple-array ,(sb-vm:saetp-specifier x) (*))
+               :codes (,(sb-vm:saetp-typecode x))
                :direct-superclasses (vector simple-array)
                :inherits (vector simple-array array sequence)
                :prototype-form
                (logically-readonlyize
-                (make-array 0 :element-type ',(sb-vm::saetp-specifier x))))))
+                (make-array 0 :element-type ',(sb-vm:saetp-specifier x))))))
   #'equal)
 
 ;;; See also src/code/class-init.lisp where we finish setting up the
@@ -1181,11 +1180,11 @@ between the ~A definition and the ~A definition"
                            -1)))
           (register-layout
            (find-and-init-or-check-layout name
-                                          0
-                                          0
-                                          inherits-vector
                                           depthoid
-                                          +layout-all-tagged+)
+                                          0 ; flags
+                                          0 ; length
+                                          +layout-all-tagged+
+                                          inherits-vector)
            :invalidate nil)))))
   (/show0 "done with loop over +!BUILT-IN-CLASSES+"))
 
@@ -1247,24 +1246,4 @@ between the ~A definition and the ~A definition"
              (error "Something strange with forward layout for ~S:~%  ~S"
                     name layout))))))
 
-(!cold-init-forms
-  (setq **built-in-class-codes**
-        (let* ((initial-element (classoid-layout (find-classoid 'random-class)))
-               (table (make-array 256 :initial-element initial-element)))
-          (dolist (x +!built-in-classes+)
-            (destructuring-bind (name &key codes &allow-other-keys)
-                                x
-              (let ((layout (classoid-layout (find-classoid name))))
-                (dolist (code codes)
-                  (setf (svref table code) layout)))))
-          (loop with layout = (aref table sb-vm:list-pointer-lowtag)
-                for i from sb-vm:list-pointer-lowtag by (* 2 sb-vm:n-word-bytes)
-                below 256
-                do (setf (aref table i) layout))
-          (loop with layout = (aref table sb-vm:even-fixnum-lowtag)
-                for i from sb-vm:even-fixnum-lowtag by (ash 1 sb-vm:n-fixnum-tag-bits)
-                below 256
-                do (setf (aref table i) layout))
-          table)))
-
 (!defun-from-collected-cold-init-forms !classes-cold-init)

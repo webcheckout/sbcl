@@ -200,7 +200,7 @@
   tn)
 
 ;;; Specify that SAVE be used as the save location for TN. TN is returned.
-#!-fp-and-pc-standard-save
+#-fp-and-pc-standard-save
 (defun specify-save-tn (tn save)
   (declare (type tn tn save))
   (aver (eq (tn-kind save) :normal))
@@ -241,7 +241,7 @@
               ;; because liveness depends on pointer tracing without looking at code-fixups.
               (when (and sc
                          (or (not immed)
-                             #!+immobile-space
+                             #+immobile-space
                              (let ((val (constant-value constant)))
                                (or (and (symbolp val) (not (sb-vm:static-symbol-p val)))
                                    (typep val 'layout)))))

@@ -11,8 +11,6 @@
 ;;;; absolutely no warranty. See the COPYING and CREDITS files for
 ;;;; more information.
 
-(in-package "CL-USER")
-
 ;;; Reported by Paul F. Dietz
 (with-test (:name (:symbol :non-simple-string-name))
   (let ((sym (make-symbol (make-array '(1) :element-type 'character
@@ -56,3 +54,14 @@
 (with-test (:name :fdefinition-no-consing
             :skipped-on :interpreter)
   (ctu:assert-no-consing (fdefinition 'list)))
+
+(with-test (:name :tree-shaker :skipped-on :sb-devel)
+  ;; Assert that even without the "!" prefix convention
+  ;; these used-only-at-cross-compile-time macros disappear.
+  (dolist (s '("DEFINE-FOP"
+               "DEFINE-TYPE-CLASS"
+               "DEFINE-TYPE-METHOD"
+               "DEF-TYPE-TRANSLATOR"
+               "DEFINE-TYPE-VOP"
+               "DEFINE-PRIMITIVE-OBJECT"))
+    (assert (not (apropos-list s)))))

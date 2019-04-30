@@ -466,13 +466,10 @@ information."
                 sb-thread:*current-thread*)
                (all-threads
                 ;; find a stack whose base is nearest and below A.
-                ;; this is likely to return a wrong answer during thread creation/deletion
-                ;; due to the 'rotate' operations which are incrementally performed
-                ;; on the binary search tree.
-                (binding* ((node (bst-find<= a sb-thread::*stack-addr-table*) :exit-if-null)
-                           (data (bst-node-data node)))
-                  (when (< a (car data))
-                    (cdr data))))))))
+                (awhen (sb-thread::avl-find<= a sb-thread::*all-threads*)
+                  (let ((thread (sb-thread::avlnode-data it)))
+                    (when (< a (sb-thread::thread-stack-end thread))
+                      thread))))))))
 
 ;;;; frame printing
 
@@ -916,8 +913,8 @@ the current thread are replaced with dummy objects which can safely escape."
     (format stream
             "debugger invoked on a ~S~@[ in thread ~_~A~]: ~2I~_~A"
             (type-of condition)
-            #!+sb-thread sb-thread:*current-thread*
-            #!-sb-thread nil
+            #+sb-thread sb-thread:*current-thread*
+            #-sb-thread nil
             condition))
   (terpri stream))
 
@@ -1031,16 +1028,16 @@ the current thread are replaced with dummy objects which can safely escape."
            (format *error-output*
                    "~&~@<Unhandled ~S~@[ in thread ~S~]: ~2I~_~A~:>~2%"
                    (type-of condition)
-                   #!+sb-thread sb-thread:*current-thread*
-                   #!-sb-thread nil
+                   #+sb-thread sb-thread:*current-thread*
+                   #-sb-thread nil
                    condition)
            (finish-output *error-output*))
          (describe-condition ()
            (format *error-output*
                    "~&Unhandled ~S~@[ in thread ~S~]:~%"
                    (type-of condition)
-                   #!+sb-thread sb-thread:*current-thread*
-                   #!-sb-thread nil)
+                   #+sb-thread sb-thread:*current-thread*
+                   #-sb-thread nil)
            (describe condition *error-output*)
            (finish-output *error-output*))
          (display-backtrace ()
@@ -1639,7 +1636,7 @@ forms that explicitly control this kind of evaluation.")
   (show-restarts *debug-restarts* *debug-io*))
 
 (!def-debug-command "BACKTRACE" ()
- (print-backtrace :count (read-if-available most-positive-fixnum)))
+ (print-backtrace :count (read-if-available sb-xc:most-positive-fixnum)))
 
 (!def-debug-command "PRINT" ()
   (print-frame-call *current-frame* *debug-io*))
@@ -1648,7 +1645,7 @@ forms that explicitly control this kind of evaluation.")
 
 (!def-debug-command "LIST-LOCALS" ()
   (let ((d-fun (frame-debug-fun *current-frame*)))
-    #!+sb-fasteval
+    #+sb-fasteval
     (when (typep (debug-fun-name d-fun nil)
                  '(cons (eql sb-interpreter::.eval.)))
       (let ((env (arg 1)))
@@ -1774,13 +1771,12 @@ forms that explicitly control this kind of evaluation.")
 ;;; RETURN-FROM-FRAME and RESTART-FRAME
 
 (defun unwind-to-frame-and-call (frame thunk)
-  #!+unwind-to-frame-and-call-vop
+  #+unwind-to-frame-and-call-vop
   (flet ((sap-int/fixnum (sap)
            ;; On unithreaded X86 *BINDING-STACK-POINTER* and
            ;; *CURRENT-CATCH-BLOCK* are negative, so we need to jump through
            ;; some hoops to make these calculated values negative too.
-           (ash (truly-the (signed-byte #.sb-vm:n-word-bits)
-                           (sap-int sap))
+           (ash (truly-the sb-vm:signed-word (sap-int sap))
                 (- sb-vm::n-fixnum-tag-bits))))
     ;; To properly unwind the stack, we need three pieces of information:
     ;;   * The unwind block that should be active after the unwind
@@ -1794,7 +1790,7 @@ forms that explicitly control this kind of evaluation.")
       (sb-vm::%primitive sb-vm::unwind-to-frame-and-call
                          (sb-di::frame-pointer frame)
                          (find-enclosing-uwp frame)
-                         #!-x86-64
+                         #-x86-64
                          (lambda ()
                            ;; Before calling the user-specified
                            ;; function, we need to restore the binding
@@ -1804,17 +1800,17 @@ forms that explicitly control this kind of evaluation.")
                                               unbind-to)
                            (setf sb-vm::*current-catch-block* catch-block)
                            (funcall thunk))
-                         #!+x86-64 thunk
-                         #!+x86-64 unbind-to
-                         #!+x86-64 catch-block)))
-  #!-unwind-to-frame-and-call-vop
+                         #+x86-64 thunk
+                         #+x86-64 unbind-to
+                         #+x86-64 catch-block)))
+  #-unwind-to-frame-and-call-vop
   (let ((tag (gensym)))
     (replace-frame-catch-tag frame
                                    'sb-c:debug-catch-tag
                                    tag)
     (throw tag thunk)))
 
-#!+unwind-to-frame-and-call-vop
+#+unwind-to-frame-and-call-vop
 (defun find-binding-stack-pointer (frame)
   (let ((debug-fun (frame-debug-fun frame)))
     (if (eq (debug-fun-kind debug-fun) :external)
@@ -1843,9 +1839,9 @@ forms that explicitly control this kind of evaluation.")
                                                   (* sb-vm:catch-block-previous-catch-slot
                                                      sb-vm::n-word-bytes))
                                 when (or (zerop (sap-int block))
-                                         #!+stack-grows-downward-not-upward
+                                         #+stack-grows-downward-not-upward
                                          (sap> block frame-pointer)
-                                         #!-stack-grows-downward-not-upward
+                                         #-stack-grows-downward-not-upward
                                          (sap< block frame-pointer))
                                 return block)))
     enclosing-block))
@@ -1861,9 +1857,9 @@ forms that explicitly control this kind of evaluation.")
                               then (sap-ref-sap uwp-block
                                                 sb-vm:unwind-block-uwp-slot)
                               when (or (zerop (sap-int uwp-block))
-                                       #!+stack-grows-downward-not-upward
+                                       #+stack-grows-downward-not-upward
                                        (sap> uwp-block frame-pointer)
-                                       #!-stack-grows-downward-not-upward
+                                       #-stack-grows-downward-not-upward
                                        (sap< uwp-block frame-pointer))
                               return uwp-block)))
     enclosing-uwp))
@@ -1914,10 +1910,10 @@ forms that explicitly control this kind of evaluation.")
               *current-frame*)))
 
 (defun frame-has-debug-tag-p (frame)
-  #!+unwind-to-frame-and-call-vop
+  #+unwind-to-frame-and-call-vop
   ;; XEPs do not bind anything, nothing to restore
   (find-binding-stack-pointer frame)
-  #!-unwind-to-frame-and-call-vop
+  #-unwind-to-frame-and-call-vop
   (find 'sb-c:debug-catch-tag (sb-di::frame-catches frame) :key #'car))
 
 (defun frame-has-debug-vars-p (frame)

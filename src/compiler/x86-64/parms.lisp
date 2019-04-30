@@ -29,7 +29,7 @@
 ;;; useless in SBCL, since it's possible for otherwise binary
 ;;; compatible systems to return different values for getpagesize().
 ;;; -- JES, 2007-01-06
-(defconstant +backend-page-bytes+ #!+win32 65536 #!-win32 32768)
+(defconstant +backend-page-bytes+ #+win32 65536 #-win32 32768)
 
 ;;; The size in bytes of GENCGC cards, i.e. the granularity at which
 ;;; writes to old generations are logged.  With mprotect-based write
@@ -79,7 +79,6 @@
 (defconstant single-float-normal-exponent-min 1)
 (defconstant single-float-normal-exponent-max 254)
 (defconstant single-float-hidden-bit (ash 1 23))
-(defconstant single-float-trapping-nan-bit (ash 1 22))
 
 (defconstant double-float-bias 1022)
 (defconstant-eqx double-float-exponent-byte    (byte 11 20) #'equalp)
@@ -87,7 +86,6 @@
 (defconstant double-float-normal-exponent-min 1)
 (defconstant double-float-normal-exponent-max #x7FE)
 (defconstant double-float-hidden-bit (ash 1 20))
-(defconstant double-float-trapping-nan-bit (ash 1 19))
 
 (defconstant single-float-digits
   (+ (byte-size single-float-significand-byte) 1))
@@ -126,7 +124,7 @@
 ;;; would be possible, but probably not worth the time and code bloat
 ;;; it would cause. -- JES, 2005-12-11
 
-#!+linux
+#+linux
 (!gencgc-space-setup #x50000000
                      :fixedobj-space-size #.(* 30 1024 1024)
                      :varyobj-space-size #.(* 130 1024 1024)
@@ -135,10 +133,10 @@
 ;;; The default dynamic space size is lower on OpenBSD to allow SBCL to
 ;;; run under the default 512M data size limit.
 
-#!-linux
+#-linux
 (!gencgc-space-setup #x20000000
                      :dynamic-space-start #x1000000000
-                     #!+openbsd :dynamic-space-size #!+openbsd #x1bcf0000)
+                     #+openbsd :dynamic-space-size #+openbsd #x1bcf0000)
 
 (defconstant linkage-table-entry-size 16)
 
@@ -153,8 +151,8 @@
   single-step-before-trap
   invalid-arg-count-trap
   memory-fault-emulation-trap
-  #!+sb-safepoint global-safepoint-trap
-  #!+sb-safepoint csp-safepoint-trap
+  #+sb-safepoint global-safepoint-trap
+  #+sb-safepoint csp-safepoint-trap
   error-trap)
 
 ;;;; static symbols
@@ -174,15 +172,15 @@
 
 (defconstant-eqx +static-symbols+
  `#(,@+common-static-symbols+
-    #!+(and immobile-space (not sb-thread)) function-layout
-    #!-sb-thread *alien-stack-pointer*    ; a thread slot if #!+sb-thread
+    #+(and immobile-space (not sb-thread)) function-layout
+    #-sb-thread *alien-stack-pointer*    ; a thread slot if #+sb-thread
      ;; interrupt handling
-    #!-sb-thread *pseudo-atomic-bits*     ; ditto
-    #!-sb-thread *binding-stack-pointer* ; ditto
+    #-sb-thread *pseudo-atomic-bits*     ; ditto
+    #-sb-thread *binding-stack-pointer* ; ditto
     *cpuid-fn1-ecx*)
   #'equalp)
 
-;;; FIXME: with #!+immobile-space, this should be the empty list,
+;;; FIXME: with #+immobile-space, this should be the empty list,
 ;;; because *all* fdefns are permanently placed.
 (defconstant-eqx +static-fdefns+
   #(length
@@ -203,5 +201,5 @@
     %coerce-callable-to-fun)
   #'equalp)
 
-#!+sb-simd-pack
+#+sb-simd-pack
 (defglobal *simd-pack-element-types* '(integer single-float double-float))
