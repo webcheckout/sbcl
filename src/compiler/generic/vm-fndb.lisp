@@ -240,7 +240,8 @@
 ;;; Allocate an unboxed, non-fancy vector with type code TYPE, length LENGTH,
 ;;; and WORDS words long. Note: it is your responsibility to ensure that the
 ;;; relation between LENGTH and WORDS is correct.
-(defknown allocate-vector ((unsigned-byte 8) index
+;;; The extra bit beyond N_WIDETAG_BITS is for the vector weakness flag.
+(defknown allocate-vector ((unsigned-byte 9) index
                            ;; The number of words is later converted
                            ;; to bytes, make sure it fits.
                            (and index
@@ -565,8 +566,11 @@
   (movable foldable flushable))
 
 #+64-bit
+(progn
+(defknown %make-double-float ((signed-byte 64)) double-float
+  (movable flushable))
 (defknown double-float-bits (double-float) (signed-byte 64)
-  (movable foldable flushable))
+  (movable foldable flushable)))
 
 (defknown double-float-high-bits (double-float) (signed-byte 32)
   (movable foldable flushable))

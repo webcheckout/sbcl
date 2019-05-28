@@ -114,7 +114,8 @@
 
 (defun maybe-defined-here (name where)
   (if (and (eq :defined where)
-           (member name *fun-names-in-this-file* :test #'equal))
+           (boundp '*compilation*)
+           (member name (fun-names-in-this-file *compilation*) :test #'equal))
       :defined-here
       where))
 
@@ -927,7 +928,7 @@
 ;;; ctran. Otherwise insert code coverage instrumentation after
 ;;; START, and return the new ctran.
 (defun instrument-coverage (start mode form
-                            &aux (metadata *compiler-coverage-metadata*))
+                            &aux (metadata (coverage-metadata *compilation*)))
   ;; We don't actually use FORM for anything, it's just convenient to
   ;; have around when debugging the instrumentation.
   (declare (ignore form))

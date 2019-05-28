@@ -261,11 +261,12 @@
   (:result-types positive-fixnum)
   (:generator 4
     (loadw temp struct 0 instance-pointer-lowtag)
+    #-64-bit
     (inst srli res temp n-widetag-bits)
     #+64-bit
-    (progn
-      (inst li temp short-header-max-words)
-      (inst and res res temp))))
+    (let ((n-length-bits (integer-length short-header-max-words)))
+      (inst slli temp temp (- n-word-bits n-length-bits n-widetag-bits))
+      (inst srli res temp (- n-word-bits n-length-bits)))))
 
 (define-full-reffer instance-index-ref * instance-slots-offset
   instance-pointer-lowtag (descriptor-reg any-reg) * %instance-ref)
@@ -311,6 +312,6 @@
                    instance-pointer-lowtag (,value-sc) ,value-primtype nil "raw instance store"
                    ,(symbolicate "%" set-vop))))))
   (define-raw-slot-float-vops single single-float single-reg 4 :single)
-  (define-raw-slot-float-vops double double-float double-reg 4 :single)
-  (define-raw-slot-float-vops complex-single complex-single-float complex-single-reg 8 :double t)
+  (define-raw-slot-float-vops double double-float double-reg 8 :double)
+  (define-raw-slot-float-vops complex-single complex-single-float complex-single-reg 4 :single t)
   (define-raw-slot-float-vops complex-double complex-double-float complex-double-reg 8 :double t))

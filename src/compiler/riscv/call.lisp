@@ -650,7 +650,7 @@
                       (inst beq stepping zero-tn STEP-DONE-LABEL)
                       ;; CONTEXT-PC will be pointing here when the
                       ;; interrupt is handled, not after the EBREAK.
-                      (note-this-location vop :step-before-vop)
+                      (note-this-location vop :internal-error)
                       (inst ebreak single-step-around-trap)
                       (inst byte (tn-offset callable-tn))
                       (emit-alignment 2)
@@ -1048,8 +1048,8 @@
         (inst bne count zero-tn loop)
 
         ;; NIL out the last cons.
-        (storew null-tn dst 1 list-pointer-lowtag)
-        (emit-label done)))))
+        (storew null-tn dst 1 list-pointer-lowtag))
+      (emit-label done))))
 
 ;;; Return the location and size of the more arg glob created by Copy-More-Arg.
 ;;; Supplied is the total number of arguments supplied (originally passed in
@@ -1117,7 +1117,7 @@
     (inst beq stepping zero-tn DONE)
     ;; CONTEXT-PC will be pointing here when the interrupt is handled,
     ;; not after the EBREAK.
-    (note-this-location vop :step-before-vop)
+    (note-this-location vop :internal-error)
     ;; CALLEE-REGISTER-OFFSET isn't needed for before-traps, so we
     ;; can just use a bare SINGLE-STEP-BEFORE-TRAP as the code.
     (inst ebreak single-step-before-trap)

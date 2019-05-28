@@ -257,9 +257,10 @@
 
 (defun report-test-status ()
   (with-standard-io-syntax
-      (with-open-file (stream "test-status.lisp-expr"
-                              :direction :output
-                              :if-exists :supersede)
+    (with-open-file (stream #.(merge-pathnames "test-status.lisp-expr"
+                                               *load-pathname*)
+                            :direction :output
+                            :if-exists :supersede)
         (format stream "~s~%" *failures*))))
 
 (defun start-test ()
@@ -855,8 +856,8 @@
               (if dir
                   (namestring
                    (merge-pathnames
-                    file (parse-native-namestring dir nil *default-pathname-defaults*
-                                                  :as-directory t)))
+                    file (truename (parse-native-namestring dir nil *default-pathname-defaults*
+                                                            :as-directory t))))
                   (concatenate 'string "/tmp/" file)))))
 
 (defmacro with-scratch-file ((var &optional extension) &body forms)

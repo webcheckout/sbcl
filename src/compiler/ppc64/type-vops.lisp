@@ -154,7 +154,7 @@
               (values target not-target))
         ;; Is it a fixnum?
         (inst andi. temp value fixnum-tag-mask)
-        (inst cmpwi :cr1 value 0) ; is this really necessary?
+        (inst cmpdi :cr1 value 0)
         (inst beq fixnum)
 
         ;; If not, is it an other pointer?
@@ -169,7 +169,7 @@
         (inst bne nope)
         ;; Get the second digit.
         (loadw temp value (1+ bignum-digits-offset) other-pointer-lowtag)
-        ;; All zeros, its an (unsigned-byte 32).
+        ;; All zeros, its an (unsigned-byte 64).
         (inst cmpdi temp 0)
         (inst beq yep)
         ;; Otherwise, it isn't.
