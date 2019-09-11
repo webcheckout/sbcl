@@ -12,6 +12,16 @@
 
 (in-package "SB-C")
 
+;;; Because we unobviously run transforms in the reverse order of definition,
+;;; these must be the first transforms defined so that they become the last
+;;; transforms attempted, with INTEGER taking precedence over NUMBER.
+;;; I once tried to fix that glitch by using APPEND instead of PUSH into
+;;; FUN-INFO-TRANSFORMS, and of course it broke things because we depend on such
+;;; stupidity. It would be easily remedied by reversing all definitions whenever
+;;; it matters but I didn't feel like figuring out all places where it does.
+(deftransform sxhash ((x) (number)) `(sb-impl::number-sxhash x))
+(deftransform sxhash ((x) (integer)) `(sb-impl::integer-sxhash x))
+
 ;;; Note about signed zeros with respect to SXHASH (but not PSXHASH!) -
 
 ;;; Change b0a51fec91 added some logic to discard the sign of floating-point zeros
@@ -100,10 +110,9 @@
 (defglobal +sxhash-single-float-expr+
   `(let ((bits (logand (single-float-bits x) ,(1- (ash 1 32)))))
      (logxor 66194023
-             (sxhash (the fixnum
+             (sxhash (the sb-xc:fixnum
                           (logand sb-xc:most-positive-fixnum
-                                  (logxor bits
-                                          (ash bits -7))))))))
+                                  (logxor bits (ash bits -7))))))))
 (deftransform sxhash ((x) (single-float)) '#.+sxhash-single-float-expr+)
 
 #-64-bit
@@ -215,8 +224,8 @@
   (defvar *sxhash-crosscheck* nil)
   (defun sxhash (x)
     (let ((answer (etypecase x ; croak on anything but these
-                    (null         (ash sb-vm::nil-value (- sb-vm:n-fixnum-tag-bits)))
-                    (fixnum       #.+sxhash-fixnum-expr+)
+                    (null         (ash sb-vm:nil-value (- sb-vm:n-fixnum-tag-bits)))
+                    (sb-xc:fixnum #.+sxhash-fixnum-expr+)
                     (single-float #.+sxhash-single-float-expr+)
                     (double-float #.+sxhash-double-float-expr+))))
       (push (cons x answer) *sxhash-crosscheck*)

@@ -206,14 +206,15 @@
                   :skipped-on (not (and :x86-64 :immobile-space)))
   (let ((addr-of-pathname-layout
          (write-to-string
-          (sb-kernel:get-lisp-obj-address (sb-kernel:find-layout 'pathname))
+          (sb-kernel:get-lisp-obj-address
+           (sb-kernel:find-layout 'hash-table))
           :base 16 :radix t))
         (count 0))
     ;; The constant should appear in two CMP instructions
     (dolist (line (split-string
                    (with-output-to-string (s)
                      (let ((sb-disassem:*disassem-location-column-width* 0))
-                       (disassemble 'pathnamep :stream s)))
+                       (disassemble 'hash-table-p :stream s)))
                    #\newline))
       (when (and (search "CMP" line) (search addr-of-pathname-layout line))
         (incf count)))
@@ -2290,4 +2291,161 @@
       `(lambda (a)
          (let ((v4 (the (or (single-float (1.0) (3.0)) (single-float 4.0 5.0)) a)))
            (incf v4 1.0)))
-    ((4.0) 5.0)))
+      ((4.0) 5.0)))
+
+(with-test (:name :derive-array-rank-negation)
+  (checked-compile-and-assert
+   ()
+   `(lambda (a)
+      (declare ((not (simple-array * (* *))) a))
+      (eql (array-rank a) 2))
+   (((make-array '(2 2) :adjustable t)) t))
+  (checked-compile-and-assert
+   ()
+   `(lambda (a)
+      (declare ((not (simple-array fixnum (* *))) a))
+      (eql (array-rank a) 2))
+   (((make-array '(2 2))) t))
+  (checked-compile-and-assert
+   ()
+   `(lambda (a)
+      (declare ((not (and (array * (* *)) (not simple-array))) a))
+      (eql (array-rank a) 2))
+   (((make-array '(2 2))) t)))
+
+(with-test (:name :derive-array-rank-negation.2)
+  (assert
+   (equal (sb-kernel:%simple-fun-type
+           (checked-compile
+            '(lambda (x)
+              (declare ((and simple-array
+                         (not (simple-array * (* *))))
+                        x))
+              (eql (array-rank x) 2))))
+          '(function ((and simple-array (not (simple-array * (* *)))))
+            (values null &optional)))))
+
+(with-test (:name :known-fun-no-fdefn)
+  (assert (not (ctu:find-named-callees
+                (checked-compile
+                 '(lambda () #'+))))))
+
+(with-test (:name :double-float-p-weakening)
+  (checked-compile-and-assert
+   (:optimize '(:speed 3 :safety 1))
+   '(lambda (x)
+     (declare (double-float x))
+     x)
+   ((0.0) (condition 'type-error))
+      ((1d0) 1d0)))
+
+#+sb-unicode
+(with-test (:name :base-char-p-constraint-propagation)
+  (assert
+   (equal (sb-kernel:%simple-fun-type
+           (checked-compile
+            '(lambda (x)
+              (if (sb-kernel:base-char-p x)
+                  (characterp x)
+                  t))))
+          '(function (t) (values (member t) &optional)))))
+
+(declaim (inline inline-fun-arg-mismatch))
+(defun inline-fun-arg-mismatch (x)
+  (declare (optimize (debug 0)))
+  x)
+
+(with-test (:name :inline-fun-arg-mismatch)
+  (checked-compile-and-assert
+      (:allow-warnings '(or sb-int:local-argument-mismatch
+                         #+interpreter simple-warning)) ;; why?
+      '(lambda ()
+        (multiple-value-call #'inline-fun-arg-mismatch 1 2))
+    (() (condition 'program-error))))
+
+(with-test (:name :principal-lvar-ref-use-loop)
+  (checked-compile-and-assert ()
+   '(lambda (vector)
+     (labels ((f (count)
+                (when (< (aref vector 0) count)
+                  (f count))))))
+   ((1) nil)))
+
+(with-test (:name (:mv-call :more-arg))
+  (checked-compile-and-assert
+   ()
+   '(lambda (&rest rest)
+     (multiple-value-bind (a b c) (values-list rest)
+       (declare (ignore c))
+       (list a b)))
+   ((1 3) '(1 3) :test #'equal)))
+
+(with-test (:name (:mv-call :more-arg-unused)
+            ;; needs SB-VM::MORE-ARG-OR-NIL VOP
+            :broken-on (not (or :x86-64 :x86 :ppc :arm :arm64 :riscv)))
+  (checked-compile-and-assert
+   ()
+   '(lambda (&rest rest)
+     (multiple-value-bind (a b) (values-list rest)
+       (list a b)))
+   (() '(nil nil) :test #'equal)
+   ((1) '(1 nil) :test #'equal)
+   ((1 3) '(1 3) :test #'equal)))
+
+(with-test (:name :truncate-deriver-on-number-type)
+  (checked-compile-and-assert
+   ()
+   '(lambda (i)
+     (truncate
+      (labels ((f (&optional (o i))
+                 (declare (ignore o))
+                 (complex 0 0)))
+        (declare (dynamic-extent (function f)))
+        (the integer
+             (multiple-value-call #'f (values))))
+      3))
+   ((0) (values 0 0))))
+
+(with-test (:name :signum-type-deriver)
+  (checked-compile-and-assert
+   ()
+   '(lambda (n)
+     (typep (signum n) 'complex))
+   ((#C(1 2)) t)
+   ((1d0) nil)
+   ((10) nil)))
+
+(with-test (:name :array-header-p-derivation)
+  (checked-compile-and-assert
+   ()
+   '(lambda (q)
+     (and (typep q '(not simple-array))
+      (sb-kernel:array-header-p q)))
+   ((10) nil)
+   (((make-array 10 :adjustable t)) t)))
+
+(with-test (:name :phase-type-derivation)
+  (checked-compile-and-assert
+   ()
+   '(lambda (x)
+     (= (phase (the (integer -1 0) x))
+      (coerce pi 'single-float)))
+   ((-1) t)
+   ((0) nil)))
+
+(with-test (:name :maybe-negate-check-fun-type)
+  (checked-compile-and-assert
+   ()
+   '(lambda (m)
+     (declare ((or (function (number)) (eql #.#'symbolp)) m))
+     (the (member 3/4 4/5 1/2 #.#'symbolp) m))
+   ((#'symbolp) #'symbolp)))
+
+(with-test (:name :lvar-fun-type-on-literal-funs)
+  (checked-compile-and-assert
+   ()
+   `(lambda (p)
+      (declare (type (or null string) p))
+      (locally (declare (optimize (space 0)))
+        (stable-sort p ,#'string<)))
+   (((copy-seq "acb")) "abc" :test #'equal)))

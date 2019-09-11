@@ -37,7 +37,7 @@
   (:import-from "SB-X86-64-ASM" #:near-jump-displacement #:mov #:|call|)
   (:import-from "SB-IMPL" #:package-hashtable #:package-%name
                 #:package-hashtable-cells
-                #:hash-table-table #:hash-table-number-entries))
+                #:hash-table-pairs #:hash-table-%count))
 
 (in-package "SB-EDITCORE")
 
@@ -309,6 +309,23 @@
 (defun fun-name-from-core (name core)
   (remove-name-junk (%fun-name-from-core name core)))
 
+;;; A problem: COMPILED-DEBUG-FUN-ENCODED-LOCS (a packed integer) might be a
+;;; bignum - in fact probably is. If so, it points into the target core.
+;;; So we have to produce a new instance with an ENCODED-LOCS that
+;;; is the translation of the bignum, and call the accessor on that.
+;;; The accessors for its sub-fields are abstract - we don't know where the
+;;; fields are so we can't otherwise unpack them. (See CDF-DECODE-LOCS if
+;;; you really need to know)
+(defun cdf-offset (compiled-debug-fun spaces)
+  ;; (Note that on precisely GC'd platforms, this operation is dangerous,
+  ;; but no more so than everything else in this file)
+  (let ((locs (sb-c::compiled-debug-fun-encoded-locs compiled-debug-fun)))
+    (sb-c::compiled-debug-fun-offset
+     (if (fixnump locs)
+         compiled-debug-fun
+         (sb-c::make-compiled-debug-fun
+          :name nil :encoded-locs (translate locs spaces))))))
+
 ;;; Return a list of ((NAME START . END) ...)
 ;;; for each C symbol that should be emitted for this code object.
 ;;; Start and and are relative to the object's base address,
@@ -331,7 +348,7 @@
              (next (when (%instancep (sb-c::compiled-debug-fun-next cdf))
                      (translate (sb-c::compiled-debug-fun-next cdf) spaces)))
              (end-pc (if next
-                         (+ header-bytes (sb-c::compiled-debug-fun-offset next))
+                         (+ header-bytes (cdf-offset next spaces))
                          (code-object-size code))))
         (unless (= end-pc start-pc)
           ;; Collapse adjacent address ranges named the same.
@@ -358,9 +375,9 @@
 
 (defun target-hash-table-alist (table spaces)
   (let ((table (truly-the hash-table (translate table spaces))))
-    (let ((cells (the simple-vector (translate (hash-table-table table) spaces))))
+    (let ((cells (the simple-vector (translate (hash-table-pairs table) spaces))))
       (collect ((pairs))
-        (do ((count (hash-table-number-entries table) (1- count))
+        (do ((count (hash-table-%count table) (1- count))
              (i 2 (+ i 2)))
             ((zerop count)
              (pairs))
@@ -733,7 +750,7 @@
         (let* ((next (when (%instancep (sb-c::compiled-debug-fun-next cdf))
                        (translate (sb-c::compiled-debug-fun-next cdf) spaces)))
                (end-pc (if next
-                           (sb-c::compiled-debug-fun-offset next)
+                           (cdf-offset next spaces)
                            (%code-text-size code))))
           (cond
             ((= start-pc end-pc)) ; crazy shiat. do not add to blobs
@@ -786,10 +803,10 @@
     (loop
       (destructuring-bind (start . end) (pop ranges)
         (setq max-end end)
-        (funcall dumpwords (+ text start) simple-fun-code-offset output
-                 #(nil #.(format nil ".+~D" (* (1- simple-fun-code-offset)
+        (funcall dumpwords (+ text start) simple-fun-insts-offset output
+                 #(nil #.(format nil ".+~D" (* (1- simple-fun-insts-offset)
                                              n-word-bytes))))
-        (incf start (* simple-fun-code-offset n-word-bytes))
+        (incf start (* simple-fun-insts-offset n-word-bytes))
         ;; Pass the current physical address at which to disassemble,
         ;; the notional core address (which changes after linker relocation),
         ;; and the length.
@@ -1012,16 +1029,19 @@
            (format output "~a: # ~x~% .size ~0@*~a, 32~%"
                      (c-symbol-quote c-name)
                      (logior code-addr other-pointer-lowtag))
-           (format output " .quad 0x~x, 0x~x, ~:[~;CS+~]0x~x, 0x~x~%"
+           (format output " .quad 0x~x, 0x~x, ~:[~;CS+~]0x~x, ~:[~;CS+~]0x~x~%"
                    (sap-ref-word (int-sap ptr) 0)
                    (sap-ref-word (int-sap ptr) 8)
-                   code-space-p (if code-space-p (- fun (bounds-low code-bounds)) fun)
-                   raw-fun)
+                   code-space-p
+                   (if code-space-p (- fun (bounds-low code-bounds)) fun)
+                   code-space-p
+                   (if code-space-p (- raw-fun (bounds-low code-bounds)) raw-fun))
            (incf code-addr (* 4 n-word-bytes))))
         (#.funcallable-instance-widetag
          (unless seen-gfs
            (setq seen-gfs t)
-           (format output " .size lisp_trampolines, .-lisp_trampolines~%"))
+           (when seen-trampolines
+             (format output " .size lisp_trampolines, .-lisp_trampolines~%")))
          (let* ((sap (int-sap (translate-ptr code-addr spaces)))
                 (fin-fun (sap-ref-word sap (ash 2 word-shift)))
                 (code-space-p (in-bounds-p fin-fun code-bounds))
@@ -1356,18 +1376,6 @@
            (vector-push-extend `(,(+ core-header-size core-offs)
                                  ,(- referent code-start) . ,R_X86_64_32)
                                fixups))
-         (rel-fixup (core-offs referent addend)
-           (aver (not pie))
-           (incf n-rel)
-           (when print
-             (format t "~x = 0x~(~x~): (r)~%" core-offs (core-to-logical core-offs) #+nil referent))
-           (touch-core-page core-offs)
-           (setf (sap-ref-32 (car spaces) core-offs) 0)
-           (vector-push-extend `(,(+ core-header-size core-offs)
-                                 ;; Emitted as signed absolute plus addend,
-                                 ;; since the originating PC is known.
-                                 ,(+ (- referent code-start) addend) . ,R_X86_64_32S)
-                               fixups))
          (touch-core-page (core-offs)
            ;; use the OS page size, not +backend-page-bytes+
            (setf (gethash (floor core-offs 4096) affected-pages) t))
@@ -1388,7 +1396,7 @@
                  (return (+ (space-addr space)
                             (* (- page page0) +backend-page-bytes+)
                             (logand core-offs (1- +backend-page-bytes+))))))))
-         (scanptrs (vaddr obj wordindex-min wordindex-max &aux (n-fixups 0))
+         (scanptrs (vaddr obj wordindex-min wordindex-max &optional force &aux (n-fixups 0))
            (do* ((base-addr (logandc2 (get-lisp-obj-address obj) lowtag-mask))
                  (sap (int-sap base-addr))
                  ;; core-offs is the offset in the lisp.core ELF section.
@@ -1397,7 +1405,7 @@
                 ((> i wordindex-max) n-fixups)
              (let* ((byte-offs (ash i word-shift))
                     (ptr (sap-ref-word sap byte-offs)))
-               (when (and (is-lisp-pointer ptr) (in-bounds-p ptr code-bounds))
+               (when (and (or (is-lisp-pointer ptr) force) (in-bounds-p ptr code-bounds))
                  (abs-fixup (+ vaddr byte-offs) (+ core-offs byte-offs) ptr)
                  (incf n-fixups)))))
          (scanptr (vaddr obj wordindex)
@@ -1421,7 +1429,7 @@
               (return-from scan-obj))
              (#.simple-vector-widetag
               (let ((len (length (the simple-vector obj))))
-                (when (eql (logand (get-header-data obj) #xFF) vector-valid-hashing-subtype)
+                (when (eql (logand (get-header-data obj) #xFF) vector-addr-hashing-subtype)
                   (do ((i 2 (+ i 2)) (needs-rehash))
                       ((= i len)
                        (when needs-rehash
@@ -1437,19 +1445,7 @@
                 (setq nwords (+ len 2))))
              (#.fdefn-widetag
               (scanptrs vaddr obj 1 2)
-              (let* ((fdefn-pc-sap ; where to read to access the rel32 operand
-                      (int-sap (+ (- (get-lisp-obj-address obj) other-pointer-lowtag)
-                                  (ash fdefn-raw-addr-slot word-shift))))
-                     ;; what the fdefn's logical PC will be
-                     (fdefn-logical-pc (+ vaddr (ash fdefn-raw-addr-slot word-shift)))
-                     (rel32off (signed-sap-ref-32 fdefn-pc-sap 1))
-                     (next-pc (+ fdefn-logical-pc 5))
-                     (target (+ next-pc rel32off)))
-                (when (in-bounds-p target code-bounds)
-                  ;; This addend needs to account for the fact that the location
-                  ;; where fixup occurs is not where the fdefn will actually exist.
-                  (rel-fixup (+ core-offs (ash 3 word-shift) 1)
-                             target (- next-pc))))
+              (scanptrs vaddr obj 3 3 t)
               (return-from scan-obj))
              ((#.closure-widetag #.funcallable-instance-widetag)
               ;; read the trampoline slot

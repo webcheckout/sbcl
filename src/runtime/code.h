@@ -13,7 +13,7 @@
 #define _CODE_H_
 
 #include "genesis/code.h"
-#include "gc-internal.h" // for gc_assert()
+#include "gc-assert.h"
 
 static inline int code_total_nwords(struct code* c) {
 #ifdef LISP_FEATURE_64_BIT
@@ -76,6 +76,9 @@ static inline int code_text_size(struct code* c) {
     return N_WORD_BYTES * code_total_nwords(c) - code_boxed_len(c) - code_trailer_len(c);
 }
 
+// How many elements in 'code->constants[]' are taken by each simple-fun
+#define CODE_SLOTS_PER_SIMPLE_FUN 4
+
 // Iterate over the native pointers to each function in 'code_var'
 // offsets are stored as the number of bytes into the instructions
 // portion of the code object at which the simple-fun object resides.
@@ -106,6 +109,24 @@ static inline int instruction_ptr_p(char *pointer, lispobj *start_addr)
 {
     return widetag_of(start_addr) == CODE_HEADER_WIDETAG &&
            pointer >= code_text_start((struct code*)start_addr);
+}
+
+/// Maximum number of word backwards from a simple-fun
+/// to its containing code component - corresponds to ~128MB.
+/// The limit exists so that we can store the layout pointer
+/// in the header of any callable object if N_WORD_BITS = 64.
+/// This is not technically a restriction on the code size.
+#define FUN_HEADER_NWORDS_MASK 0xFFFFFF
+
+static inline lispobj* FUNCTION(lispobj obj) {
+  return (lispobj*)(obj - FUN_POINTER_LOWTAG);
+}
+
+static inline lispobj* fun_code_header(lispobj* fun) {
+    return fun - (HeaderValue(*fun) & FUN_HEADER_NWORDS_MASK);
+}
+static inline lispobj fun_code_tagged(lispobj* fun) {
+    return make_lispobj(fun_code_header(fun), OTHER_POINTER_LOWTAG);
 }
 
 #endif

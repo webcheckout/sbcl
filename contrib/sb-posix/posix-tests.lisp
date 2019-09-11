@@ -811,6 +811,22 @@
     (equal (sb-unix::posix-getcwd) (sb-posix:getcwd))
   t)
 
+(defun parse-native-namestring (namestring &key as-directory)
+  ;; XXXXXX can contain a dot changing pathname-type
+  (let ((parsed (sb-ext:parse-native-namestring namestring nil
+                                                *default-pathname-defaults*
+                                                :as-directory as-directory)))
+    (if as-directory
+        parsed
+        (let* ((name (pathname-name parsed))
+               (type (pathname-type parsed))
+               (dot (position #\. name)))
+          (if dot
+              (make-pathname :name (subseq name 0 dot)
+                             :type (format nil "~a.~a" (subseq name (1+ dot)) type)
+                             :defaults parsed)
+              parsed)))))
+
 #-win32
 (deftest mkstemp.1
     (multiple-value-bind (fd temp)
@@ -818,7 +834,7 @@
                            :name "mkstemp-1"
                            :type "XXXXXX"
                            :defaults *test-directory*))
-      (let ((pathname (sb-ext:parse-native-namestring temp)))
+      (let ((pathname (parse-native-namestring temp)))
         (unwind-protect
              (values (integerp fd) (pathname-name pathname))
           (delete-file temp))))
@@ -830,13 +846,11 @@
 ;;; But it is implemented on OpenSolaris 2008.11
 (deftest mkdtemp.1
     (let ((pathname
-           (sb-ext:parse-native-namestring
+           (parse-native-namestring
             (sb-posix:mkdtemp (make-pathname
                                :name "mkdtemp-1"
                                :type "XXXXXX"
                                :defaults *test-directory*))
-            nil
-            *default-pathname-defaults*
             :as-directory t)))
       (unwind-protect
            (values (let* ((xxx (car (last (pathname-directory pathname))))
@@ -849,7 +863,7 @@
 
 #-win32
 (deftest mktemp.1
-    (let ((pathname (sb-ext:parse-native-namestring
+    (let ((pathname (parse-native-namestring
                      (sb-posix:mktemp #p"mktemp.XXXXXX"))))
       (values (equal "mktemp" (pathname-name pathname))
               (not (equal "XXXXXX" (pathname-type pathname)))))

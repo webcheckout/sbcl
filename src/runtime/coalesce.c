@@ -140,19 +140,20 @@ static void coalesce_obj(lispobj* where, struct hopscotch_table* ht)
  * (4) fullcgc's trace_object()
  * (5) coreparse's relocate_space()
  * (6) traceroot's find_ref() and build_refs() which itself has two modes
- * (7) cheneygc's print_garbage()
+ * (7) sanity_check_loaded_core() which is quite possibly the prettiest yet
  * (8) purify()
  * (9) coalesce_range()
  * plus the Lisp variant:
  * (10) do-referenced-object which thank goodness is common to 2 uses
  * and if you want to count 'print.c' as another, there's that.
+ * There's also cheneygc's print_garbage() which uses the dispatch tables.
  */
 
 static uword_t coalesce_range(lispobj* where, lispobj* limit, uword_t arg)
 {
     struct hopscotch_table* ht = (struct hopscotch_table*)arg;
     lispobj layout, bitmap, *next;
-    sword_t nwords, i, j;
+    sword_t nwords, i;
 
     for ( ; where < limit ; where = next ) {
         lispobj header = *where;
@@ -176,11 +177,6 @@ static uword_t coalesce_range(lispobj* where, lispobj* limit, uword_t arg)
                         coalesce_obj(where+i, ht);
                 continue;
             case CODE_HEADER_WIDETAG:
-                for_each_simple_fun(i, fun, (struct code*)where, 0, {
-                    lispobj* fun_slots = SIMPLE_FUN_SCAV_START(fun);
-                    for (j=0; j<SIMPLE_FUN_SCAV_NWORDS(fun); ++j)
-                        coalesce_obj(fun_slots+j, ht);
-                })
                 nwords = code_header_words((struct code*)where);
                 break;
             default:

@@ -115,7 +115,7 @@
     (emit-label start-lab)
     ;; Allocate function header.
     (inst simple-fun-header-word)
-    (inst .skip (* (1- simple-fun-code-offset) n-word-bytes))
+    (inst .skip (* (1- simple-fun-insts-offset) n-word-bytes))
     (let ((entry-point (gen-label)))
       (emit-label entry-point)
       ;; FIXME alpha port has a ### note here saying we should "save it
@@ -796,7 +796,7 @@ default-value-8
                   ;; is calculated.
                   (insert-step-instrumenting function)
                   (inst addi entry-point function
-                        (- (ash simple-fun-code-offset word-shift)
+                        (- (ash simple-fun-insts-offset word-shift)
                            fun-pointer-lowtag))))
                (:direct
                 `((inst lwz entry-point null-tn (static-fun-offset fun)))))
@@ -1118,6 +1118,20 @@ default-value-8
 (define-vop (more-arg word-index-ref)
   (:variant 0 0)
   (:translate %more-arg))
+
+(define-vop (more-arg-or-nil)
+  (:policy :fast-safe)
+  (:args (object :scs (descriptor-reg) :to (:result 1))
+         (count :scs (any-reg)))
+  (:info index)
+  (:results (value :scs (descriptor-reg any-reg)))
+  (:result-types *)
+  (:generator 3
+    (inst cmpwi count (fixnumize index))
+    (move value null-tn)
+    (inst ble done)
+    (inst lwz value object (ash index word-shift))
+    done))
 
 ;;; Turn more arg (context, count) into a list.
 (define-vop (listify-rest-args)

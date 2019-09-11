@@ -24,7 +24,7 @@
     (name nil :type symbol :read-only t)
     ;; kind of type (how to reconstitute an object)
     (kind nil
-          :type (member :other :closure :instance :list :code)
+          :type (member :other :closure :instance :list :code :fdefn)
           :read-only t))
 
 (defun room-info-type-name (info)
@@ -43,10 +43,10 @@
         (when (and (eq lowtag 'other-pointer-lowtag)
                    (not (member widetag '(t nil))))
           (setf (svref infos (symbol-value widetag))
-                (make-room-info (if (member name '(fdefn symbol))
-                                    tiny-boxed-size-mask
-                                    default-size-mask)
-                                name :other)))))
+                (case name
+                 (fdefn  (make-room-info 0 name :fdefn))
+                 (symbol (make-room-info tiny-boxed-size-mask name :other))
+                 (t      (make-room-info default-size-mask name :other)))))))
 
     (let ((info (make-room-info default-size-mask 'array-header :other)))
       (dolist (code (list #+sb-unicode complex-character-string-widetag
@@ -210,29 +210,25 @@
                 ;; why these fudge factors are right, but they make the result
                 ;; equal to what MAP-ALLOCATED-OBJECTS reports.
                 (null (+ symbol-size 1 #+64-bit 1))
+                (code-component
+                 (return-from primitive-object-size (code-object-size object)))
+                (fdefn 4) ; no length stored in the header
                 ;; Anything else is an OTHER pointer.
-                ;; Use a sizing function when we have one,
-                ;; otherwise the general case is correct.
                 (t
                  (let ((room-info
                          (aref *room-info* (%other-pointer-widetag object))))
-                   (typecase object
-                     (array
-                      (cond ((array-header-p object)
-                             (+ array-dimensions-offset (array-rank object)))
-                            ((simple-array-nil-p object) 2)
-                            (t
-                             (return-from primitive-object-size
-                               (nth-value 2 (reconstitute-vector
-                                             object room-info))))))
-                     (code-component
-                      (return-from primitive-object-size (code-object-size object)))
-                     (t
-                      ;; Other things (symbol, fdefn, value-cell, etc)
-                      ;; don't have a sizer, so use GET-HEADER-DATA
-                      (1+ (logand (get-header-data object)
-                                  (logand (get-header-data object)
-                                          (room-info-mask room-info)))))))))))
+                   (if (arrayp object)
+                       (cond ((array-header-p object)
+                              (+ array-dimensions-offset (array-rank object)))
+                             ((simple-array-nil-p object) 2)
+                             (t
+                              (return-from primitive-object-size
+                                (nth-value 2 (reconstitute-vector object room-info)))))
+                       ;; Other things (symbol, value-cell, etc)
+                       ;; don't have a sizer, so use GET-HEADER-DATA
+                       (1+ (logand (get-header-data object)
+                                   (logand (get-header-data object)
+                                           (room-info-mask room-info))))))))))
         (* (align-up words 2) n-word-bytes))
       0))
 
@@ -287,6 +283,10 @@
              (values c
                      code-header-widetag
                      (code-object-size c))))
+
+          (:fdefn
+           (values (tagged-object other-pointer-lowtag) widetag
+                   (* fdefn-size n-word-bytes)))
 
           (:other
            (values (tagged-object other-pointer-lowtag)
@@ -810,23 +810,35 @@ We could try a few things to mitigate this:
            (objects-width (decimal-with-grouped-digits-width total-objects))
            (totals-label (format nil "~:(~A~) instance total" space))
            (types-width (reduce #'max interesting
-                                :key (lambda (x)
-                                       (length (symbol-name (classoid-name (first x)))))
+                                :key (lambda (info)
+                                       (let ((type (first info)))
+                                         (length
+                                          (typecase type
+                                            (string
+                                             type)
+                                            (classoid
+                                             (with-output-to-string (stream)
+                                               (sb-ext:print-symbol-with-prefix
+                                                stream (classoid-name type))))))))
                                 :initial-value (length totals-label)))
            (printed-bytes 0)
            (printed-objects 0))
       (declare (unsigned-byte printed-bytes printed-objects))
       (flet ((type-usage (type objects bytes)
-               (let ((name (etypecase type
-                             (string type)
-                             (classoid (symbol-name (classoid-name type))))))
-                 (format t "  ~V@<~A~> ~V:D bytes, ~V:D object~:P.~%"
-                         (1+ types-width) name bytes-width bytes
-                         objects-width objects))))
-        (loop for (type . (objects . bytes)) in interesting do
-             (incf printed-bytes bytes)
-             (incf printed-objects objects)
-             (type-usage type objects bytes))
+               (etypecase type
+                 (string
+                  (format t "  ~V@<~A~> ~V:D bytes, ~V:D object~:P.~%"
+                          (1+ types-width) type bytes-width bytes
+                          objects-width objects))
+                 (classoid
+                  (format t "  ~V@<~/sb-ext:print-symbol-with-prefix/~> ~
+                             ~V:D bytes, ~V:D object~:P.~%"
+                          (1+ types-width) (classoid-name type) bytes-width bytes
+                          objects-width objects)))))
+        (loop for (type . (objects . bytes)) in interesting
+              do (incf printed-bytes bytes)
+                 (incf printed-objects objects)
+                 (type-usage type objects bytes))
         (terpri)
         (let ((residual-objects (- total-objects printed-objects))
               (residual-bytes (- total-bytes printed-bytes)))
@@ -1117,20 +1129,24 @@ We could try a few things to mitigate this:
             ,.(make-case 'fdefn
                `(fdefn-name ,obj)
                `(fdefn-fun ,obj)
+               ;; While it looks like we could easily allow a pointer to a movable object
+               ;; in the fdefn-raw-addr slot, it is not exactly trivial- at a bare minimum,
+               ;; translating the raw-addr to a lispobj might have to be pseudoatomic,
+               ;; since we don't know what object to pin when reconstructing it.
+               ;; For simple-funs in dynamic space, it doesn't have to be pseudoatomic
+               ;; because a reference to the interior of code pins the code.
+               ;; Closure trampolines would be fine as well. That leaves funcallable instances
+               ;; as the pain point. Those could go on pages of code as well, but see the
+               ;; comment in conservative_root_p() in gencgc as to why that alone
+               ;; would be inadequate- we require a properly tagged descriptor
+               ;; to enliven any object other than code.
                #+immobile-code
                `(%make-lisp-obj
                  (alien-funcall (extern-alien "fdefn_callee_lispobj" (function unsigned unsigned))
                                 (logandc2 (get-lisp-obj-address ,obj) lowtag-mask))))
             ,.(make-case* 'code-component
-               `(,functoid (%code-debug-info ,obj) ,@more)
-               #+(or x86 immobile-code) `(,functoid (%code-fixups ,obj) ,@more)
-               `(loop for .i. from code-constants-offset below (code-header-words ,obj)
-                      do (,functoid (code-header-ref ,obj .i.) ,@more))
-               ;; Caller should extend behavior for embedded objects, like:
-               ;; `(loop for .i. below (code-n-entries ,obj)
-               ;;        do (,functoid (%code-entry-point ,obj .i.) ,@more)))
-               ;; and/or visit the slots of each simple-fun but not the fun per se.
-               )
+               `(loop for .i. from 2 below (code-header-words ,obj)
+                      do (,functoid (code-header-ref ,obj .i.) ,@more)))
             ,.(make-case '(or float (complex float) bignum
                            #+sb-simd-pack simd-pack
                            #+sb-simd-pack-256 simd-pack-256
@@ -1155,11 +1171,7 @@ We could try a few things to mitigate this:
           :extend
           (dotimes (i (code-n-entries this))
             (let ((f (%code-entry-point this i)))
-              (when (or (eq f that)
-                        (eq (%simple-fun-name f) that)
-                        (eq (%simple-fun-arglist f) that)
-                        (eq (%%simple-fun-type f) that)
-                        (eq (%simple-fun-info f) that))
+              (when (eq f that)
                 (go win)))))
          (t
           :extend
@@ -1333,7 +1345,9 @@ We could try a few things to mitigate this:
            ;; SIMPLE-FUNs don't contain a generation byte
            (when (simple-fun-p object)
              (setq addr (get-lisp-obj-address (fun-code-header object))))
-           (logand #xF (sap-ref-8 (int-sap (logandc2 addr lowtag-mask)) 3))))))
+           (let ((sap (int-sap (logandc2 addr lowtag-mask))))
+             (logand (if (fdefn-p object) (sap-ref-8 sap 1) (sap-ref-8 sap 3))
+                     #xF))))))
 
 ;;; Show objects in a much simpler way than print-allocated-objects.
 ;;; Probably don't use this for generation 0 of dynamic space. Other spaces are ok.
@@ -1403,7 +1417,7 @@ We could try a few things to mitigate this:
                    ;; Display up through the first fun header
                    (+ (code-header-words thing)
                       (ash (%code-fun-offset thing 0) (- word-shift))
-                      simple-fun-code-offset)
+                      simple-fun-insts-offset)
                    ;; at most 16 words
                    (min 16 (ash (primitive-object-size thing) (- word-shift)))))))
     (with-pinned-objects (obj)

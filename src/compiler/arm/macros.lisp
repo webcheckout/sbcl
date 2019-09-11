@@ -103,7 +103,7 @@
 (defmacro lisp-jump (function)
   "Jump to the lisp function FUNCTION."
   `(inst add pc-tn ,function
-         (- (ash simple-fun-code-offset word-shift)
+         (- (ash simple-fun-insts-offset word-shift)
             fun-pointer-lowtag)))
 
 (defmacro lisp-return (return-pc return-style)
@@ -290,8 +290,7 @@
                    :flag-tn ,flag-tn
                    :stack-allocate-p ,stack-allocate-p)
        (when ,type-code
-         (inst mov ,flag-tn (ash (1- ,size) n-widetag-bits))
-         (inst orr ,flag-tn ,flag-tn ,type-code)
+         (load-immediate-word ,flag-tn (compute-object-header ,size ,type-code))
          (storew ,flag-tn ,result-tn 0 ,lowtag))
        ,@body)))
 

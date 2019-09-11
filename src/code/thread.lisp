@@ -167,7 +167,7 @@ held mutex, WITH-RECURSIVE-LOCK allows recursive lock attempts to succeed."
                 (declare (function function))
                 (declare (dynamic-extent function))
                 (flet ((%call-with-system-mutex ()
-                         (dx-let (got-it)
+                         (let (got-it)
                            (unwind-protect
                                 (when (setf got-it (grab-mutex mutex))
                                   (funcall function))
@@ -204,17 +204,9 @@ held mutex, WITH-RECURSIVE-LOCK allows recursive lock attempts to succeed."
   (defun call-with-recursive-system-lock (function lock)
     (declare (function function) (ignore lock))
     (without-interrupts
-      (funcall function)))
-
-  (defun call-with-recursive-system-lock/without-gcing (function mutex)
-    (declare (function function) (ignore mutex))
-    (without-gcing
       (funcall function))))
 
 #+sb-thread
-;;; KLUDGE: These need to use DX-LET, because the cleanup form that
-;;; closes over GOT-IT causes a value-cell to be allocated for it --
-;;; and we prefer that to go on the stack since it can.
 (progn
   (defun call-with-mutex (function mutex value waitp timeout)
     (declare (function function))
@@ -222,7 +214,7 @@ held mutex, WITH-RECURSIVE-LOCK allows recursive lock attempts to succeed."
     (unless (or (null value) (eq *current-thread* value))
       (error "~S called with non-nil :VALUE that isn't the current thread."
              'with-mutex))
-    (dx-let ((got-it nil))
+    (let ((got-it nil))
       (without-interrupts
         (unwind-protect
              (when (setq got-it (allow-with-interrupts
@@ -235,8 +227,8 @@ held mutex, WITH-RECURSIVE-LOCK allows recursive lock attempts to succeed."
   (defun call-with-recursive-lock (function mutex waitp timeout)
     (declare (function function))
     (declare (dynamic-extent function))
-    (dx-let ((inner-lock-p (eq (mutex-%owner mutex) *current-thread*))
-             (got-it nil))
+    (let ((inner-lock-p (eq (mutex-%owner mutex) *current-thread*))
+          (got-it nil))
       (without-interrupts
         (unwind-protect
              (when (or inner-lock-p (setf got-it (allow-with-interrupts
@@ -246,26 +238,15 @@ held mutex, WITH-RECURSIVE-LOCK allows recursive lock attempts to succeed."
           (when got-it
             (release-mutex mutex))))))
 
-  (macrolet ((def (name &optional variant)
-               `(defun ,(if variant (symbolicate name "/" variant) name)
-                    (function lock)
-                  (declare (function function))
-                  (declare (dynamic-extent function))
-                  (flet ((%call-with-recursive-system-lock ()
-                           (dx-let ((inner-lock-p
-                                     (eq *current-thread* (mutex-owner lock)))
-                                    (got-it nil))
-                             (unwind-protect
-                                  (when (or inner-lock-p
-                                            (setf got-it (grab-mutex lock)))
-                                    (funcall function))
-                               (when got-it
-                                 (release-mutex lock))))))
-                    (declare (inline %call-with-recursive-system-lock))
-                    ,(ecase variant
-                      (:without-gcing
-                        `(without-gcing (%call-with-recursive-system-lock)))
-                      ((nil)
-                        `(without-interrupts (%call-with-recursive-system-lock))))))))
-    (def call-with-recursive-system-lock)
-    (def call-with-recursive-system-lock :without-gcing)))
+  (defun call-with-recursive-system-lock (function lock)
+    (declare (function function))
+    (declare (dynamic-extent function))
+    (without-interrupts
+      (let ((inner-lock-p (eq *current-thread* (mutex-owner lock)))
+            (got-it nil))
+        (unwind-protect
+             (when (or inner-lock-p
+                       (setf got-it (grab-mutex lock)))
+               (funcall function))
+          (when got-it
+            (release-mutex lock)))))))

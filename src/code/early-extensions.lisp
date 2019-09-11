@@ -738,6 +738,23 @@ NOTE: This interface is experimental and subject to change."
 (defun legal-fun-name-p (name)
   (values (valid-function-name-p name)))
 
+;;; * extended-function-designator: an object that denotes a function and that is one of:
+;;;   a function name (denoting the function it names in the global environment),
+;;;   or a function (denoting itself). The consequences are undefined if a function name
+;;;   is used as an extended function designator but it does not have a global definition
+;;;   as a function, or if it is a symbol that has a global definition as a macro
+;;;   or a special form.
+;;; Release 1.4.6 advertised that (disassemble 'a-macro) works, which entails a choice:
+;;; - if (EXTENDED-FUNCTION-DESIGNATOR-P) is to return NIL, then we have to
+;;;   add (OR (SATISFIES MACRO-FUNCTION) ...) to the signature of DISASSEMBLE.
+;;; - if (EXTENDED-FUNCTION-DESIGNATOR-P) is to return T, then we must avoid
+;;;   using this predicate in contexts that demand a function.
+(defun extended-function-designator-p (x)
+  (or (and (legal-fun-name-p x)
+           (fboundp x)
+           (not (and (symbolp x) (special-operator-p x))))
+      (functionp x)))
+
 (deftype function-name () '(satisfies legal-fun-name-p))
 
 ;;; Signal an error unless NAME is a legal function name.
@@ -1363,6 +1380,33 @@ NOTE: This interface is experimental and subject to change."
                                 (length cache))))
                   short-name))))))
 
+;;; Just like WITH-OUTPUT-TO-STRING but doesn't close the stream,
+;;; producing more compact code.
+(defmacro with-simple-output-to-string
+    ((var &optional string (element-type :default)) &body body)
+  ;; Don't need any fancy type-specifier parsing. Uses of this macro
+  ;; are confined to our own code. So the element-type is literally
+  ;; either :DEFAULT or BASE-CHAR.
+  (aver (member element-type '(base-char :default)))
+  (multiple-value-bind (forms decls) (parse-body body nil)
+    (if string
+        `(let ((,var (make-fill-pointer-output-stream ,string)))
+           ,@decls
+           ,@forms)
+        ;; Why not dxify this stream?
+        `(let ((,var #+sb-xc-host (make-string-output-stream)
+                     #-sb-xc-host
+                     ,(case element-type
+                        ;; Non-unicode doesn't have %MAKE-DEFAULT-STRING-OSTREAM
+                        #+sb-unicode
+                        (:default '(%make-default-string-ostream))
+                        ;; and this macro is never employed to make streams
+                        ;; that can only return CHARACTER string.
+                        (t '(%make-base-string-ostream)))))
+           ,@decls
+           ,@forms
+           (get-output-stream-string ,var)))))
+
 (in-package "SB-KERNEL")
 
 (defun fp-zero-p (x)
@@ -1398,25 +1442,6 @@ NOTE: This interface is experimental and subject to change."
                            vector))
              (sorted (stable-sort wrapped comparator :key #'cdr)))
         (map-into sorted #'car sorted))))
-
-;;; Just like WITH-OUTPUT-TO-STRING but doesn't close the stream,
-;;; producing more compact code.
-(defmacro with-simple-output-to-string
-    ((var &optional string)
-     &body body)
-  (multiple-value-bind (forms decls) (parse-body body nil)
-    (if string
-        `(let ((,var (sb-impl::make-fill-pointer-output-stream ,string)))
-           ,@decls
-           ,@forms)
-        `(let ((,var #+sb-xc-host (make-string-output-stream)
-                     #-sb-xc-host (sb-impl::%make-string-output-stream
-                                   (or #-sb-unicode 'character :default)
-                                   #'sb-impl::string-ouch)))
-
-           ,@decls
-           ,@forms
-           (get-output-stream-string ,var)))))
 
 ;;; Ensure basicness if possible, and simplicity always
 (defun possibly-base-stringize (s)

@@ -76,7 +76,7 @@
   "Jump to the lisp function FUNCTION.  LIP is an interior-reg temporary."
   `(progn
      (inst j ,fun
-           (- (ash simple-fun-code-offset word-shift) fun-pointer-lowtag))
+           (- (ash simple-fun-insts-offset word-shift) fun-pointer-lowtag))
      (move code-tn ,fun)))
 
 (defmacro lisp-return (return-pc &key (offset 0) (frob-code t))
@@ -266,7 +266,7 @@
     `(pseudo-atomic ()
        (allocation ,result-tn (pad-data-block ,size) other-pointer-lowtag
                    :temp-tn ,temp-tn)
-       (inst li ,temp-tn (logior (ash (1- ,size) n-widetag-bits) ,type-code))
+       (inst li ,temp-tn (compute-object-header ,size ,type-code))
        (storew ,temp-tn ,result-tn 0 other-pointer-lowtag)
        ,@body)))
 

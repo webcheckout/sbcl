@@ -2,7 +2,7 @@
 
 ;;;; the specifications of target packages, except for a few things
 ;;;; which are handled elsewhere by other mechanisms:
-;;;;   * any SHADOWing and nickname hackery;
+;;;;   * some SHADOWing and nickname hackery;
 ;;;;   * the standard, non-SBCL-specific packages COMMON-LISP,
 ;;;;     COMMON-LISP-USER, and KEYWORD.
 ;;;;
@@ -298,6 +298,7 @@ of SBCL which maintained the CMU-CL-style split into two packages.)"
                "!DEFINE-STORAGE-CLASS" "DEFINE-VOP"
                "DEFKNOWN" "DEFOPTIMIZER"
                "DEFTRANSFORM" "DERIVE-TYPE"
+               "DIS"
                "DO-FORMS-FROM-INFO"
                "EMIT-BLOCK-HEADER"
                "PHYSENV-DEBUG-LIVE-TN" "PHYSENV-LIVE-TN"
@@ -1105,11 +1106,14 @@ possibly temporarily, because it might be used internally."
                "META-INFO-NUMBER"
                "PACKED-INFO-FIELD"
                "PACKED-INFO-INSERT"
+               "PCL-METHODFN-NAME-P"
                "SET-INFO-VALUE"
                "SHOW-INFO"
                "UPDATE-SYMBOL-INFO"
                "WITH-GLOBALDB-NAME"
                "%BOUNDP"
+               "FUN-SRC" "FUN-SRC-DOC" "FUN-SRC-FORM" "FUN-SRC-XREFS"
+               "MAKE-FUN-SRC"
 
                ;; Calling a list of hook functions, plus error handling.
                "CALL-HOOKS"
@@ -1314,6 +1318,8 @@ possibly temporarily, because it might be used internally."
                "UNSIGNED-BYTE-WITH-A-BITE-OUT"
                "SFUNCTION" "UNSIGNED-BYTE*"
                "CONSTANT-DISPLACEMENT"
+               "EXTENDED-FUNCTION-DESIGNATOR"
+               "EXTENDED-FUNCTION-DESIGNATOR-P"
                ;; ..and type predicates
                "DOUBLE-FLOAT-P"
                "LOGICAL-PATHNAME-P"
@@ -2005,7 +2011,9 @@ is a good idea, but see SB-SYS re. blurring of boundaries."
                "SCRUB-POWER-CACHE"
                "SEQUENCEP" "SEQUENCE-COUNT" "SEQUENCE-END"
                "SEQUENCE-OF-CHECKED-LENGTH-GIVEN-TYPE"
-               "SET-ARRAY-HEADER" "SET-HEADER-DATA" "SHIFT-TOWARDS-END"
+               "SET-ARRAY-HEADER" "SET-HEADER-BITS" "SET-HEADER-DATA"
+               "UNSET-HEADER-BITS"
+               "SHIFT-TOWARDS-END"
                "SHIFT-TOWARDS-START" "SHRINK-VECTOR" "%SHRINK-VECTOR"
                "SIGNED-BYTE-32-P" "SIGNED-BYTE-64-P"
                "SIMPLE-RANK-1-ARRAY-*-P"
@@ -2162,6 +2170,7 @@ is a good idea, but see SB-SYS re. blurring of boundaries."
                "%SIMPLE-FUN-NEXT" ; FIXME: remove
                "%SIMPLE-FUN-SELF" ; FIXME: don't export
                "%SIMPLE-FUN-TEXT-LEN"
+               "%SIMPLE-FUN-SOURCE"
                "%SIMPLE-FUN-TYPE"
                "%SIMPLE-FUN-XREFS"
                "SET-SIMPLE-FUN-INFO"
@@ -2269,6 +2278,7 @@ is a good idea, but see SB-SYS re. blurring of boundaries."
                "+STRUCTURE-LAYOUT-FLAG+"
                "+PCL-OBJECT-LAYOUT-FLAG+"
                "+CONDITION-LAYOUT-FLAG+"
+               "+PATHNAME-LAYOUT-FLAG+"
                "**PRIMITIVE-OBJECT-LAYOUTS**"
 
                "*HANDLER-CLUSTERS*" "*RESTART-CLUSTERS*"
@@ -3124,7 +3134,7 @@ structure representations"
                "CLOSURE-WIDETAG"
                "CLOSURE-INFO-OFFSET"
                "CODE-BOXED-SIZE-SLOT"
-               "CODE-CONSTANTS-OFFSET"
+               "CODE-CONSTANTS-OFFSET" "CODE-SLOTS-PER-SIMPLE-FUN"
                "CODE-DEBUG-INFO-SLOT"
                "CODE-HEADER-SIZE-SHIFT"
                "CODE-HEADER-WIDETAG" "COMPLEX-ARRAY-WIDETAG"
@@ -3198,7 +3208,7 @@ structure representations"
                "FUNCALLABLE-INSTANCE-TRAMPOLINE-SLOT"
                "FUNCALLABLE-INSTANCE-WIDETAG"
                "FUNCALLABLE-INSTANCE-INFO-OFFSET"
-               "SIMPLE-FUN-ARGLIST-SLOT" "SIMPLE-FUN-CODE-OFFSET"
+               "SIMPLE-FUN-ARGLIST-SLOT" "SIMPLE-FUN-INSTS-OFFSET"
                "FUN-END-BREAKPOINT-TRAP"
                "SIMPLE-FUN-WIDETAG"
                "SIMPLE-FUN-NAME-SLOT"
@@ -3207,7 +3217,7 @@ structure representations"
                "FUNCTION-LAYOUT"
                "SIMPLE-FUN-INFO-SLOT"
                "SIMPLE-FUN-SELF-SLOT"
-               "SIMPLE-FUN-TYPE-SLOT"
+               "SIMPLE-FUN-SOURCE-SLOT"
                "GENCGC-CARD-BYTES"
                "GENCGC-ALLOC-GRANULARITY"
                "GENCGC-RELEASE-GRANULARITY"
@@ -3369,6 +3379,7 @@ structure representations"
                #+sb-safepoint "GC-SAFEPOINT-TRAP-OFFSET"
                "TLS-SIZE" "N-WIDETAG-BITS" "WIDETAG-MASK"
                "UNBOUND-MARKER-WIDETAG"
+               "UNDEFINED-FUNCTION-TRAP"
                "NO-TLS-VALUE-MARKER-WIDETAG"
                "UNSIGNED-REG-SC-NUMBER" "UNSIGNED-STACK-SC-NUMBER"
                "UNWIND-BLOCK-CODE-SLOT" "UNWIND-BLOCK-CFP-SLOT"
@@ -3378,7 +3389,8 @@ structure representations"
                "VECTOR-NORMAL-SUBTYPE"
                "VECTOR-WEAK-SUBTYPE"
                "VECTOR-WEAK-VISITED-SUBTYPE"
-               "VECTOR-VALID-HASHING-SUBTYPE"
+               "VECTOR-HASHING-SUBTYPE"
+               "VECTOR-ADDR-HASHING-SUBTYPE"
                "WEAK-POINTER-NEXT-SLOT"
                "WEAK-POINTER-SIZE" "WEAK-POINTER-WIDETAG"
                "WEAK-POINTER-VALUE-SLOT"
@@ -3386,6 +3398,13 @@ structure representations"
                "WORD-REG-SC-NUMBER" "WORD-SHIFT"
                #+win32 "CONTEXT-RESTORE-TRAP"
                "ZERO-SC-NUMBER"))
+
+   #s(sb-cold:package-data
+      :name "SB-RBTREE"
+      :doc "internal: red/black tree"
+      :use ("CL" "SB-INT" "SB-EXT")
+      :shadow ("DELETE")
+      :export ("INSERT" "DELETE" "FIND=" "FIND<="))
 
    #s(sb-cold:package-data
       :name "SB-WALKER"
@@ -3509,6 +3528,8 @@ SBCL itself"
   (setf sb-mop:generic-function-name)
   sb-mop:slot-definition-allocation
   sb-mop:slot-definition-name
+  sb-pcl::method-p
+  sb-mop:method-function
   sb-pcl::%force-cache-flushes
   sb-pcl::check-wrapper-validity
   sb-pcl::class-has-a-forward-referenced-superclass-p

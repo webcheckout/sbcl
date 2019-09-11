@@ -45,12 +45,12 @@
                            (- (ash sb-vm:simple-fun-self-slot sb-vm:word-shift)
                               sb-vm:fun-pointer-lowtag))))))
 
-  ;; Return the address to which to jump when calling NAME through its fdefn.
-  (defun sb-vm::fdefn-entry-address (name)
-    (let ((fdefn (find-or-create-fdefn name)))
+  ;; Return the address to which to jump when calling FDEFN,
+  ;; which is either an fdefn or the name of an fdefn.
+  (defun sb-vm::fdefn-entry-address (fdefn)
+    (let ((fdefn (if (fdefn-p fdefn) fdefn (find-or-create-fdefn fdefn))))
       (+ (get-lisp-obj-address fdefn)
-         (ash sb-vm:fdefn-raw-addr-slot sb-vm:word-shift)
-         (- sb-vm:other-pointer-lowtag)))))
+         (- 2 sb-vm:other-pointer-lowtag)))))
 
 (flet ((fixup (code-obj offset sym kind flavor preserved-lists statically-link-p)
          (declare (ignorable statically-link-p))
@@ -109,7 +109,7 @@
                    #+(or x86 x86-64)
                    (%make-lisp-obj
                     (truly-the word (+ (get-lisp-obj-address fun)
-                                       (ash sb-vm:simple-fun-code-offset sb-vm:word-shift)
+                                       (ash sb-vm:simple-fun-insts-offset sb-vm:word-shift)
                                        (- sb-vm:fun-pointer-lowtag))))
                    ;; non-x86 backends store the function itself (what else?) in 'self'
                    #-(or x86 x86-64) fun)
@@ -200,12 +200,17 @@
       (let* ((entries (ir2-component-entries 2comp))
              (fun-index (length entries)))
         (dolist (entry-info entries)
-          (let ((fun (%code-entry-point code-obj (decf fun-index))))
-            (setf (%simple-fun-name fun) (entry-info-name entry-info))
-            (setf (%simple-fun-arglist fun) (entry-info-arguments entry-info))
-            (setf (%simple-fun-type fun) (entry-info-type entry-info))
-            (apply #'set-simple-fun-info fun
-                   (entry-info-form/doc/xrefs entry-info))
+          (let ((fun (%code-entry-point code-obj (decf fun-index)))
+                (w (+ sb-vm:code-constants-offset
+                      (* sb-vm:code-slots-per-simple-fun fun-index))))
+            (setf (code-header-ref code-obj (+ w sb-vm:simple-fun-name-slot))
+                  (entry-info-name entry-info)
+                  (code-header-ref code-obj (+ w sb-vm:simple-fun-arglist-slot))
+                  (entry-info-arguments entry-info)
+                  (code-header-ref code-obj (+ w sb-vm:simple-fun-source-slot))
+                  (entry-info-form/doc entry-info)
+                  (code-header-ref code-obj (+ w sb-vm:simple-fun-info-slot))
+                  (entry-info-type/xref entry-info))
             (note-fun entry-info fun object))))
 
       (push debug-info (core-object-debug-info object))

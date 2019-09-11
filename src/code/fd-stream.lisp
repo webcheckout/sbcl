@@ -823,14 +823,16 @@
       (funcall (bytes-for-char-fun ef-entry) #\x)))
 
 (defun sb-alien::string-to-c-string (string external-format)
-  (declare (type simple-string string))
+  (declare (type simple-string string)
+           (explicit-check :result))
   (locally
       (declare (optimize (speed 3) (safety 0)))
     (let ((external-format (get-external-format-or-lose external-format)))
       (funcall (ef-write-c-string-fun external-format) string))))
 
 (defun sb-alien::c-string-to-string (sap external-format element-type)
-  (declare (type system-area-pointer sap))
+  (declare (type system-area-pointer sap)
+           (explicit-check :result))
   (locally
       (declare (optimize (speed 3) (safety 0)))
     (let ((external-format (get-external-format-or-lose external-format)))
@@ -2617,18 +2619,17 @@
         #+win32 (sb-win32::get-std-handles)
       (labels (#+win32
                (nul-stream (name inputp outputp)
-                 (let* ((nul-name #.(coerce "NUL" 'simple-base-string))
-                        (nul-handle
-                          (cond
-                            ((and inputp outputp)
-                             (sb-win32:unixlike-open nul-name sb-unix:o_rdwr))
-                            (inputp
-                             (sb-win32:unixlike-open nul-name sb-unix:o_rdonly))
-                            (outputp
-                             (sb-win32:unixlike-open nul-name sb-unix:o_wronly))
-                            (t
-                             ;; Not quite sure what to do in this case.
-                             nil))))
+                 (let ((nul-handle
+                         (cond
+                           ((and inputp outputp)
+                            (sb-win32:unixlike-open "NUL" sb-unix:o_rdwr))
+                           (inputp
+                            (sb-win32:unixlike-open "NUL" sb-unix:o_rdonly))
+                           (outputp
+                            (sb-win32:unixlike-open "NUL" sb-unix:o_wronly))
+                           (t
+                            ;; Not quite sure what to do in this case.
+                            nil))))
                    (make-fd-stream
                     nul-handle
                     :name name
@@ -2661,9 +2662,7 @@
     #+win32
     (setf *tty* (make-two-way-stream *stdin* *stdout*))
     #-win32
-    ;; FIXME: what is this call to COERCE doing? XC can't dump non-base-strings.
-    (let* ((ttyname #.(coerce "/dev/tty" 'simple-base-string))
-           (tty (sb-unix:unix-open ttyname sb-unix:o_rdwr #o666)))
+    (let ((tty (sb-unix:unix-open "/dev/tty" sb-unix:o_rdwr #o666)))
       (setf *tty*
             (if tty
                 (make-fd-stream tty :name "the terminal"

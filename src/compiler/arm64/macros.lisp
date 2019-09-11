@@ -92,7 +92,7 @@
          (lip ,lip))
      (aver (sc-is lip interior-reg))
      (inst add lip function
-           (- (ash simple-fun-code-offset word-shift)
+           (- (ash simple-fun-insts-offset word-shift)
               fun-pointer-lowtag))
      (inst br lip)))
 
@@ -277,8 +277,7 @@
                    :stack-allocate-p ,stack-allocate-p
                    :lip ,lip)
        (when ,type-code
-         (load-immediate-word ,flag-tn (+ (ash (1- ,size) n-widetag-bits)
-                                          ,type-code))
+         (load-immediate-word ,flag-tn (compute-object-header ,size ,type-code))
          (storew ,flag-tn ,result-tn 0 ,lowtag))
        ,@body)))
 

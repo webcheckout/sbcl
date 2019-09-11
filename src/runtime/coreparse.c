@@ -437,37 +437,6 @@ static inline void fix_fun_header_layout(lispobj __attribute__((unused)) *fun,
 #endif
 }
 
-/* About relocation of fdefns - suppose we had originally intended to load:
- *   [ range of adjustable addresses  ]
- *   | fixedobj space | varyobj space |
- *          fdefn --------> callee
- *   0x1000000        0x2000000
- * and the subspaces were actually placed at much higher addresses
- * that do not overlap at all with the intended addresses:
- *                                       | fixedoboj space | varyobj space |
- *                                       0x8000000 ...
- * Then given an fdefn, its callee as computed from the new address appears
- * such there would be no relocation adjustment for the addressed object.
- * We correctly do not adjust the fdefn's callee displacement.
- * But suppose the moved spaces overlap the expected load addresses:
- *        [ range of adjustable addresses  ]
- *        | fixedobj space | varyobj space |
- *               fdefn --------> callee
- *   0x1000000 = desired
- *        0x1008000 = actual
- * In that case there can be an fdefn whose callee appears to be in the
- * adjustment range, and we'd compute an (incorrect) adjustment. In reality,
- * both the fdefn and its intended target moved by the same amount,
- * so the net change to the fdefn JMP instruction displacement ought to be zero.
- * To deal with this, we have to compute the fdefn callee as if the fdefn were
- * at its intended load address, then check whether that callee needs adjustment,
- * and compute a net adjustment by incorporating the amount by which the fdefn
- * itself moved.  Since both spaces move together for now, these two deltas
- * cancel out, and the net adjustment becomes zero. The full complexity is
- * required to handle the situation where only one of the immobile subspaces
- * moved, which we can't actually handle yet at all.
- * But already there was a bug when they move together by a small amount.
- */
 static void relocate_space(uword_t start, lispobj* end, struct heap_adjust* adj)
 {
     lispobj *where = (lispobj*)start;
@@ -525,28 +494,10 @@ static void relocate_space(uword_t start, lispobj* end, struct heap_adjust* adj)
             continue;
         case FDEFN_WIDETAG:
             adjust_pointers(where+1, 2, adj);
-            // 'raw_addr' doesn't satisfy is_lisp_pointer() for x86,
+            // For most architectures, 'raw_addr' doesn't satisfy is_lisp_pointer()
             // so adjust_pointers() would ignore it. Therefore we need to
-            // forcibly adjust it.
-#ifndef LISP_FEATURE_IMMOBILE_CODE
+            // forcibly adjust it. This is correct whether or not there are tag bits.
             adjust_word_at(where+3, adj);
-#elif defined(LISP_FEATURE_X86_64)
-            // the offset from fdefns to code can change if:
-            // - static space fdefn -> immobile space code and immobile space moved
-            // - immobile spaces changed relative position
-            {
-                // See comment above this function concerning fdefn adjustment.
-                lispobj orig = inverse_adjust(adj, (lispobj)where);
-                lispobj callee = virtual_fdefn_callee_lispobj((struct fdefn*)where, orig);
-                sword_t callee_delta = calc_adjustment(adj, callee);
-                delta = callee_delta - ((lispobj)where - orig);
-                if (delta != 0) {
-                    void* prel32 = 1 + (char*)(where+3);
-                    FIXUP_rel(UNALIGNED_STORE32(prel32, UNALIGNED_LOAD32(prel32) + delta),
-                              prel32);
-                }
-            }
-#endif
             continue;
         case CODE_HEADER_WIDETAG:
             if (filler_obj_p(where)) {
@@ -560,11 +511,10 @@ static void relocate_space(uword_t start, lispobj* end, struct heap_adjust* adj)
             for_each_simple_fun(i, f, code, 1, {
                 fix_fun_header_layout((lispobj*)f, adj);
 #if FUN_SELF_FIXNUM_TAGGED
-                if (f->self != (lispobj)f->code)
-                    FIXUP(f->self = (lispobj)f->code, &f->self);
-                adjust_pointers(SIMPLE_FUN_SCAV_START(f), SIMPLE_FUN_SCAV_NWORDS(f), adj);
+                if (f->self != (lispobj)f->insts)
+                    FIXUP(f->self = (lispobj)f->insts, &f->self);
 #else
-                adjust_pointers(&f->self, (lispobj*)f->code - &f->self, adj);
+                adjust_pointers(&f->self, 1, adj);
 #endif
             });
             {
@@ -587,19 +537,24 @@ static void relocate_space(uword_t start, lispobj* end, struct heap_adjust* adj)
             adjust_word_at(where+1, adj);
 #endif
             break;
-        // Vectors require extra care because of EQ-based hashing.
+        // Vectors require extra care because of address-based hashing.
         case SIMPLE_VECTOR_WIDETAG:
-          if (is_vector_subtype(*where, VectorValidHashing)) {
+          if (is_vector_subtype(*where, VectorAddrHashing)) {
               struct vector* v = (struct vector*)where;
-              gc_assert(v->length > 0 &&
-                        !(v->length & make_fixnum(1)) && // length must be even
-                        instancep(v->data[0]));
+              // If you could make a hash-table vector with space for exactly 1 k/v pair,
+              // it would have length 5.
+              gc_assert(v->length >= make_fixnum(5));
               lispobj* data = (lispobj*)v->data;
-              adjust_pointers(&data[0], 1, adj); // adjust the hash-table structure
+              adjust_pointers(&data[fixnum_value(v->length)-1], 1, adj);
+              int hwm = KV_PAIRS_HIGH_WATER_MARK(data);
               boolean needs_rehash = 0;
-              lispobj *where = &data[2], *end = &data[fixnum_value(v->length)];
+              lispobj *where = &data[2], *end = &data[2*(hwm+1)];
               // Adjust the elements, checking for need to rehash.
               for ( ; where < end ; where += 2) {
+                  // Really we should use the hash values to figure out which
+                  // keys were address-sensitive. This simply overapproximates
+                  // by assuming that any change forces rehash.
+                  // (Similar issue exists in 'fixup_space' in immobile-space.c)
                   lispobj ptr = *where; // key
                   if (is_lisp_pointer(ptr) && (delta = calc_adjustment(adj, ptr)) != 0) {
                       FIXUP(*where = ptr + delta, where);
@@ -610,7 +565,7 @@ static void relocate_space(uword_t start, lispobj* end, struct heap_adjust* adj)
                       FIXUP(where[1] = ptr + delta, where+1);
               }
               if (needs_rehash) // set v->data[1], the need-to-rehash bit
-                  data[1] = make_fixnum(1);
+                  KV_PAIRS_REHASH(data) |= make_fixnum(1);
               continue;
           }
         // All the array header widetags.
@@ -1019,6 +974,12 @@ Please report this as a bug");
     immobile_space_max_offset   = range2.end - range1.start;
     immobile_range_1_max_offset = range1.end - range1.start;
     immobile_range_2_min_offset = range2.start - range1.start;
+#else
+    asm_routines_start = READ_ONLY_SPACE_START;
+    if (widetag_of((lispobj*)asm_routines_start) != CODE_HEADER_WIDETAG)
+        lose("Can't find asm routines");
+    int nwords = sizetab[CODE_HEADER_WIDETAG]((lispobj*)asm_routines_start);
+    asm_routines_end = asm_routines_start + nwords*N_WORD_BYTES;
 #endif
 #ifdef LISP_FEATURE_X86_64
     tune_asm_routines_for_microarch(); // before WPing immobile space
@@ -1031,6 +992,8 @@ extern void gc_load_corefile_ptes(core_entry_elt_t, core_entry_elt_t,
 #else
 #define gc_load_corefile_ptes(dummy1,dummy2,dummy3,dummy4)
 #endif
+
+static void sanity_check_loaded_core(lispobj);
 
 /* 'merge_core_pages': Tri-state flag to determine whether we attempt to mark
  * pages as targets for virtual memory deduplication via MADV_MERGEABLE.
@@ -1105,6 +1068,7 @@ load_core_file(char *file, os_vm_offset_t file_offset, int merge_core_pages)
                 // fprintf(stderr, "NOTE: TLS size increased to %x\n", dynamic_values_bytes);
             }
 #endif
+            sanity_check_loaded_core(initial_function);
             return initial_function;
         case RUNTIME_OPTIONS_MAGIC: break; // already processed
         default:
@@ -1116,13 +1080,13 @@ load_core_file(char *file, os_vm_offset_t file_offset, int merge_core_pages)
 #include "genesis/hash-table.h"
 #include "genesis/vector.h"
 #include "genesis/cons.h"
-os_vm_address_t get_asm_routine_by_name(const char* name)
+char* get_asm_routine_by_name(const char* name)
 {
     struct code* code = get_asm_routine_code_component();
     lispobj ht = CONS(code->debug_info)->car;
     if (ht) {
         struct vector* table =
-            VECTOR(((struct hash_table*)native_pointer(ht))->table);
+            VECTOR(((struct hash_table*)native_pointer(ht))->pairs);
         lispobj sym;
         int i;
         for (i=2 ; i < fixnum_value(table->length) ; i += 2)
@@ -1139,7 +1103,222 @@ os_vm_address_t get_asm_routine_by_name(const char* name)
 
 void asm_routine_poke(const char* routine, int offset, char byte)
 {
-    char *address = (char *)get_asm_routine_by_name(routine);
+    char *address = get_asm_routine_by_name(routine);
     if (address)
         address[offset] = byte;
 }
+
+// Caution: use at your own risk
+#undef DEBUG_CORE_LOADING
+#ifdef DEBUG_CORE_LOADING
+#ifdef LISP_FEATURE_CHENEYGC
+#  error "Can't define DEBUG_CORE_LOADING for cheneygc"
+#endif
+#include "hopscotch.h"
+#include "genesis/cons.h"
+#include "genesis/layout.h"
+#include "genesis/gc-tables.h"
+#include "code.h"
+#include "gc-private.h"
+
+struct visitor {
+    // one item per value of widetag>>2
+    // element 0 is for conses, element 64 is for totals.
+    struct {
+        int count;
+        int words;
+    } headers[65], sv_subtypes[3];
+    struct hopscotch_table *reached;
+};
+
+#define RECURSE(x) if(is_lisp_pointer(x))graph_visit(ptr,x,seen)
+static void graph_visit(lispobj __attribute__((unused)) referer,
+                        lispobj ptr,
+                        struct hopscotch_table* seen)
+{
+    if (lowtag_of(ptr) == FUN_POINTER_LOWTAG
+        && widetag_of(FUNCTION(ptr)) == SIMPLE_FUN_WIDETAG)
+        ptr = fun_code_tagged(FUNCTION(ptr));
+    if (hopscotch_get(seen, ptr, 0))
+        return;
+    hopscotch_insert(seen, ptr, 1);
+    lispobj layout, bitmap, *obj;
+    int nwords, i;
+    if (lowtag_of(ptr) == LIST_POINTER_LOWTAG) {
+        RECURSE(CONS(ptr)->car);
+        RECURSE(CONS(ptr)->cdr);
+    } else switch (widetag_of(obj = native_pointer(ptr))) {
+        case SIMPLE_VECTOR_WIDETAG:
+            nwords = fixnum_value(obj[1]); // vector length
+            for(i=0; i<nwords; ++i) RECURSE(obj[i+2]);
+            break;
+        // In all the following cases except for CODE, 'nwords' is the count
+        // of payload words (following the header), so we iterate up to and
+        // including that word index. For example, if there are 2 payload words,
+        // then we scan word indices 1 and 2 off the object base address.
+        case INSTANCE_WIDETAG:
+            layout = instance_layout(obj);
+            graph_visit(ptr, layout, seen);
+            nwords = instance_length(*obj);
+            bitmap = ((struct layout*)native_pointer(layout))->bitmap;
+            for(i=1; i<=nwords; ++i)
+                if (layout_bitmap_logbitp(i-1, bitmap)) RECURSE(obj[i]);
+            break;
+        case FUNCALLABLE_INSTANCE_WIDETAG:
+            layout = funinstance_layout(obj);
+            graph_visit(ptr, layout, seen);
+            bitmap = ((struct layout*)native_pointer(layout))->bitmap;
+            nwords = SHORT_BOXED_NWORDS(*obj);
+            // We don't need to scan the word at index 1 (the trampoline pointer)
+            // because it either points to the FIN itself or to readonly space.
+            for(i=2; i<=nwords; ++i)
+                if (layout_bitmap_logbitp(i-1, bitmap)) RECURSE(obj[i]);
+            break;
+        case CLOSURE_WIDETAG:
+            // We must scan the closure's trampoline word.
+            // Closures can utilize one payload word beyond what the header
+            // indicates. This is quite sucky and I don't know why I did that.
+            // However, it is correctly accounted for by SHORT_BOXED_NWORDS
+            // which gives you the right number of words to scan.
+            graph_visit(ptr, obj[1] - FUN_RAW_ADDR_OFFSET, seen);
+            nwords = SHORT_BOXED_NWORDS(*obj);
+            for(i=2; i<=nwords; ++i) RECURSE(obj[i]);
+            break;
+        case SYMBOL_WIDETAG:
+        case WEAK_POINTER_WIDETAG:
+            nwords = TINY_BOXED_NWORDS(*obj);
+            for(i=1; i<=nwords; ++i) RECURSE(obj[i]);
+            break;
+        case FDEFN_WIDETAG:
+            RECURSE(obj[1]);
+            RECURSE(obj[2]);
+            RECURSE(fdefn_callee_lispobj((struct fdefn*)obj));
+            break;
+        case CODE_HEADER_WIDETAG:
+            nwords = code_header_words((struct code*)obj);
+            for(i=2; i<nwords; ++i) RECURSE(obj[i]);
+            break;
+        default:
+            if (!leaf_obj_widetag_p(widetag_of(obj))) {
+                nwords = BOXED_NWORDS(*obj);
+                for(i=1; i<=nwords; ++i) RECURSE(obj[i]);
+            }
+      }
+}
+
+static void tally(lispobj ptr, struct visitor* v)
+{
+    if (lowtag_of(ptr) == LIST_POINTER_LOWTAG)
+        ++v->headers[0].count;
+    else {
+        lispobj* obj = native_pointer(ptr);
+        int widetag = widetag_of(obj);
+        int header_index = widetag>>2;
+        int words = OBJECT_SIZE(*obj, obj);
+        ++v->headers[header_index].count;
+        v->headers[header_index].words += words;
+        if (widetag == SIMPLE_VECTOR_WIDETAG) {
+            int st = 0;
+            switch ((*obj >> N_WIDETAG_BITS) & 7) {
+            case subtype_VectorWeak: st = 1; break;
+            case subtype_VectorValidHashing: st = 2; break;
+            }
+            ++v->sv_subtypes[st].count;
+            v->sv_subtypes[st].words += words;
+        }
+    }
+}
+
+static uword_t visit(lispobj* where, lispobj* limit, uword_t arg)
+{
+    struct visitor* v = (struct visitor*)arg;
+    lispobj* obj = where;
+    while (obj < limit) {
+        lispobj ptr = compute_lispobj(obj);
+        tally(ptr, v);
+        // Weird stuff happens in genesis where this logic thinks that the
+        // cold core holds a ton of unreachable objects. I have no idea why.
+        if (!hopscotch_get(v->reached, ptr, 0))
+            printf("object not reached: %p\n", (void*)ptr);
+        obj += OBJECT_SIZE(*obj, obj);
+    }
+    return 0;
+}
+
+#ifdef LISP_FEATURE_GENCGC
+#define dynamic_space_pointer_p(ptr) (find_page_index((void*)ptr) >= 0)
+#endif
+
+static void sanity_check_loaded_core(lispobj initial_function)
+{
+    struct visitor v[2];
+    struct hopscotch_table reached;
+    memset(v, 0, sizeof v);
+    // Pass 1: Count objects reachable from known roots.
+    hopscotch_create(&reached, HOPSCOTCH_HASH_FUN_DEFAULT,
+                     0, // no values
+                     1<<18, /* initial size */
+                     0);
+    {
+      lispobj* where = (lispobj*)STATIC_SPACE_START;
+      lispobj* end = static_space_free_pointer;
+      while (where<end) {
+        // This falsely treats NIL as 4 conses but it doesn't really matter.
+        // The garbage collectors do too.
+        graph_visit(0, compute_lispobj(where), &reached);
+        where += OBJECT_SIZE(*where, where);
+      }
+    }
+    graph_visit(0, initial_function, &reached); // not otherwise reachable
+    // having computed the reaching graph, tally up the dynamic space objects
+    int key_index;
+    lispobj ptr;
+    for_each_hopscotch_key(key_index, ptr, reached)
+        if (dynamic_space_pointer_p(ptr))
+            tally(ptr, &v[0]);
+    // Pass 2: Count all heap objects
+    v[1].reached = &reached;
+    walk_generation(visit, -1, (uword_t)&v[1]);
+    // Pass 3: Compare
+    // Start with the conses
+    v[0].headers[0].words = v[0].headers[0].count * 2;
+    v[1].headers[0].words = v[1].headers[0].count * 2;
+    printf("-----------------------------------------------|\n");
+    printf("       Graph walk     |         Actual         |\n");
+    printf("----------------------+------------------------|\n");
+    int i;
+    for(i=0; i<=64; ++i) {
+        // print all valid widetags (not unknown) that aren't for immediates,
+        // but always print if nonzero.
+        if (v[1].headers[i].count ||
+            ((strncmp(widetag_names[i], "unk", 3)
+              && (i != CHARACTER_WIDETAG>>2)
+              && (i != SIMPLE_FUN_WIDETAG>>2)
+              && (i != NO_TLS_VALUE_MARKER_WIDETAG>>2)
+              && (i != UNBOUND_MARKER_WIDETAG>>2)))) {
+            int mismatch = v[0].headers[i].count != v[1].headers[i].count;
+            printf("%8d %11d  | %8d %11d   | %s%s\n",
+                   v[0].headers[i].count, v[0].headers[i].words,
+                   v[1].headers[i].count, v[1].headers[i].words,
+                   i<64 ? (i ? widetag_names[i] : "cons") : "TOTAL",
+                   mismatch ? " <<<<" : "");
+            if (i == SIMPLE_VECTOR_WIDETAG>>2) {
+                int j;
+                for(j=1; j <= 2; ++j)
+                    printf("%8d %11d  | %8d %11d   |   %s\n",
+                           v[0].sv_subtypes[j].count, v[0].sv_subtypes[j].words,
+                           v[1].sv_subtypes[j].count, v[1].sv_subtypes[j].words,
+                           j==1 ? "weak" : "hashing");
+
+            }
+            v[0].headers[64].count += v[0].headers[i].count;
+            v[1].headers[64].count += v[1].headers[i].count;
+            v[0].headers[64].words += v[0].headers[i].words;
+            v[1].headers[64].words += v[1].headers[i].words;
+        }
+    }
+    hopscotch_destroy(&reached);
+}
+#else
+static void sanity_check_loaded_core(lispobj __attribute__((unused)) initial_function) {}
+#endif

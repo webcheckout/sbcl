@@ -562,6 +562,7 @@ necessary, since type inference may take arbitrarily long to converge.")
       ;; STACK only uses dominance information for DX LVAR back
       ;; propagation (see BACK-PROPAGATE-ONE-DX-LVAR).
       (when (component-dx-lvars component)
+        (clear-dominators component)
         (find-dominators component))
       (stack-analyze component)
       ;; Assign BLOCK-NUMBER for any cleanup blocks introduced by
@@ -633,7 +634,7 @@ necessary, since type inference may take arbitrarily long to converge.")
                 (let ((ranges
                         (maplist (lambda (list)
                                    (cons (+ (car list)
-                                            (ash sb-vm:simple-fun-code-offset
+                                            (ash sb-vm:simple-fun-insts-offset
                                                  sb-vm:word-shift))
                                          (or (cadr list) text-length)))
                                  fun-table)))
@@ -1091,7 +1092,8 @@ necessary, since type inference may take arbitrarily long to converge.")
   (let ((*top-level-form-noted* (note-top-level-form form t)))
     ;; Don't bother to compile simple objects that just sit there.
     (when (and form (or (symbolp form) (consp form)))
-      (if (and (policy *policy*
+      (if (and #-sb-xc-host
+               (policy *policy*
                    ;; FOP-compiled code is harder do debug.
                    (or (< debug 2)
                        (> space debug)))

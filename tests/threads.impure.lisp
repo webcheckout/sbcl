@@ -642,7 +642,7 @@
 (with-test (:name :all-threads-have-abort-restart
                   :broken-on :win32)
   (loop repeat 100 do
-        (let ((thread (make-kill-thread (lambda () (sleep 0.1)))))
+        (let ((thread (make-kill-thread (lambda () (sleep 100000000)))))
           (interrupt-thread thread (lambda ()
                                      (assert (find-restart 'abort))))
           (process-all-interrupts thread))))
@@ -865,7 +865,7 @@
 ;; to have the test summary show that a test was disabled.
 #+gencgc
 (unless (eql (extern-alien "verify_gens" int)
-             (1+ sb-vm:+highest-normal-generation+))
+             (+ sb-vm:+highest-normal-generation+ 2))
   (pushnew :verify-gens *features*))
 
 (with-test (:name :backtrace :broken-on :verify-gens)

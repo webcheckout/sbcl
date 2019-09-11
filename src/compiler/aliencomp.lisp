@@ -68,6 +68,14 @@
 
 (defknown alien-funcall (alien-value &rest *) *
   (any recursive))
+
+(defknown sb-alien::string-to-c-string (simple-string t) (or (simple-array (unsigned-byte 8) (*))
+                                                             simple-base-string)
+    (movable flushable))
+(defknown sb-alien::c-string-to-string (system-area-pointer t t) simple-string
+    (movable flushable))
+(defknown sb-alien::c-string-external-format * *
+        (movable flushable))
 
 ;;;; cosmetic transforms
 
@@ -818,3 +826,11 @@
                           (reference-tn (car (ir2-lvar-locs (lvar-info lvar))) t)))
           (t
            (move-lvar-result call block result-tns lvar)))))))
+
+(deftransform sb-alien::c-string-external-format ((type)
+                                                  ((constant-arg sb-alien::alien-c-string-type)))
+  (let ((format (sb-alien::alien-c-string-type-external-format
+                 (lvar-value type))))
+    (if (eq format :default)
+        `(sb-alien::default-c-string-external-format)
+        `',format)))

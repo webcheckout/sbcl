@@ -241,18 +241,27 @@
             #-sb-thread (loop repeat 10 collect (start-run))))))
 
 (with-test (:name (run-program :pty-stream) :fails-on :win32)
-  (assert (equal "OK"
-                 (handler-case
-                  (with-timeout 6
-                    (subseq
-                     (with-output-to-string (s)
-                       (assert (= 42 (process-exit-code
-                                      (run-program "/bin/sh" '("-c" "echo OK; exit 42") :wait t
-                                                                                        :pty s))))
-                       s)
-                     0
-                     2))
-                  (timeout () "timeout")))))
+  (let (process
+        stream)
+    (assert (equal "OK"
+                   (handler-bind
+                       ((timeout (lambda (c)
+                                   c
+                                   (format t "~a ~a~%" process
+                                           (when stream
+                                             (get-output-stream-string stream))))))
+                     (with-timeout 60
+                       (subseq
+                        (with-output-to-string (s)
+                          (setf stream s)
+                          (setf process
+                                (run-program "/bin/sh" '("-c" "echo OK; exit 42") :pty s
+                                                                                  :wait nil))
+                          (process-wait process)
+                          (assert (= (process-exit-code process) 42))
+                          s)
+                        0
+                        2)))))))
 
 ;; Check whether RUN-PROGRAM puts its child process into the foreground
 ;; when stdin is inherited. If it fails to do so we will receive a SIGTTIN.

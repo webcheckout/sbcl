@@ -786,10 +786,17 @@ unless :NAMED is also specified.")))
                            spec)))
 
     (when (find name (dd-slots defstruct) :test #'string= :key #'dsd-name)
-      ;; TODO: indicate whether name is a duplicate in the directly
-      ;; specified slots vs. exists in the ancestor and so should
-      ;; be in the (:include ...) clause instead of where it is.
-      (%program-error "duplicate slot name ~S" name))
+      (let* ((parent (find-defstruct-description (first (dd-include defstruct))))
+             (included? (find name
+                              (dd-slots parent)
+                              :key #'dsd-name
+                              :test #'string=)))
+        (if included?
+          (%program-error "slot name ~s duplicated via included ~a"
+                          name
+                          (dd-name parent))
+          (%program-error "duplicate slot name ~S" name))))
+
     (setf accessor-name (if (dd-conc-name defstruct)
                             (symbolicate (dd-conc-name defstruct) name)
                             name))
@@ -816,7 +823,7 @@ unless :NAMED is also specified.")))
       ;;x(when (and (fboundp accessor-name)
       ;;x           (not (accessor-inherited-data accessor-name defstruct)))
       ;;x  (style-warn "redefining ~/sb-ext:print-symbol-with-prefix/ ~
-      ;;                in DEFSTRUCT" accessor-name)))
+      ;;                in DEFSTRUCT" accessor-name))
       ;; which was done until sbcl-0.8.11.18 or so, is wrong: it causes
       ;; a warning at MACROEXPAND time, when instead the warning should
       ;; occur not just because the code was constructed, but because it

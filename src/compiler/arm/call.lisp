@@ -123,7 +123,7 @@
     (emit-label start-lab)
     ;; Allocate function header.
     (inst simple-fun-header-word)
-    (inst .skip (* (1- simple-fun-code-offset) n-word-bytes))
+    (inst .skip (* (1- simple-fun-insts-offset) n-word-bytes))
     (inst compute-code code-tn lip start-lab temp)))
 
 (define-vop (xep-setup-sp)
@@ -461,6 +461,30 @@
   (:generator 5
     (inst add temp context index)
     (loadw value temp)))
+
+(define-vop (more-arg-or-nil)
+  (:policy :fast-safe)
+  (:args (object :scs (descriptor-reg) :to (:result 1))
+         (count :scs (any-reg) :to (:result 1)))
+  (:arg-types * tagged-num)
+  (:info index)
+  (:temporary (:sc unsigned-reg) temp)
+  (:results (value :scs (descriptor-reg any-reg)))
+  (:result-types *)
+  (:generator 3
+    (flet ((maybe-load-immediate (x)
+             (cond ((encodable-immediate x)
+                    x)
+                   (t
+                    (load-immediate-word temp x)
+                    temp))))
+      (inst mov value null-tn)
+      (inst cmp count (maybe-load-immediate (fixnumize index)))
+      (inst b :le done)
+      (inst ldr value
+            (@ object
+               (maybe-load-immediate (ash index word-shift)))))
+    done))
 
 ;;; Turn more arg (context, count) into a list.
 (define-vop (listify-rest-args)

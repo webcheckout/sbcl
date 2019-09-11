@@ -686,6 +686,15 @@
           (t
            nil))))
 
+(defun interval-range-info> (x &optional (point 0))
+  (declare (type interval x))
+  (let ((lo (interval-low x))
+        (hi (interval-high x)))
+    (cond ((and lo (signed-zero->= (type-bound-number lo) point))
+           '+)
+          ((and hi (signed-zero-> point (type-bound-number hi)))
+           '-))))
+
 ;;; Test to see whether the interval X is bounded. HOW determines the
 ;;; test, and should be either ABOVE, BELOW, or BOTH.
 (defun interval-bounded-p (x how)
@@ -1775,16 +1784,15 @@
 
 (defun truncate-derive-type-quot-aux (num div same-arg)
   (declare (ignore same-arg))
-  (if (and (numeric-type-real-p num)
-           (numeric-type-real-p div))
-      (truncate-derive-type-quot num div)
-      *empty-type*))
+  (when (and (numeric-type-real-p num)
+             (numeric-type-real-p div))
+    (truncate-derive-type-quot num div)))
 
 (defun truncate-derive-type-rem-aux (num div same-arg)
   (declare (ignore same-arg))
   (cond ((not (and (numeric-type-real-p num)
                    (numeric-type-real-p div)))
-         *empty-type*)
+         nil)
         ;; Floats introduce rounding errors
         ((and (memq (numeric-type-class num) '(integer rational))
               (memq (numeric-type-class div) '(integer rational)))
@@ -1814,10 +1822,9 @@
 
 (defun ftruncate-derive-type-quot-aux (n d same-arg)
   (declare (ignore same-arg))
-  (if (and (numeric-type-real-p n)
-           (numeric-type-real-p d))
-      (ftruncate-derive-type-quot n d)
-      *empty-type*))
+  (when (and (numeric-type-real-p n)
+             (numeric-type-real-p d))
+    (ftruncate-derive-type-quot n d)))
 
 (defoptimizer (ftruncate derive-type) ((number divisor))
   (let ((quot
@@ -1858,7 +1865,7 @@
                        (lambda (n)
                          (block nil
                            (unless (numeric-type-real-p n)
-                             (return *empty-type*))
+                             (return))
                            (let* ((interval (numeric-type->interval n))
                                   (low      (interval-low interval))
                                   (high     (interval-high interval)))
@@ -1924,15 +1931,14 @@
            (defoptimizer (,name derive-type) ((number divisor))
              (flet ((derive-q (n d same-arg)
                       (declare (ignore same-arg))
-                      (if (and (numeric-type-real-p n)
-                               (numeric-type-real-p d))
-                          (,q-aux n d)
-                          *empty-type*))
+                      (when (and (numeric-type-real-p n)
+                                 (numeric-type-real-p d))
+                        (,q-aux n d)))
                     (derive-r (num div same-arg)
                       (declare (ignore same-arg))
                       (cond ((not (and (numeric-type-real-p num)
                                        (numeric-type-real-p div)))
-                             *empty-type*)
+                             nil)
                             ;; Floats introduce rounding errors
                             ((and (memq (numeric-type-class num) '(integer rational))
                                   (memq (numeric-type-class div) '(integer rational)))
@@ -1974,15 +1980,14 @@
                   (defoptimizer (,name derive-type) ((number divisor))
                     (flet ((derive-q (n d same-arg)
                              (declare (ignore same-arg))
-                             (if (and (numeric-type-real-p n)
-                                      (numeric-type-real-p d))
-                                 (,q-aux n d)
-                                 *empty-type*))
+                             (when (and (numeric-type-real-p n)
+                                        (numeric-type-real-p d))
+                               (,q-aux n d)))
                            (derive-r (num div same-arg)
                              (declare (ignore same-arg))
                              (cond ((not (and (numeric-type-real-p num)
                                               (numeric-type-real-p div)))
-                                    *empty-type*)
+                                    nil)
                                    ;; Floats introduce rounding errors
                                    ((and (memq (numeric-type-class num) '(integer rational))
                                          (memq (numeric-type-class div) '(integer rational)))
@@ -2526,10 +2531,17 @@
              ;; -0d0.  Ugh.  So force it in here, instead.
              (zero (make-numeric-type :class class :format format
                                       :low (sb-xc:- zero) :high zero)))
-        (case range-info
-          (+ (if contains-0-p (type-union plus zero) plus))
-          (- (if contains-0-p (type-union minus zero) minus))
-          (t (type-union minus zero plus))))))
+        (let ((result
+                (case range-info
+                  (+ (if contains-0-p (type-union plus zero) plus))
+                  (- (if contains-0-p (type-union minus zero) minus))
+                  (t (type-union minus zero plus)))))
+          (if (eq (numeric-type-complexp type) :real)
+              result
+              (type-union result (make-numeric-type :class 'float
+                                                    :complexp :complex
+                                                    :low -1
+                                                    :high 1)))))))
 
 (defoptimizer (signum derive-type) ((num))
   (one-arg-derive-type num #'signum-derive-type-aux nil))
@@ -5080,20 +5092,18 @@
 
 
 (deftransform make-string-output-stream ((&key element-type))
-  (let ((element-type (cond ((not element-type)
-                             'character)
-                            ((constant-lvar-p element-type)
-                             (let ((specifier (ir1-transform-specifier-type
-                                               (lvar-value element-type))))
-                               (and (csubtypep specifier (specifier-type 'character))
-                                    (type-specifier specifier)))))))
-   (if element-type
-       `(sb-impl::%make-string-output-stream
-         ',element-type
-         (function ,(case element-type
-                      (base-char 'sb-impl::string-ouch/base-char)
-                      (t 'sb-impl::string-ouch))))
-       (give-up-ir1-transform))))
+  (case (cond ((not element-type) #+sb-unicode 'character #-sb-unicode 'base-char)
+              ((not (constant-lvar-p element-type)) nil)
+              (t (let ((requested-type
+                        (ir1-transform-specifier-type (lvar-value element-type))))
+                   (cond ((eq requested-type *empty-type*) nil) ; what a loser
+                         ((csubtypep requested-type (specifier-type 'base-char))
+                          'base-char)
+                         ((csubtypep requested-type (specifier-type 'character))
+                          'character)))))
+    (character `(sb-impl::%make-character-string-ostream))
+    (base-char `(sb-impl::%make-base-string-ostream))
+    (t (give-up-ir1-transform))))
 
 (flet ((xform (symbol match-kind fallback)
          (when (constant-lvar-p symbol)
@@ -5158,3 +5168,31 @@
 
 (deftransform princ ((object &optional stream) (string &optional t))
   `(write-string object stream))
+
+#+sb-thread
+(defoptimizer (sb-thread::call-with-recursive-lock derive-type) ((function mutex waitp timeout))
+  (declare (ignore mutex))
+  (let ((type (lvar-fun-type function)))
+    (when (fun-type-p type)
+      (let ((null-p (not (and (constant-lvar-p waitp)
+                              (lvar-value waitp)
+                              (constant-lvar-p timeout)
+                              (null (lvar-value timeout))))))
+        (if null-p
+            (values-type-union (fun-type-returns type)
+                               (values-specifier-type '(values null &optional)))
+            (fun-type-returns type))))))
+
+#+sb-thread
+(defoptimizer (sb-thread::call-with-mutex derive-type) ((function mutex value waitp timeout))
+  (declare (ignore mutex value))
+  (let ((type (lvar-fun-type function)))
+    (when (fun-type-p type)
+      (let ((null-p (not (and (constant-lvar-p waitp)
+                              (lvar-value waitp)
+                              (constant-lvar-p timeout)
+                              (null (lvar-value timeout))))))
+        (if null-p
+            (values-type-union (fun-type-returns type)
+                               (values-specifier-type '(values null &optional)))
+            (fun-type-returns type))))))

@@ -148,6 +148,8 @@
   (name (error "missing PACKAGE-DATA-NAME datum"))
   ;; a doc string
   (doc (error "missing PACKAGE-DOC datum"))
+  ;; a list of string designators for shadowing symbols
+  shadow
   ;; a tree containing names for exported symbols which'll be set up at package
   ;; creation time, and NILs, which are ignored. (This is a tree in order to
   ;; allow constructs like '("ENOSPC" #+LINUX ("EDQUOT" "EISNAM" "ENAVAIL"
@@ -212,7 +214,14 @@
 ;;;   (* 50 (hash-table-rehash-threshold (make-hash-table)))
 ;;; because we are not intercepting '*.
 (defparameter *dual-personality-math-symbols*
-  '("+" "-" "*" "/" "=" "/=" "<" "<=" ">" ">=" "MIN" "MAX"))
+  '("+" "-" "*" "/" "=" "/=" "<" "<=" ">" ">=" "MIN" "MAX"
+    ;; We've gotten along quite well without an alter-ego for FIXNUM,
+    ;; but now some s-expressions mentioning the type FIXNUM are fed
+    ;; to the host for evaluation, and a type-checking host (such as we are)
+    ;; croaks if an argument exceeds the host's notion of fixnum.
+    ;; Get around it by changing those uses of fixnum to SB-XC:FIXNUM.
+    "FIXNUM"
+    ))
 
 ;;; When playing such tricky package games, it's best to have the symbols that
 ;;; are visible by default, i.e. XC-STRICT-CL:NAME, have no definition,
@@ -394,6 +403,9 @@
     (dolist (package-data package-data-list)
       (let* ((name (package-data-name package-data))
              (package (make-package name :use nil)))
+        ;; Walk the tree of shadowing names
+        (dolist (string (flatten (package-data-shadow package-data)))
+          (shadow string package))
         ;; Walk the tree of exported names, exporting each name.
         (dolist (string (flatten (package-data-export package-data)))
           (export (intern string package) package))))

@@ -501,7 +501,7 @@
                      original-fun))
             (*compiler-error-context* call))
 
-        (when (and (eq (functional-inlinep fun) :inline)
+        (when (and (eq (functional-inlinep fun) 'inline)
                    (rest (leaf-refs original-fun))
                    ;; Some REFs are already unused bot not yet deleted,
                    ;; avoid unneccessary inlining
@@ -577,7 +577,8 @@
   (with-ir1-environment-from-node node
     (transform-call node lambda
                     (or (combination-fun-source-name node nil)
-                        default-name))))
+                        default-name)
+                    nil)))
 
 (defun warn-invalid-local-call (node count &rest warn-arguments)
   (declare (notinline warn)) ; See COMPILER-WARN for rationale
@@ -1160,18 +1161,18 @@
   ;;
   ;; A functional that is already inline-expanded in this componsne definitely
   ;; deserves let-conversion -- and in case of main entry points for inline
-  ;; expanded optional dispatch, the main-etry isn't explicitly marked :INLINE
+  ;; expanded optional dispatch, the main-etry isn't explicitly marked INLINE
   ;; even if the function really is.
   (when (and (leaf-has-source-name-p clambda)
              (not (functional-inline-expanded clambda)))
     ;; ANSI requires that explicit NOTINLINE be respected.
-    (or (eq (lambda-inlinep clambda) :notinline)
+    (or (eq (lambda-inlinep clambda) 'notinline)
         ;; If (= LET-CONVERSION 0) we can guess that inlining
         ;; generally won't be appreciated, but if the user
         ;; specifically requests inlining, that takes precedence over
         ;; our general guess.
         (and (policy clambda (= let-conversion 0))
-             (not (eq (lambda-inlinep clambda) :inline))))))
+             (not (eq (lambda-inlinep clambda) 'inline))))))
 
 ;;; We also don't convert calls to named functions which appear in the
 ;;; initial component, delaying this until optimization. This

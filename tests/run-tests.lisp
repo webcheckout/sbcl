@@ -13,6 +13,8 @@
 (defvar *break-on-error* nil)
 (defvar *report-skipped-tests* nil)
 (defvar *explicit-test-files* nil)
+(defvar *input-manifest*)
+(defvar *allowed-inputs*)
 
 (load "test-funs")
 
@@ -106,9 +108,80 @@
     (format log "~6d - ~a~%" (- end-time begin-time) source-file)
     (force-output log)))
 
+;;; This is a bit of a hack designed to emulate a sandboxed test runner.
+;;; For the sandbox to be properly set up to execute each test, it needs
+;;; the names of the files that the test will access for reading.
+;;; Without a sandbox, we want to fail in the same way that the sandboxed
+;;; executor would, so that we can know when 'input-manifest.lisp-expr'
+;;; needs to be edited.
+;;; I'm not sure of the best way to allow deliberately nonexistent files
+;;; here other than by hardcoding the names we expect.
+;;; A more pedantic approach might check whether FILENAME definitely is
+;;; a file on disk that was not declared. That's getting a bit insane,
+;;; because then we'd have to keep track of directory changes, when this is
+;;; only a bare minimum of effort to make sure that the manifest stays in
+;;; sync with reality for people who run tests in the ordinary way.
+;;;
+;;; If *allowed-inputs* is :ANY, then we at worst print a note, and don't
+;;; signal an error.  This was the simplest way I could imagine to get tests
+;;; to pass when truenames don't match source file names, as long as declared
+;;; input filtering has already happened.
+;;; If you're using something like https://bazel.build/ then it provides
+;;; the sandboxing, and the program under test shouldn't try to add another layer.
+;;; e.g. if you have two worker nodes, one of them is in a file tree which for
+;;; purposes of a test contains only the files named "run-tests.lisp" and
+;;; "foo.pure.lisp", and the other has only "run-tests.lisp" and "bar.pure.lisp",
+;;; - and perhaps they share storage - such that all of the files
+;;; are actually links:
+;;;   run-tests.lisp -> /blah/xyz12431/c984
+;;;   foo.pure.lisp  -> /blah/zyz23431/c134
+;;;   bar.pure.lisp  -> /blah/fr0bbotz/2344
+;;; then everything that the code below tries to do to determine acceptability
+;;; of filenames in pretty much broken.
+(defun check-manifest (filename)
+  ;; We might see:
+  ;;  - "data/compile-file-pos.lisp" or
+  ;;  - #P"/path/to/sbcl/tests/data/compile-file-pos.lisp"
+  ;; The latter is generally from COMPILE-FILE.
+  ;; For the latter we could compute the pathname relative to this directory.
+  ;; However, for the moment it suffices to just match on the name
+  ;; without its directory components.
+  (declare (ignorable filename))
+  #-win32
+  (labels ((stem-of (thing)
+             (namestring (make-pathname :name (pathname-name thing)
+                                        :type (pathname-type thing))))
+           (stem= (a b)
+             (string= (stem-of a) (stem-of b))))
+    (unless (eq (pathname-host filename) sb-impl::*physical-host*)
+      (return-from check-manifest))
+    (let ((string (namestring filename)))
+      (when (or (find #\* (stem-of filename)) ; wild
+                (= (mismatch string "/dev/") 5) ; dev/null and dev/random
+                (= (mismatch string "/tmp/") 5)
+                (= (mismatch string "/var/tmp/") 9)
+                (eql (search "/private/var/folders/" string) 0)
+                (equal string "/proc/self/maps")
+                (member (stem-of filename) '("compiler-test-util.lisp"
+                                             "a.txt" "b.lisp"
+                                             "no-such-file")
+                        :test #'string=)
+                (string= (pathname-name filename) "i-am-not") ; any extension
+                (and (boundp '*allowed-inputs*)
+                     (listp *allowed-inputs*)
+                     (find filename *allowed-inputs* :test #'stem=)))
+        (return-from check-manifest)))
+    (if (and (boundp '*allowed-inputs*) (eq *allowed-inputs* :any))
+        (format *error-output* "~&Assumed valid input file: ~S" filename)
+        (error "Missing input file in manifest: ~S~%" filename))))
+
 (defun pure-runner (files test-fun log)
   (unless files
     (return-from pure-runner))
+  (unless (boundp '*input-manifest*)
+    (with-open-file (manifest "input-manifest.lisp-expr" :if-does-not-exist nil)
+      (setf *input-manifest*
+            (if manifest (read manifest) :ignore))))
   (format t "// Running pure tests (~a)~%" test-fun)
   (let ((*failures* nil)
         ;; in case somebody corrupts CL-USER's use list, of course
@@ -125,7 +198,20 @@
                   (make-package
                    (format nil "TEST~36,5,'_R" (random (expt 36 5)))
                    :use (append packages-to-use standard-use-list))
-                  (find-package "CL-USER"))))
+                  (find-package "CL-USER")))
+             (*allowed-inputs*
+              (if (eq *input-manifest* :ignore)
+                  :any
+                  (append (cdr (assoc (namestring (make-pathname :name (pathname-name file)
+                                                                 :type (pathname-type file)))
+                                      *input-manifest* :test #'string=))
+                          (list file)))))
+        (sb-int:encapsulate
+         'open 'open-guard
+         (lambda (f filename &rest args &key direction &allow-other-keys)
+           (when (or (not direction) (eq direction :input))
+             (check-manifest filename))
+           (apply f filename args)))
         ;; We want to ensure that pure tests remain as pure as possible.
         ;; DEFSTRUCT, DEFCLASS, DEFGENERIC, DEFMETHOD are certainly impure
         ;; as there is no easy way to eradicate after-effects. Supposing that
@@ -169,6 +255,7 @@
                   (funcall test-fun file)
                   (log-file-elapsed-time file start log))))
             (skip-file ())))
+        (sb-int:unencapsulate 'open 'open-guard)
         (when actually-pure
           (dolist (symbol '(sb-pcl::compile-or-load-defgeneric
                             sb-kernel::%compiler-defclass))

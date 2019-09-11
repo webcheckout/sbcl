@@ -244,13 +244,57 @@
      (setf (%simple-fun-arglist (%fun-fun function)) new-value)))
   new-value)
 
-;;; Extract the type from the function header FUNC.
-(defun %simple-fun-type (func)
-  (let ((internal-type (sb-vm::%%simple-fun-type func)))
+(macrolet ((access-slot (index)
+             `(code-header-ref
+               (fun-code-header fun)
+               (+ (* sb-vm:code-slots-per-simple-fun (%simple-fun-index fun))
+                  sb-vm:code-constants-offset ,index)))
+           (def (accessor index)
+             `(progn
+                (defun (setf ,accessor) (newval fun)
+                  ;; Prevent wild pointers due to 'purify' moving all code to
+                  ;; readonly space. (Can't have read-only pointing to dynamic)
+                  ;; There are a number of things we could do to "fix" this, none
+                  ;; particularly interesting or meritorious imho, e.g.:
+                  ;;   - Copy the name to static space
+                  ;;   - Use an external hash-table (a la named closures),
+                  ;;   - Implement some other notion of "forwarded" names
+                  ;;   - Track which pages of read-only [sic] space have been written
+                  ;;   - Scavenge all of read-only space always
+                  ;;   - Write-protect read-only space to completely prevent this
+                  (if #+cheneygc (and (eq (heap-allocated-p fun) :read-only)
+                                      (eq (heap-allocated-p newval) :dynamic))
+                      #-cheneygc nil
+                      (progn (warn ,(format nil "Can't assign ~A of ~~A" accessor) fun)
+                             newval)
+                      (setf (access-slot ,index) newval)))
+                (defun ,accessor (fun)
+                  (access-slot ,index)))))
+  ;; possible FIXME for the backends which treat the assembly trampolines
+  ;; as tagged functions (with fun-pointer-lowtag) - we might need to ensure
+  ;; that the code object reserves space for 4 NILs just in case a simple-fun
+  ;; accessor is called on it. I'm not entirely sure whether that's necessary.
+
+  (def %simple-fun-name    sb-vm:simple-fun-name-slot)
+  (def %simple-fun-arglist sb-vm:simple-fun-arglist-slot)
+  (def %simple-fun-source  sb-vm:simple-fun-source-slot)
+  (def %simple-fun-info    sb-vm:simple-fun-info-slot))
+
+(defun %simple-fun-type (fun)
+  (let* ((info (%simple-fun-info fun))
+         (internal-type (typecase info
+                          ((cons t simple-vector) (car info)) ; (type . xref)
+                          ((not simple-vector) info))))
     ;; For backward-compatibility we expand SFUNCTION -> FUNCTION.
     (if (and (listp internal-type) (eq (car internal-type) 'sfunction))
         (sb-ext:typexpand-1 internal-type)
         internal-type)))
+
+(defun %simple-fun-xrefs (fun)
+  (let ((info (%simple-fun-info fun)))
+    (typecase info
+      ((cons t simple-vector) (cdr info))
+      (simple-vector info))))
 
 (defun %fun-type (function)
   (typecase function
@@ -260,80 +304,29 @@
     (interpreted-function (sb-interpreter:%fun-type function))
     (t (%simple-fun-type (%fun-fun function)))))
 
-;;; A FUN-SRC structure appears in %SIMPLE-FUN-INFO of any function for
-;;; which a source form is retained via COMPILE or LOAD and for which it was
-;;; required to store all three of these pieces of data.
-(defstruct (fun-src (:constructor make-fun-src (form doc xrefs))
-                    (:predicate nil)
-                    (:copier nil))
-  form
-  doc
-  xrefs)
-;;; Assign %SIMPLE-FUN-INFO given the three possible things that
-;;; we stash there.
-(defun set-simple-fun-info (fun form doc xrefs)
-  (setf (%simple-fun-info fun)
-        (if form
-            ;; If form starts with a string, we can't store it by itself
-            ;; because it's confusable with (CONS STRING *)
-            ;; Lambda expressions start with LAMBDA, obviously,
-            ;; so this really shouldn't happen. Just being defensive here.
-            (if (or doc xrefs (typep form '(cons string)))
-                (make-fun-src form doc xrefs)
-                form)
-            (if (and doc xrefs)
-                (cons doc xrefs)
-                (or doc xrefs)))))
-
-;;; Define readers for parts of SIMPLE-FUN-INFO, which holds:
-;;;  - a string if documentation only,
-;;;  - a SIMPLE-VECTOR if xrefs only
-;;;  - a (CONS STRING SIMPLE-VECTOR) if both
-;;;  - a CONS headed by LAMBDA if a source form only
-;;;  - a FUN-SRC if other combinations of the above
-;;;  - or NIL
-(macrolet ((def (name info-part if-simple-vector if-string if-struct)
-             `(defun ,name (simple-fun)
-                (declare (simple-fun simple-fun))
-                (let ((info (%simple-fun-info simple-fun)))
-                  (typecase info
-                    ;; (CONS (NOT STRING)) implies neither doc nor xref present
-                    (list (if (stringp (car info)) (,info-part info)))
-                    (simple-vector ,if-simple-vector)
-                    (string ,if-string)
-                    (fun-src ,if-struct)
-                    (t (bug "bogus INFO for ~S: ~S" simple-fun info)))))))
-  (def %simple-fun-doc   car nil info (fun-src-doc info))
-  (def %simple-fun-xrefs cdr info nil (fun-src-xrefs info)))
-
 ;;; Return the lambda expression for SIMPLE-FUN if compiled to memory
 ;;; and rentention of forms was enabled via the EVAL-STORE-SOURCE-FORM policy
 ;;; (as is the default).
 (defun %simple-fun-lexpr (simple-fun)
   (declare (simple-fun simple-fun))
-  (let ((info (%simple-fun-info simple-fun)))
-    (typecase info
-      (fun-src (fun-src-form info))
-      ((cons (not string)) info))))
+  (let ((source (%simple-fun-source simple-fun)))
+    (typecase source
+      ((cons t string) (car source))
+      ((not string) source))))
+
+(defun %simple-fun-doc (simple-fun)
+  (declare (simple-fun simple-fun))
+  (let ((source (%simple-fun-source simple-fun)))
+    (typecase source
+      ((cons t string) (cdr source))
+      (string source))))
 
 (defun (setf %simple-fun-doc) (doc simple-fun)
   (declare (type (or null string) doc)
            (simple-fun simple-fun))
-  (let ((info (%simple-fun-info simple-fun)))
-    (setf (%simple-fun-info simple-fun)
-          (typecase info
-            ((or null string) doc)
-            (simple-vector
-             (if doc (cons doc info) info))
-            ((cons string)
-             (if doc (rplaca info doc) (cdr info)))
-            (fun-src
-             (setf (fun-src-doc info) doc)
-             info)
-            ((cons (not string))
-             (if doc (make-fun-src info doc nil) info))
-            (t
-             (bug "bogus INFO for ~S: ~S" simple-fun info)))))
+  (setf (%simple-fun-source simple-fun)
+        (let ((form (%simple-fun-lexpr simple-fun)))
+          (if (and form doc) (cons form doc) (or form doc))))
   doc)
 
 (defun %simple-fun-next (simple-fun) ; DO NOT USE IN NEW CODE
@@ -342,7 +335,6 @@
 
 ;;; Return the number of bytes to subtract from the untagged address of SIMPLE-FUN
 ;;; to obtain the untagged address of its code component.
-;;; Not to be confused with SIMPLE-FUN-CODE-OFFSET which is a constant.
 ;;; See also CODE-FROM-FUNCTION.
 (declaim (inline %fun-code-offset))
 (defun %fun-code-offset (simple-fun)
@@ -464,7 +456,7 @@
   #-(or x86 x86-64)
   (int-sap (+ (get-lisp-obj-address fun)
               (- sb-vm:fun-pointer-lowtag)
-              (ash sb-vm:simple-fun-code-offset sb-vm:word-shift)))
+              (ash sb-vm:simple-fun-insts-offset sb-vm:word-shift)))
   ;; The preceding case would actually work, but I'm anticipating a change
   ;; in which simple-fun headers are all contiguous in their code component,
   ;; followed by all the machine instructions for all the simple-funs.
@@ -512,7 +504,7 @@
                     (setq index (%simple-fun-index simple-fun)))
                 (%code-fun-offset code (1+ index))))
          (%code-fun-offset code index)
-         (ash sb-vm:simple-fun-code-offset sb-vm:word-shift))))
+         (ash sb-vm:simple-fun-insts-offset sb-vm:word-shift))))
 
 (defun code-n-unboxed-data-bytes (code-obj)
   ;; If the number of boxed words (from the header) is not the same as
@@ -542,23 +534,21 @@
                       'undefined-function)
                   :name symbol))
           t
-          fun-name)))
-    ;; In most cases, install the guard closure in the usual way.
-    #-immobile-code (setf (fdefn-fun (find-or-create-fdefn symbol)) closure)
+          fun-name))
+        (fdefn (find-or-create-fdefn symbol)))
 
-    ;; Do something slightly different for immobile code: fmakunbound, causing the FUN
-    ;; slot to become NIL, and RAW-ADDR to contain a call instruction; then overwrite
-    ;; NIL with the above closure. This is better than assigning a closure, because
-    ;; assigning a closure into an fdefn generally conses a new closure trampoline.
-    ;; (The CALL goes to undefined tramp which pops the stack to deduce the fdefn)
+    ;; In most cases, install the guard closure in the usual way.
+    #-immobile-code (setf (fdefn-fun fdefn) closure)
+
+    ;; Do something slightly different for immobile code: fmakunbound, assigning
+    ;; FUN = NIL and RAW-ADDR = UNDEFINED-TRAMP; then overwrite the NIL with the
+    ;; above closure. This is better than assigning a closure, because closures
+    ;; require a new closure-calling trampoline to be consed.
     #+immobile-code
-    (let ((fdefn (find-or-create-fdefn symbol)))
-      (fdefn-makunbound fdefn)
-      (%primitive sb-vm::set-fdefn-fun ; This invokes TOUCH-GC-CARD
-                  fdefn closure
-                  (sap-ref-word (int-sap (get-lisp-obj-address fdefn))
-                                (- (ash sb-vm:fdefn-raw-addr-slot sb-vm:word-shift)
-                                   sb-vm:other-pointer-lowtag))))))
+    (progn (fdefn-makunbound fdefn)
+           (%primitive sb-vm::set-undefined-fdefn-fun fdefn closure))
+
+    fdefn))
 
 ;;;; Iterating over closure values
 

@@ -63,15 +63,13 @@ static lispobj *read_only_free, *static_free;
 static lispobj *pscav(lispobj *addr, long nwords, boolean constant);
 
 #define LATERBLOCKSIZE 1020
-#define LATERMAXCOUNT 10
 
 static struct
 later {
     struct later *next;
-    union {
-        lispobj *ptr;
-        long count;
-    } u[LATERBLOCKSIZE];
+    // slightly denser packing vs a struct of a lispobj* and an int
+    lispobj *ptr[LATERBLOCKSIZE];
+    int count[LATERBLOCKSIZE];
 } *later_blocks = NULL;
 static long later_count = 0;
 
@@ -115,33 +113,22 @@ newspace_alloc(long nwords, int constantp)
 }
 
 
+/* Enqueue <where,count> into later_blocks */
 static void
 pscav_later(lispobj *where, long count)
 {
     struct later *new;
 
-    if (count > LATERMAXCOUNT) {
-        while (count > LATERMAXCOUNT) {
-            pscav_later(where, LATERMAXCOUNT);
-            count -= LATERMAXCOUNT;
-            where += LATERMAXCOUNT;
-        }
+    if (later_blocks == NULL || later_count == LATERBLOCKSIZE) {
+        new  = (struct later *)malloc(sizeof(struct later));
+        new->next = later_blocks;
+        later_blocks = new;
+        later_count = 0;
     }
-    else {
-        if (later_blocks == NULL || later_count == LATERBLOCKSIZE ||
-            (later_count == LATERBLOCKSIZE-1 && count > 1)) {
-            new  = (struct later *)malloc(sizeof(struct later));
-            new->next = later_blocks;
-            if (later_blocks && later_count < LATERBLOCKSIZE)
-                later_blocks->u[later_count].ptr = NULL;
-            later_blocks = new;
-            later_count = 0;
-        }
 
-        if (count != 1)
-            later_blocks->u[later_count++].count = count;
-        later_blocks->u[later_count++].ptr = where;
-    }
+    later_blocks->count[later_count] = count;
+    later_blocks->ptr[later_count] = where;
+    ++later_count;
 }
 
 static lispobj
@@ -153,7 +140,7 @@ ptrans_boxed(lispobj thing, lispobj header, boolean constant)
     lispobj *new = newspace_alloc(nwords,constant);
 
     /* Copy it. */
-    bcopy(old, new, nwords * sizeof(lispobj));
+    memcpy(new, old, nwords * sizeof(lispobj));
 
     /* Deposit forwarding pointer. */
     lispobj result = make_lispobj(new, lowtag_of(thing));
@@ -193,7 +180,7 @@ ptrans_fdefn(lispobj thing, lispobj header)
     lispobj *new = newspace_alloc(nwords, 0);    /* inconstant */
 
     /* Copy it. */
-    bcopy(old, new, nwords * sizeof(lispobj));
+    memcpy(new, old, nwords * sizeof(lispobj));
 
     /* Deposit forwarding pointer. */
     lispobj result = make_lispobj(new, lowtag_of(thing));
@@ -218,7 +205,7 @@ ptrans_unboxed(lispobj thing, lispobj header)
     lispobj *new = newspace_alloc(nwords, 1);     /* always constant */
 
     /* copy it. */
-    bcopy(old, new, nwords * sizeof(lispobj));
+    memcpy(new, old, nwords * sizeof(lispobj));
 
     /* Deposit forwarding pointer. */
     lispobj result = make_lispobj(new, lowtag_of(thing));
@@ -234,7 +221,7 @@ ptrans_vector(lispobj thing, boolean boxed, boolean constant)
     long nwords = sizetab[header_widetag(vector->header)]((lispobj*)vector);
 
     lispobj *new = newspace_alloc(nwords, (constant || !boxed));
-    bcopy(vector, new, nwords * sizeof(lispobj));
+    memcpy(new, vector, nwords * sizeof(lispobj));
 
     lispobj result = make_lispobj(new, lowtag_of(thing));
     vector->header = result;
@@ -253,7 +240,7 @@ ptrans_code(lispobj thing)
 
     struct code *new = (struct code *)newspace_alloc(nwords,1); /* constant */
 
-    bcopy(code, new, nwords * sizeof(lispobj));
+    memcpy(new, code, nwords * sizeof(lispobj));
 
     lispobj result = make_lispobj(new, OTHER_POINTER_LOWTAG);
 
@@ -262,27 +249,21 @@ ptrans_code(lispobj thing)
     for_each_simple_fun(i, newfunc, new, 1, {
         lispobj* old = (lispobj*)LOW_WORD((char*)newfunc - displacement);
         *old = make_lispobj(newfunc, FUN_POINTER_LOWTAG);
+        pscav(&newfunc->self, 1, 1); // and fix the self-pointer now
     });
 
+    int n_funs = code_n_funs(code);
     /* Stick in a forwarding pointer for the code object. */
     /* This smashes the header, so do it only after reading n_funs */
     *(lispobj *)code = result;
 
-    /* Arrange to scavenge the debug info later. */
-    pscav_later(&new->debug_info, 1);
-
-    /* Scavenge the constants. */
-    pscav(new->constants,
-          code_header_words(new) - (offsetof(struct code, constants) >> WORD_SHIFT),
-          1);
-
-    /* Scavenge all the functions. */
-    for_each_simple_fun(i, func, new, 1, {
-        gc_assert(!dynamic_pointer_p((lispobj)func));
-        pscav(&func->self, 1, 1);
-        pscav_later(&func->name, 4);
-    })
-
+    int n_later_words = 1 + n_funs * CODE_SLOTS_PER_SIMPLE_FUN;
+    /* Scavenge the constants excluding the ones that will be done later. */
+    lispobj* from = &new->debug_info + n_later_words;
+    lispobj* end = (lispobj*)new + code_header_words(new);
+    pscav(from, end - from, 1);
+    /* Arrange to scavenge the debug info and simple-fun metadata later. */
+    pscav_later(&new->debug_info, n_later_words);
     return result;
 }
 
@@ -302,8 +283,7 @@ ptrans_func(lispobj thing, lispobj header)
          * would have been left behind for all the entry points. */
 
         struct simple_fun *function = (struct simple_fun *)native_pointer(thing);
-        lispobj code = make_lispobj(native_pointer(thing) - HeaderValue(function->header),
-                                    OTHER_POINTER_LOWTAG);
+        lispobj code = fun_code_tagged((lispobj*)function);
 
         /* This will cause the function's header to be replaced with a
          * forwarding pointer. */
@@ -324,7 +304,7 @@ ptrans_func(lispobj thing, lispobj header)
             (nwords,(header_widetag(header)!=FUNCALLABLE_INSTANCE_WIDETAG));
 
         /* Copy it. */
-        bcopy(old, new, nwords * sizeof(lispobj));
+        memcpy(new, old, nwords * sizeof(lispobj));
 
         /* Deposit forwarding pointer. */
         lispobj result = make_lispobj(new, lowtag_of(thing));
@@ -535,10 +515,10 @@ pscav(lispobj *addr, long nwords, boolean constant)
               case SIMPLE_VECTOR_WIDETAG:
                 // addr[0] : header
                 //     [1] : vector length
-                //     [2] : element[0] = hashtable
+                //     [2] : element[0] = high-water mark
                 //     [3] : element[1] = rehash bit
-                if (is_vector_subtype(thing, VectorValidHashing))
-                    addr[3] = make_fixnum(1);
+                if (is_vector_subtype(thing, VectorAddrHashing))
+                    addr[3] = make_fixnum(1); // just flag it for rehash
                 count = 2;
                 break;
 
@@ -609,12 +589,30 @@ pscav(lispobj *addr, long nwords, boolean constant)
     return addr;
 }
 
+static void
+verify_range(lispobj *base, lispobj *end)
+{
+    lispobj* where = base;
+    while (where < end) {
+        if (widetag_of(where) == CODE_HEADER_WIDETAG) {
+            int n_boxed_words = code_header_words((struct code*)where);
+            int i;
+            for (i = 0; i < n_boxed_words; ++i) {
+                lispobj word = where[i];
+                if (is_lisp_pointer(word) && dynamic_pointer_p(word))
+                    lose("purify failed, obj=%p, where=%p, val=%"OBJ_FMTX,
+                         where, where+i, word);
+            }
+        }
+        where += OBJECT_SIZE(*where, where);
+    }
+}
+
 int
 purify(lispobj static_roots, lispobj read_only_roots)
 {
     lispobj *clean;
     long count, i;
-    struct later *laters, *next;
     struct thread *thread;
 
     if(all_threads->next) {
@@ -707,22 +705,14 @@ purify(lispobj static_roots, lispobj read_only_roots)
     do {
         while (clean != static_free)
             clean = pscav(clean, static_free - clean, 0);
-        laters = later_blocks;
+        struct later* laters = later_blocks;
         count = later_count;
         later_blocks = NULL;
         later_count = 0;
         while (laters != NULL) {
-            for (i = 0; i < count; i++) {
-                if (laters->u[i].count == 0) {
-                    ;
-                } else if (laters->u[i].count <= LATERMAXCOUNT) {
-                    pscav(laters->u[i+1].ptr, laters->u[i].count, 1);
-                    i++;
-                } else {
-                    pscav(laters->u[i].ptr, 1, 1);
-                }
-            }
-            next = laters->next;
+            for (i = 0; i < count; i++)
+                pscav(laters->ptr[i], laters->count[i], 1);
+            struct later* next = laters->next;
             free(laters);
             laters = next;
             count = LATERBLOCKSIZE;
@@ -758,6 +748,7 @@ purify(lispobj static_roots, lispobj read_only_roots)
     os_flush_icache((os_vm_address_t)STATIC_SPACE_START, STATIC_SPACE_SIZE);
 
 #ifdef PRINTNOISE
+    verify_range((lispobj*)READ_ONLY_SPACE_START, read_only_space_free_pointer);
     printf(" done]\n");
     fflush(stdout);
 #endif

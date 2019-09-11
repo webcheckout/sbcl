@@ -345,6 +345,18 @@
                           fill-pointer displaced-to
                           node))
 
+(defoptimizer (make-array-header* derive-type) ((&rest inits))
+  (let* ((data-position #.(sb-vm::slot-offset
+                           (find 'sb-vm::data (sb-vm:primitive-object-slots
+                                               (find 'array sb-vm:*primitive-objects*
+                                                     :key 'sb-vm:primitive-object-name))
+                                 :key 'sb-vm::slot-name)))
+         (data (nth data-position inits))
+         (type (lvar-type data)))
+    (when (array-type-p type)
+      (make-array-type '* :element-type (array-type-element-type type)
+                          :specialized-element-type (array-type-specialized-element-type type)))))
+
 (defoptimizer (%make-array derive-type)
     ((dims widetag n-bits &key adjustable fill-pointer displaced-to
            &allow-other-keys)
@@ -1236,15 +1248,30 @@
              ;; Might as well catch some easy negation cases.
              (typecase x
                (array-type
-                (let ((dims (array-type-dimensions x)))
+                (let ((dims (array-type-dimensions x))
+                      (et (array-type-element-type x)))
+                  ;; Need to check if the whole type has the same specialization and simplicity,
+                  ;; otherwise it's not clear which part of the type is negated.
                   (cond ((eql dims '*)
                          '*)
-                        ((every (lambda (dim)
-                                  (eql dim '*))
-                                dims)
-                         (list (length dims)))
+                        ((not (every (lambda (dim)
+                                       (eql dim '*))
+                                     dims))
+                         nil)
+                        ((not
+                          (case (array-type-complexp x)
+                            ((t)
+                             (csubtypep ctype (specifier-type '(not simple-array))))
+                            ((nil)
+                             (csubtypep ctype (specifier-type 'simple-array)))
+                            (t t)))
+                         nil)
+                        ((not (or (eq et *wild-type*)
+                                  (csubtypep ctype
+                                             (specifier-type `(array ,(type-specifier et))))))
+                         nil)
                         (t
-                         '()))))
+                         (list (length dims))))))
                (t '()))))
       (declare (dynamic-extent #'over #'under))
       (multiple-value-bind (not-p ranks)
@@ -1819,18 +1846,20 @@
 
 ;;; Pick off some constant cases.
 (defoptimizer (array-header-p derive-type) ((array))
-  (let ((type (lvar-type array)))
-    (cond ((not (types-equal-or-intersect type (specifier-type 'simple-array)))
+  (let ((type (lvar-type array))
+        (array-type (specifier-type 'array)))
+    (cond ((or (not (types-equal-or-intersect type array-type))
+               (csubtypep type (specifier-type '(simple-array * (*)))))
+           (specifier-type 'null))
+          ((and (csubtypep type array-type)
+                (not (types-equal-or-intersect type (specifier-type 'simple-array))))
            (specifier-type '(eql t)))
           ((not (array-type-p type))
            ;; FIXME: use analogue of ARRAY-TYPE-DIMENSIONS-OR-GIVE-UP
            nil)
           (t
            (let ((dims (array-type-dimensions type)))
-             (cond ((csubtypep type (specifier-type '(simple-array * (*))))
-                    ;; no array header
-                    (specifier-type 'null))
-                   ((and (listp dims) (/= (length dims) 1))
+             (cond ((and (listp dims) (/= (length dims) 1))
                     ;; multi-dimensional array, will have a header
                     (specifier-type '(eql t)))
                    ((eql (array-type-complexp type) t)

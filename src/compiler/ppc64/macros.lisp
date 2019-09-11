@@ -117,7 +117,7 @@
   `(progn
     ;; something is deeply bogus.  look at this
     ;; (loadw ,lip ,function function-code-offset function-pointer-type)
-    (inst addi ,lip ,function (- (* n-word-bytes simple-fun-code-offset) fun-pointer-lowtag))
+    (inst addi ,lip ,function (- (* n-word-bytes simple-fun-insts-offset) fun-pointer-lowtag))
     (inst mtctr ,lip)
     (inst bctr)))
 
@@ -204,7 +204,9 @@
   ;; Normal allocation to the heap.
   (declare (ignore stack-p node))
 
-  #-alloc-use-sigtrap ; sigtrap is not working
+  ;; if sigtrap is making you suffer, enable out-of-line allocator for everything
+  ;;  #-alloc-use-sigtrap
+  #+nil
   (let ((lip (make-random-tn :kind :normal :sc (sc-or-lose 'unsigned-reg)
                              :offset lip-offset)))
     (inst lr lip (make-fixup 'alloc-tramp :assembly-routine))
@@ -303,7 +305,7 @@
                      :temp-tn ,temp-tn
                      :flag-tn ,flag-tn))
        (when ,type-code
-         (inst lr ,temp-tn (logior (ash (1- ,size) n-widetag-bits) ,type-code))
+         (inst lr ,temp-tn (compute-object-header ,size ,type-code))
          (storew ,temp-tn ,result-tn 0 ,lowtag))
        ,@body)))
 

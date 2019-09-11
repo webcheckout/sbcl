@@ -1596,6 +1596,12 @@ conservative_root_p(lispobj addr, page_index_t addr_page_index)
     if (instruction_ptr_p((void*)addr, object_start))
         return object_start;
 
+    // FIXME: I think there is a window of GC vulnerability regarding FINs
+    // and FDEFNs containing executable bytes. In either case if the only pointer
+    // to such an object is the program counter, the object could be considered
+    // garbage because there is no _tagged_ pointer to it.
+    // This is an almost impossible situation to arise, but seems worth some study.
+
     /* Large object pages only contain ONE object, and it will never
      * be a CONS.  However, arrays and bignums can be allocated larger
      * than necessary and then shrunk to fit, leaving what look like
@@ -2090,7 +2096,7 @@ update_page_write_prot(page_index_t page)
             // underlying code object since the alleged header might not be one.
             int pointee_gen = gen; // Make comparison fail if we fall through
             if (functionp((lispobj)ptr) && header_widetag(header) == SIMPLE_FUN_WIDETAG) {
-                lispobj* code = fun_code_header((lispobj)ptr - FUN_POINTER_LOWTAG);
+                lispobj* code = fun_code_header(FUNCTION((lispobj)ptr));
                 // This is a heuristic, since we're not actually looking for
                 // an object boundary. Precise scanning of 'page' would obviate
                 // the guard conditions here.
@@ -2122,6 +2128,12 @@ static inline boolean large_simple_vector_p(page_index_t page) {
     if (!page_single_obj_p(page))
         return 0;
     lispobj header = *(lispobj *)page_address(page);
+    // For hash-table vectors which are neither weak nor address-sensitive,
+    // it certainly would be possible to treat the vector as VectorNormal,
+    // though we'd lose out on the optimization that scans only below the
+    // high-water mark which is in general a good thing.  Perhaps if the
+    // ratio of HWM to total size warrants it, we should prefer to use the
+    // large_simple_vector optimization instead.
     return header_widetag(header) == SIMPLE_VECTOR_WIDETAG &&
         is_vector_subtype(header, VectorNormal);
 }
@@ -2785,9 +2797,6 @@ verify_range(lispobj *where, sword_t nwords, struct verify_state *state)
                         function_layout((lispobj*)fheaderp);
                     gc_assert(!layout || layout == LAYOUT_OF_FUNCTION);
 #endif
-                    verify_range(SIMPLE_FUN_SCAV_START(fheaderp),
-                                 SIMPLE_FUN_SCAV_NWORDS(fheaderp),
-                                 state);
                 });
 #if CODE_PAGES_USE_SOFT_PROTECTION
                 generation_index_t my_gen = gen_of((lispobj)where);
@@ -3062,7 +3071,7 @@ move_pinned_pages_to_newspace()
 
 /* Garbage collect a generation. If raise is 0 then the remains of the
  * generation are not raised to the next generation. */
-static void NO_SANITIZE_ADDRESS
+static void NO_SANITIZE_ADDRESS NO_SANITIZE_MEMORY
 garbage_collect_generation(generation_index_t generation, int raise)
 {
     page_index_t i;
@@ -3213,13 +3222,28 @@ garbage_collect_generation(generation_index_t generation, int raise)
 # endif
             if (!esp || esp == (void*) -1)
                 UNKNOWN_STACK_POINTER_ERROR("garbage_collect", th);
+
+            // Words on the stack which point into the stack are likely
+            // frame pointers or alien or DX object pointers. In any case
+            // there's no need to call preserve_pointer on them since
+            // they definitely don't point to the heap.
+            // See the picture at create_thread_struct() as a reminder.
+            lispobj exclude_from = (lispobj)th->control_stack_start;
+            lispobj exclude_to = (lispobj)th + dynamic_values_bytes;
+
             // This loop would be more naturally expressed as
             //  for (ptr = esp; ptr < th->control_stack_end; ++ptr)
             // However there is a very subtle problem with that: 'esp = &raise'
             // is not necessarily properly aligned to be a stack pointer!
             void **ptr;
             for (ptr = ((void **)th->control_stack_end)-1; ptr >= (void**)esp;  ptr--) {
-                preserve_pointer(*ptr);
+                lispobj word = (lispobj)*ptr;
+                // Also note that we can eliminate small fixnums from consideration
+                // since there is no memory on the 0th page.
+                // (most OSes don't let users map memory there, though they used to).
+                if (word >= BACKEND_PAGE_BYTES &&
+                    !(exclude_from <= word && word < exclude_to))
+                    preserve_pointer((void*)word);
             }
         }
     }
@@ -3281,6 +3305,8 @@ garbage_collect_generation(generation_index_t generation, int raise)
         union interrupt_handler handler = interrupt_handlers[i];
         if (!ARE_SAME_HANDLER(handler.c, SIG_IGN) &&
             !ARE_SAME_HANDLER(handler.c, SIG_DFL) &&
+            // BUG: if a C function pointer can be misaligned such that it
+            // looks to satisfy functionp() then we do the wrong thing.
             is_lisp_pointer(handler.lisp)) {
             if (compacting_p())
                 scavenge((lispobj *)(interrupt_handlers + i), 1);
@@ -4124,6 +4150,8 @@ gc_and_save(char *filename, boolean prepend_runtime,
     {
         int i;
         for (i=0; i<NSIG; ++i)
+            // BUG: if a C function pointer can be misaligned such that it
+            // looks to satisfy functionp() then we do the wrong thing.
             if (functionp(interrupt_handlers[i].lisp))
                 interrupt_handlers[i].lisp = 0;
     }
@@ -4379,12 +4407,6 @@ sword_t scav_code_header(lispobj *object, lispobj header)
         sword_t n_header_words = code_header_words((struct code *)object);
         scavenge(object + 2, n_header_words - 2);
 
-        /* Scavenge the boxed section of each function object in the
-         * code data block. */
-        for_each_simple_fun(i, function_ptr, (struct code *)object, 1, {
-            scavenge(SIMPLE_FUN_SCAV_START(function_ptr),
-                     SIMPLE_FUN_SCAV_NWORDS(function_ptr));
-        })
         /* If my_gen is other than newspace, then scan for old->young
          * pointers. If my_gen is newspace, there can be no such pointers
          * because newspace is the lowest numbered generation post-GC
@@ -4394,12 +4416,6 @@ sword_t scav_code_header(lispobj *object, lispobj header)
             for (where= object + 2; where < end; ++where)
                 if (is_lisp_pointer(ptr = *where) && obj_gen_lessp(ptr, my_gen))
                     goto done;
-            for_each_simple_fun(i, function_ptr, (struct code *)object, 0, {
-                end = (lispobj*)function_ptr->code;
-                for (where = SIMPLE_FUN_SCAV_START(function_ptr); where < end; ++where)
-                    if (is_lisp_pointer(ptr = *where) && obj_gen_lessp(ptr, my_gen))
-                        goto done;
-            })
         }
         CLEAR_WRITTEN_FLAG(object);
     } else {

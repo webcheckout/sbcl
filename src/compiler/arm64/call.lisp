@@ -121,7 +121,7 @@
     (emit-label start-lab)
     ;; Allocate function header.
     (inst simple-fun-header-word)
-    (inst .skip (* (1- simple-fun-code-offset) n-word-bytes))
+    (inst .skip (* (1- simple-fun-insts-offset) n-word-bytes))
     (inst compute-code code-tn lip start-lab)))
 
 (define-vop (xep-setup-sp)
@@ -471,6 +471,27 @@
       (t
        (inst add temp context (lsl index (- word-shift n-fixnum-tag-bits)))
        (loadw value temp)))))
+
+(define-vop (more-arg-or-nil)
+  (:policy :fast-safe)
+  (:args (object :scs (descriptor-reg) :to (:result 1))
+         (count :scs (any-reg) :to (:result 1)))
+  (:arg-types * tagged-num)
+  (:info index)
+  (:results (value :scs (descriptor-reg any-reg)))
+  (:result-types *)
+  (:generator 3
+    (inst mov value null-tn)
+    (cond ((zerop index)
+           (inst cbz count done))
+          (t
+           (inst cmp count (fixnumize index))
+           (inst b :le done)))
+    (inst ldr value
+          (@ object
+             (load-store-offset
+              (ash index word-shift))))
+    done))
 
 ;;; Turn more arg (context, count) into a list.
 (define-vop (listify-rest-args)
@@ -979,7 +1000,7 @@
                 `((inst ldr lip (@ null-tn (load-store-offset (static-fun-offset fun))))))
                ((nil)
                 `((inst add lip function
-                        (- (ash simple-fun-code-offset word-shift)
+                        (- (ash simple-fun-insts-offset word-shift)
                            fun-pointer-lowtag)))))
 
            (note-this-location vop :call-site)

@@ -616,15 +616,17 @@
 
 (defun write-header-word (des header-word)
   ;; In immobile space, all objects start life as pseudo-static as if by 'save'.
-  (let ((gen #+gencgc (if (or #+immobile-space
-                              (let ((gspace (descriptor-intuit-gspace des)))
-                                (assert gspace)
-                                (or (eq gspace *immobile-fixedobj*)
-                                    (eq gspace *immobile-varyobj*))))
-                           sb-vm:+pseudo-static-generation+
-                           0)
-             #-gencgc 0))
-    (write-wordindexed/raw des 0 (logior (ash gen 24) header-word))))
+  (let* ((gen (or #+immobile-space
+                  (let ((gspace (descriptor-intuit-gspace des)))
+                    (assert gspace)
+                    (when (or (eq gspace *immobile-fixedobj*)
+                              (eq gspace *immobile-varyobj*))
+                      sb-vm:+pseudo-static-generation+))
+                  0))
+         (widetag (logand header-word sb-vm:widetag-mask))
+         ;; Refer to depiction of "Immobile object header word" in gc-private.h
+         (gen-shift (if (= widetag sb-vm:fdefn-widetag) 8 24)))
+    (write-wordindexed/raw des 0 (logior (ash gen gen-shift) header-word))))
 
 (defun write-code-header-words (descriptor boxed unboxed serialno)
   #-64-bit (setq serialno 0)
@@ -668,6 +670,9 @@
               gspace (ash (1+ length) sb-vm:word-shift)
               sb-vm:other-pointer-lowtag
               (make-page-attributes nil 0))))
+    ;; FDEFNs don't store a length, freeing up a header byte for other use
+    (when (= widetag sb-vm:fdefn-widetag)
+      (setq length 0))
     (write-header-data+tag des length widetag)
     des))
 (defun allocate-vector (widetag length words &optional (gspace *dynamic*))
@@ -800,13 +805,12 @@ core and return a descriptor to it."
     (32
      (let ((high-bits (double-float-high-bits x))
            (low-bits (double-float-low-bits x)))
-       (ecase sb-c:*backend-byte-order*
-         (:little-endian
-          (write-wordindexed/raw address index low-bits)
-          (write-wordindexed/raw address (1+ index) high-bits))
-         (:big-endian
-          (write-wordindexed/raw address index high-bits)
-          (write-wordindexed/raw address (1+ index) low-bits)))))
+       #+little-endian
+       (progn (write-wordindexed/raw address index low-bits)
+              (write-wordindexed/raw address (1+ index) high-bits))
+       #+big-endian
+       (progn (write-wordindexed/raw address index high-bits)
+              (write-wordindexed/raw address (1+ index) low-bits))))
     (64
      (write-wordindexed/raw address index (double-float-bits x))))
   address)
@@ -838,9 +842,8 @@ core and return a descriptor to it."
                                  des sb-vm:double-float-value-slot))
                          (word1 (read-bits-wordindexed
                                  des (1+ sb-vm:double-float-value-slot))))
-                    (ecase sb-c:*backend-byte-order*
-                     (:little-endian (logior (ash word1 32) word0))
-                     (:big-endian    (logior (ash word0 32) word1))))))
+                    #+little-endian (logior (ash word1 32) word0)
+                    #+big-endian    (logior (ash word0 32) word1))))
     (sb-impl::make-flonum (sb-vm::sign-extend bits 64) 'double-float)))
 
 (defun complexnum-to-core (num &aux (r (realpart num)) (i (imagpart num)))
@@ -1859,28 +1862,6 @@ core and return a descriptor to it."
     (legal-fun-name-or-type-error result)
     result))
 
-#+x86-64
-(defun encode-fdefn-raw-addr (fdefn function jmp-target opcode)
-  (let* ((jmp-origin (+ (descriptor-bits fdefn)
-                        (- sb-vm:other-pointer-lowtag)
-                        (ash sb-vm:fdefn-raw-addr-slot sb-vm:word-shift)
-                        5))
-         (jmp-operand
-          (ldb (byte 32 0) (the (signed-byte 32) (- jmp-target jmp-origin)))))
-    (logior opcode
-            (ash jmp-operand 8)
-            (if function
-                ;; This is redundant with the logic in x86-64-vm,
-                ;; but I don't think they can be made identical.
-                (let ((tagged-ptr-bias
-                       ;; compute the difference between the entry address
-                       ;; and the tagged pointer to the called object.
-                       (the (unsigned-byte 8)
-                            (- jmp-target (descriptor-bits function)))))
-                  (logior (ash #xA890 40) ; "NOP ; TEST %AL, #xNN"
-                          (ash tagged-ptr-bias 56)))
-                0))))
-
 (defun cold-fdefinition-object (cold-name &optional leave-fn-raw
                                           (gspace #+immobile-space *immobile-fixedobj*
                                                   #-immobile-space *dynamic*))
@@ -1889,28 +1870,28 @@ core and return a descriptor to it."
     (or (gethash warm-name *cold-fdefn-objects*)
         (let ((fdefn (allocate-header+object gspace (1- sb-vm:fdefn-size) sb-vm:fdefn-widetag)))
           (setf (gethash warm-name *cold-fdefn-objects*) fdefn)
+          #+x86-64
+          (write-wordindexed/raw ; write an INT instruction into the header
+           fdefn 0 (logior (ash sb-vm::undefined-fdefn-header 16)
+                           (read-bits-wordindexed fdefn 0)))
           (write-wordindexed fdefn sb-vm:fdefn-name-slot cold-name)
           (write-wordindexed fdefn sb-vm:fdefn-fun-slot *nil-descriptor*)
           (unless leave-fn-raw
             (let ((tramp
                    (or (lookup-assembler-reference
-                        #+(and x86-64 immobile-code) 'sb-vm::undefined-fdefn
-                        #-(and x86-64 immobile-code) 'sb-vm::undefined-tramp
+                        'sb-vm::undefined-tramp
                         :direct core-file-name)
                        ;; Our preload for the tramps doesn't happen during host-1,
                        ;; so substitute a usable value.
                        0)))
-              (write-wordindexed/raw fdefn sb-vm:fdefn-raw-addr-slot
-                                     #+(and immobile-code x86-64)
-                                     (encode-fdefn-raw-addr fdefn nil tramp #xE8)
-                                     #-immobile-code tramp)))
+              (write-wordindexed/raw fdefn sb-vm:fdefn-raw-addr-slot tramp)))
           fdefn))))
 
 (defun cold-fun-entry-addr (fun)
   (aver (= (descriptor-lowtag fun) sb-vm:fun-pointer-lowtag))
   (+ (descriptor-bits fun)
      (- sb-vm:fun-pointer-lowtag)
-     (ash sb-vm:simple-fun-code-offset sb-vm:word-shift)))
+     (ash sb-vm:simple-fun-insts-offset sb-vm:word-shift)))
 
 ;;; Handle a DEFUN in cold-load.
 (defun cold-fset (name function &optional inline-expansion dxable-args)
@@ -1929,19 +1910,17 @@ core and return a descriptor to it."
     (write-wordindexed fdefn sb-vm:fdefn-fun-slot function)
     (let ((fun-entry-addr
             (+ (logandc2 (descriptor-bits function) sb-vm:lowtag-mask)
-               (ash sb-vm:simple-fun-code-offset sb-vm:word-shift))))
+               (ash sb-vm:simple-fun-insts-offset sb-vm:word-shift))))
       (declare (ignorable fun-entry-addr)) ; sparc and arm don't need
+      #+x86-64
+      (write-wordindexed/raw ; write a JMP instruction into the header
+       fdefn 0 (dpb #x1025FF (byte 24 16) (read-bits-wordindexed fdefn 0)))
       (write-wordindexed/raw
        fdefn sb-vm:fdefn-raw-addr-slot
-       ;; X86-64 w/immobile code - raw addr encodes a JMP instruction
-       #+(and immobile-code x86-64)
-       (encode-fdefn-raw-addr fdefn function fun-entry-addr #xE9)
-       ;; Sparc/ARM/RISC-V - raw addr is the function descriptor
-       #+(and (not immobile-code) (or sparc arm riscv))
-       (descriptor-bits function)
-       ;; All other cases - raw addr is exactly what it says
-       #+(and (not immobile-code) (not (or sparc arm riscv)))
-       fun-entry-addr))
+       (or #+(or sparc arm riscv) ; raw addr is the function descriptor
+           (descriptor-bits function)
+           ;; For all others raw addr is the starting address
+           fun-entry-addr)))
     fdefn))
 
 ;;; Handle a DEFMETHOD in cold-load. "Very easily done". Right.
@@ -2347,6 +2326,8 @@ core and return a descriptor to it."
           (if (eq name 'condition) +condition-layout-flag+ flags)))
     (declare (type descriptor bitmap inherits))
     (declare (type symbol name))
+    (when (member name '(pathname logical-pathname))
+      (setf flags (logior flags sb-kernel::+pathname-layout-flag+)))
     (if existing-layout
         ;; If a layout of this name has been defined already, then
         ;; enforce consistency between the existing and current definition,
@@ -2664,9 +2645,8 @@ core and return a descriptor to it."
       (make-descriptor (logior fun sb-vm:fun-pointer-lowtag)))))
 
 (define-cold-fop (fop-fun-entry (fun-index))
-  (binding* (((info type arglist name code-object)
-                (values (pop-stack) (pop-stack) (pop-stack) (pop-stack) (pop-stack)))
-             (fn (compute-fun code-object fun-index)))
+  (let* ((code-object (pop-stack))
+         (fn (compute-fun code-object fun-index)))
     #+compact-instance-header
     (write-wordindexed/raw
      fn 0 (logior (descriptor-bits (cold-symbol-value 'sb-vm:function-layout))
@@ -2675,23 +2655,9 @@ core and return a descriptor to it."
     ;; note that the bit pattern looks like fixnum due to alignment
     (write-wordindexed/raw fn sb-vm:simple-fun-self-slot
                            (+ (- (descriptor-bits fn) sb-vm:fun-pointer-lowtag)
-                              (ash sb-vm:simple-fun-code-offset sb-vm:word-shift)))
+                              (ash sb-vm:simple-fun-insts-offset sb-vm:word-shift)))
     #-(or x86 x86-64) ; store a pointer back to the function itself in 'self'
     (write-wordindexed fn sb-vm:simple-fun-self-slot fn)
-    (write-wordindexed fn sb-vm:simple-fun-name-slot name)
-    (write-wordindexed fn sb-vm:simple-fun-arglist-slot arglist)
-    (write-wordindexed fn sb-vm:simple-fun-type-slot type)
-    ;; Emulate SET-SIMPLE-FUN-INFO
-    (aver (cold-null (cold-car info))) ; no source form
-    (let* ((doc (cold-car (cold-cdr info)))
-           (docp (not (cold-null doc)))
-           (xref (cold-car (cold-cdr (cold-cdr info))))
-           (xrefp (not (cold-null xref))))
-      (write-wordindexed fn sb-vm:simple-fun-info-slot
-                         (cond ((and docp xrefp) (cold-cons doc xref))
-                               (docp doc)
-                               (xrefp xref)
-                               (t *nil-descriptor*))))
     fn))
 
 (define-cold-fop (fop-assembler-code)
@@ -2763,8 +2729,7 @@ core and return a descriptor to it."
               (descriptor-bits (cold-symbol-value sym)))
              (:named-call
               (+ (descriptor-bits (cold-fdefinition-object sym))
-                 (ash sb-vm:fdefn-raw-addr-slot sb-vm:word-shift)
-                 (- sb-vm:other-pointer-lowtag))))
+                 (- 2 sb-vm:other-pointer-lowtag))))
            kind flavor))
       (when (and (member sym '(sb-vm::enable-alloc-counter
                                sb-vm::enable-sized-alloc-counter))
@@ -3069,18 +3034,6 @@ core and return a descriptor to it."
     ;; this -2 shift depends on every OTHER-IMMEDIATE-?-LOWTAG
     ;; ending with the same 2 bits. (#b10)
     (write-tags "" "-WIDETAG" (ash (1+ sb-vm:widetag-mask) -2) -2))
-  ;; Inform print_otherptr() of all array types that it's too dumb to print
-  (let ((array-type-bits (make-array 32 :initial-element 0)))
-    (flet ((toggle (b)
-             (multiple-value-bind (ofs bit) (floor b 8)
-               (setf (aref array-type-bits ofs) (ash 1 bit)))))
-      (dovector (saetp sb-vm:*specialized-array-element-type-properties*)
-        (unless (member (sb-vm:saetp-specifier saetp) '(character base-char t))
-          (toggle (sb-vm:saetp-typecode saetp))
-          (awhen (sb-vm:saetp-complex-typecode saetp) (toggle it)))))
-    (format out
-            "~%static unsigned char unprintable_array_types[32] =~% {~{~d~^,~}};~%"
-            (coerce array-type-bits 'list)))
   (dolist (prim-obj '(symbol ratio complex sb-vm::code simple-fun
                       closure funcallable-instance
                       weak-pointer fdefn sb-vm::value-cell))
@@ -3771,6 +3724,7 @@ III. initially undefined function references (alphabetically):
       (#.sb-vm:fun-pointer-lowtag
        (if strictp
            (error "Can't map cold-fun -> warm-fun")
+           #+nil ; FIXME: not done, but only needed for debugging genesis
            (let ((name (read-wordindexed x sb-vm:simple-fun-name-slot)))
              `(function ,(recurse name)))))
       (#.sb-vm:other-pointer-lowtag

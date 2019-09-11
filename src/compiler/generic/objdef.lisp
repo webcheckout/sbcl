@@ -239,35 +239,21 @@ during backtrace.
   ;; of x86, or the Lisp function to jump to, for everybody else.
   (self :set-known ()
         :set-trans (setf %simple-fun-self))
-  (name :ref-known (flushable)
-        :ref-trans %simple-fun-name
-        :set-known ()
-        :set-trans (setf %simple-fun-name))
-  (arglist :type list
-           :ref-known (flushable)
-           :ref-trans %simple-fun-arglist
-           :set-known ()
-           :set-trans (setf %simple-fun-arglist))
-  (type :ref-known (flushable)
-        ;; %%SIMPLE-FUN-TYPE is used only by %SIMPLE-FUN-TYPE.
-        ;; Nobody should care that %SIMPLE-FUN-TYPE isn't open-coded.
-        :ref-trans %%simple-fun-type
-        :set-known ()
-        :set-trans (setf %simple-fun-type))
-  ;; NIL for empty, STRING for a docstring, SIMPLE-VECTOR for XREFS, and (CONS
-  ;; STRING SIMPLE-VECTOR) for both.
-  (info :init :null
-        :ref-trans %simple-fun-info
-        :ref-known (flushable)
-        :set-trans (setf %simple-fun-info)
-        :set-known ())
-  ;; FIXME: This is a poor name for this slot, because SIMPLE-FUN-CODE
-  ;; ought to mean the code object in which this simple-fun is contained.
-  ;; Probably a better name would be INSTS, especially as SIMPLE-FUN-CODE-OFFSET
-  ;; is the constant naming the displacement of this slot from the beginning of
-  ;; the fun, but it ought to mean how far this fun is from the code header.
-  ;; This will be quite disastrous to clean up and not make mistakes about it.
-  (code :rest-p t :c-type "unsigned char"))
+  ;; This slot used to be named CODE, but that was misleaing because the
+  ;; generated constant SIMPLE-FUN-CODE-OFFSET did not mean the offset from here
+  ;; back to the containing object (which isn't constant), but instead the offset
+  ;; forward to the first instruction, i.e. what is now SIMPLE-FUN-INSTS-OFFSET.
+  (insts :rest-p t :c-type "unsigned char"))
+
+(defconstant code-slots-per-simple-fun 4)
+;;; These are word numbers beyond the base of the simple-fun's metadata
+;;; in the code header. The mnemonic device here is that the first 3 slots
+;;; essentially comprise the function-lambda-expression,
+;;; and the last is a derived piece of information.
+(defconstant simple-fun-name-slot    0)
+(defconstant simple-fun-arglist-slot 1)
+(defconstant simple-fun-source-slot  2) ; form and/or docstring
+(defconstant simple-fun-info-slot    3) ; type and possibly xref
 
 #-(or x86 x86-64)
 (define-primitive-object (return-pc :lowtag other-pointer-lowtag :widetag t)
@@ -462,7 +448,7 @@ during backtrace.
 ;;; can take care of maintaining Lisp and C versions.
 (define-primitive-object (thread :size primitive-thread-object-length)
   ;; no_tls_value_marker is borrowed very briefly at thread startup to
-  ;; pass the address of initial-function into new_thread_trampoline.
+  ;; pass the address of the start routine into new_thread_trampoline.
   ;; tls[0] = NO_TLS_VALUE_MARKER_WIDETAG because a the tls index slot
   ;; of a symbol is initialized to zero
   (no-tls-value-marker)

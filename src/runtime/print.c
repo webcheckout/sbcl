@@ -24,6 +24,7 @@
 #include "print.h"
 #include "runtime.h"
 #include "code.h"
+#include "gc-internal.h"
 #include <stdarg.h>
 #include "thread.h"              /* genesis/primitive-objects.h needs this */
 #include <errno.h>
@@ -593,11 +594,9 @@ static void print_otherptr(lispobj obj)
 #ifndef LISP_FEATURE_ALPHA
     lispobj *ptr;
     unsigned long header;
-    unsigned long length;
 #else
     u32 *ptr;
     u32 header;
-    u32 length;
 #endif
     int count, type, index;
     char buffer[16];
@@ -609,7 +608,6 @@ static void print_otherptr(lispobj obj)
     }
 
     header = *ptr++;
-    length = fixnum_value(*ptr);
     count = HeaderValue(header);
     type = header_widetag(header);
 
@@ -620,8 +618,6 @@ static void print_otherptr(lispobj obj)
         return;
     }
 
-    if (unprintable_array_types[type/8] & (1<<(type % 8)))
-        return;
     switch (type) {
     case BIGNUM_WIDETAG:
         ptr += count;
@@ -716,12 +712,15 @@ static void print_otherptr(lispobj obj)
 
     case SIMPLE_VECTOR_WIDETAG:
         NEWLINE_OR_RETURN;
+        {
+        long length = fixnum_value(*ptr);
         printf("length = %ld", length);
         ptr++;
         index = 0;
         while (length-- > 0) {
             sprintf(buffer, "%d: ", index++);
             print_obj(buffer, *ptr++);
+        }
         }
         break;
 
@@ -748,10 +747,7 @@ static void print_otherptr(lispobj obj)
         break;
 
     case SIMPLE_FUN_WIDETAG:
-        print_obj("code: ",
-                  make_lispobj(native_pointer((lispobj)(ptr-1))
-                               -(HeaderValue(header)&0xFFFF),
-                               OTHER_POINTER_LOWTAG));
+        print_obj("code: ", fun_code_tagged(ptr-1));
         print_slots(simple_fun_slots,
                     sizeof simple_fun_slots/sizeof(char*)-1, ptr);
         break;
@@ -800,9 +796,28 @@ static void print_otherptr(lispobj obj)
         print_obj("entry: ", fdefn_callee_lispobj((struct fdefn*)(ptr-1)));
         break;
 
+    // Make certain vectors printable from C for when all hell breaks lose
+    case SIMPLE_ARRAY_UNSIGNED_BYTE_32_WIDETAG:
+        NEWLINE_OR_RETURN;
+        {
+        long length = fixnum_value(*ptr);
+        uint32_t * data = (uint32_t*)(ptr + 1);
+        long i;
+        printf("#(");
+        for (i=0; i<length; ++i) {
+            printf("%s%d", i>0?" ":"", data[i]);
+            if(i==255 && length>256) { printf(" ..."); break; }
+        }
+        printf(")");
+        }
+        break;
     default:
         NEWLINE_OR_RETURN;
-        printf("Unknown header object?");
+        if (type >= SIMPLE_ARRAY_UNSIGNED_BYTE_2_WIDETAG &&
+            type <= SIMPLE_BIT_VECTOR_WIDETAG)
+            printf("length = %ld", (long)fixnum_value(*ptr));
+        else
+            printf("Unknown header object?");
         break;
     }
 }

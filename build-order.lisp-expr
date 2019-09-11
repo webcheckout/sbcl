@@ -262,7 +262,6 @@
 
  ("src/code/sort"  :not-host)
  ("src/code/time"  :not-host)
- ("src/code/final" :not-host)
 
  ("src/code/exhaust" :not-host)
 
@@ -512,7 +511,7 @@
  ("src/assembly/assemfile" :not-target)
 
  ("src/compiler/target-dstate" :not-host)
- ("src/compiler/target/insts")
+ ("src/compiler/asm-target/insts")
  #+avx2
  ("src/compiler/target/avx2-insts")
  ("src/compiler/target/macros")
@@ -638,6 +637,7 @@
  ("src/code/bignum-random"     :not-host) ; needs "code/random" and
                                           ;   "code/bignum"
  ("src/code/target-hash-table" :not-host) ; needs "code/hash-table"
+ ("src/code/final" :not-host)
  ("src/code/pprint" :not-host) ; defines WITH-PRETTY-STREAM needed by 'print'
  ("src/code/print" :not-host)
  ("src/code/reader"            :not-host) ; needs "code/readtable"
@@ -667,7 +667,7 @@
 
  ;; target-only assemblerish stuff
  ("src/compiler/target-disassem"     :not-host)
- ("src/compiler/target/target-insts" :not-host)
+ ("src/compiler/asm-target/target-insts" :not-host)
  #+avx2
  ("src/compiler/target/target-avx2-insts" :not-host)
 
@@ -715,12 +715,16 @@
         :ignore-failure-p))
 
  ("src/code/late-globaldb" :not-host)
+ ("src/code/redblack" :not-host)
  )
 
 ;;; make-target-2 build steps
-(("src/code/warm-error"
-  "src/code/early-ntrace" ; lets PCL hook into tracing
+(("src/code/early-ntrace" ; lets PCL hook into tracing
   "src/code/room" ; for MAP-ALLOCATED-OBJECTS
+  #+immobile-code "src/code/immobile-space" ; needs src/code/room
+  ;; Delay (re)defining WARN until after remove-static-links works.
+  ;; The definition in cold-error is good enough for self-build.
+  "src/code/warm-error"
   "src/code/icf"
   ;; We re-nickname SB-SEQUENCE as SEQUENCE now.
   ;; It could be done in genesis, but not earlier,
@@ -822,7 +826,6 @@
   "src/code/run-program"
   #+gencgc "src/code/traceroot"
 
-  #+immobile-code "src/code/immobile-space"
   "src/code/repack-xref"
   #+cheneygc "src/code/purify"
   "src/code/module"

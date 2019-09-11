@@ -328,7 +328,8 @@
 (defmacro compute-lispword-offset () ; for {tagged word, double float, complex single}
   '(progn
      (unless (= word-shift n-fixnum-tag-bits)
-       (inst sldi offset index (- word-shift n-fixnum-tag-bits)))
+       (inst sldi offset index (- word-shift n-fixnum-tag-bits))
+       (setf index offset))
      (inst addi offset index (- (* vector-data-offset n-word-bytes)
                                 other-pointer-lowtag))))
 
@@ -337,14 +338,15 @@
                 (case n-fixnum-tag-bits
                   (1 (inst sldi offset index 1))
                   (3 (inst srdi offset index 1)))
-                (inst addi offset index (- (* vector-data-offset n-word-bytes)
+                (inst addi offset offset (- (* vector-data-offset n-word-bytes)
                                            other-pointer-lowtag))))
            (compute-cplx-dfloat-offset ()
              '(progn
-                (unless (= (1+ word-shift) n-fixnum-tag-bits)
-                  (inst sldi offset index (- (1+ word-shift) n-fixnum-tag-bits)))
-                (inst addi offset index (- (* vector-data-offset n-word-bytes)
-                                           other-pointer-lowtag)))))
+               (unless (= (1+ word-shift) n-fixnum-tag-bits)
+                 (inst sldi offset index (- (1+ word-shift) n-fixnum-tag-bits))
+                 (setf index offset))
+               (inst addi offset index (- (* vector-data-offset n-word-bytes)
+                                        other-pointer-lowtag)))))
 
 (define-vop (data-vector-ref/simple-array-single-float)
   (:note "inline array access")

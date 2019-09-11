@@ -100,7 +100,7 @@ void
 sigint_init(void)
 {
     SHOW("entering sigint_init()");
-    install_handler(SIGINT, sigint_handler, 1);
+    install_handler(SIGINT, sigint_handler, 0, 1);
     SHOW("leaving sigint_init()");
 }
 
@@ -638,15 +638,17 @@ sbcl_main(int argc, char *argv[], char *envp[])
 #endif
     thread_control_stack_size &= ~(sword_t)(CONTROL_STACK_ALIGNMENT_BYTES-1);
 
-    /* KLUDGE: os_vm_page_size is set by os_init(), and on some
-     * systems (e.g. Alpha) arch_init() needs need os_vm_page_size, so
-     * it must follow os_init(). -- WHN 2000-01-26 */
     os_init(argv, envp);
     if (debug_environment_p) {
         print_environment(argc, argv);
     }
     dyndebug_init();
+#ifdef LISP_FEATURE_ALPHA // When we remove Alpha, this #if can go away
+    /* KLUDGE: os_vm_page_size is set by os_init(), and on some
+     * systems (e.g. Alpha) arch_init() needs need os_vm_page_size, so
+     * it must follow os_init(). -- WHN 2000-01-26 */
     arch_init();
+#endif
     allocate_spaces(have_hardwired_spaces);
     gc_init();
 
@@ -736,6 +738,7 @@ sbcl_main(int argc, char *argv[], char *envp[])
     write_protect_immobile_space();
 #endif
 #ifdef LISP_FEATURE_HPUX
+    // FIXME: obvious bitrot here. 23 isn't the offset to anything.
     /* -1 = CLOSURE_FUN_OFFSET, 23 = SIMPLE_FUN_CODE_OFFSET, we are
      * not in __ASSEMBLER__ so we cant reach them. */
     return_from_lisp_stub = (void *) ((char *)*((unsigned long *)

@@ -249,15 +249,7 @@
   (loadw length vector 1 other-pointer-lowtag)
   (inst mov fun (ea (- 8 other-pointer-lowtag) vector length 4))
 
-  (let ((fdefn-raw-addr
-          (ea (- (* fdefn-raw-addr-slot n-word-bytes) other-pointer-lowtag)
-              fun)))
-    #+immobile-code
-    (progn
-      (inst lea vector fdefn-raw-addr)
-      (inst jmp vector))
-    #-immobile-code
-    (inst jmp fdefn-raw-addr))
+  (inst jmp (ea (- (* fdefn-raw-addr-slot n-word-bytes) other-pointer-lowtag) fun))
   UNDEFINED
   (inst jmp (make-fixup 'undefined-tramp :assembly-routine))
   NOT-CALLABLE
@@ -345,17 +337,25 @@
   (move block uwp)
   ;; Set next unwind protect context.
   (loadw uwp uwp unwind-block-uwp-slot)
-  (store-tl-symbol-value uwp *current-unwind-protect-block*)
 
   DO-EXIT
+
+  ;; Need to perform unbinding before unlinking the UWP so that if
+  ;; interrupted here it can still run the clean up form. While the
+  ;; cleanup form itself cannot be protected from interrupts (can't
+  ;; run it twice) one of the variables being unbound can be
+  ;; *interrupts-enabled*
+  (loadw where block unwind-block-bsp-slot)
+  (unbind-to-here where symbol value temp-reg-tn zero)
+
+  (store-tl-symbol-value uwp *current-unwind-protect-block*)
 
   (loadw rbp-tn block unwind-block-cfp-slot)
 
   (loadw uwp block unwind-block-current-catch-slot)
   (store-tl-symbol-value uwp *current-catch-block*)
 
-  (loadw where block unwind-block-bsp-slot)
-  (unbind-to-here where symbol value uwp zero)
+
   ;; Uwp-entry expects some things in known locations so that they can
   ;; be saved on the stack: the block in rdx-tn, start in rbx-tn, and
   ;; count in rcx-tn.

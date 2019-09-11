@@ -75,7 +75,7 @@
        (if (eq kind :relative) :relative))))
   nil) ; non-immobile-space builds never record code fixups
 
-#+(or darwin linux openbsd win32)
+#+(or darwin linux openbsd win32 sunos)
 (define-alien-routine ("os_context_float_register_addr" context-float-register-addr)
   (* unsigned) (context (* os-context-t)) (index int))
 
@@ -84,11 +84,11 @@
 
 (defun context-float-register (context index format)
   (declare (ignorable context index))
-  #-(or darwin linux openbsd win32)
+  #-(or darwin linux openbsd win32 sunos)
   (progn
     (warn "stub CONTEXT-FLOAT-REGISTER")
     (coerce 0 format))
-  #+(or darwin linux openbsd win32)
+  #+(or darwin linux openbsd win32 sunos)
   (let ((sap (alien-sap (context-float-register-addr context index))))
     (ecase format
       (single-float
@@ -165,9 +165,9 @@
 #+immobile-code
 (progn
 (defconstant trampoline-entry-offset n-word-bytes)
-(defun fun-immobilize (fun)
+(defun make-simplifying-trampoline (fun)
   (let ((code (truly-the (values code-component &optional)
-                         (sb-vm::alloc-immobile-trampoline))))
+                         (allocate-code-object :dynamic 3 24)))) ; KLUDGE
     (setf (%code-debug-info code) fun)
     (let ((sap (sap+ (code-instructions code) trampoline-entry-offset))
           (ea (+ (logandc2 (get-lisp-obj-address code) lowtag-mask)
@@ -201,9 +201,12 @@
 ;;; Return T if FUN can't be called without loading RAX with its descriptor.
 ;;; This is true of any funcallable instance which is not a GF, and closures.
 (defun fun-requires-simplifying-trampoline-p (fun)
-  (cond ((not (immobile-space-obj-p fun)) t) ; always
-        (t
-         (closurep fun))))
+  (let ((kind (fun-subtype fun)))
+    (or (and (eql kind sb-vm:funcallable-instance-widetag)
+             ;; if the FIN has no raw words then it has no internal trampoline
+             (eql (layout-bitmap (%funcallable-instance-layout fun))
+                  sb-kernel::+layout-all-tagged+))
+        (eql kind sb-vm:closure-widetag))))
 
 (defmacro !set-fin-trampoline (fin)
   `(let ((sap (int-sap (get-lisp-obj-address ,fin)))
@@ -212,13 +215,38 @@
      (setf (sap-ref-word sap insts-offs) #xFFFFFFE9058B48 ; MOV RAX,[RIP-23]
            (sap-ref-32 sap (+ insts-offs 7)) #x00FD60FF))) ; JMP [RAX-3]
 
+#+immobile-space
+(defun alloc-immobile-fdefn ()
+  (or (and (= (alien-funcall (extern-alien "lisp_code_in_elf" (function int))) 1)
+           (allocate-immobile-obj (* fdefn-size n-word-bytes)
+                                  (logior (ash undefined-fdefn-header 16)
+                                          fdefn-widetag) ; word 0
+                                  0 other-pointer-lowtag nil)) ; word 1, lowtag, errorp
+      (values (%primitive alloc-immobile-fixedobj other-pointer-lowtag
+                          fdefn-size
+                          (logior (ash undefined-fdefn-header 16)
+                                  fdefn-widetag))))) ; word 0
+
+(defun fdefn-has-static-callers (fdefn)
+  (declare (type fdefn fdefn))
+  (with-pinned-objects (fdefn)
+    (logbitp 7 (sap-ref-8 (int-sap (get-lisp-obj-address fdefn))
+                          (- 1 other-pointer-lowtag)))))
+
+(defun set-fdefn-has-static-callers (fdefn newval)
+  (declare (type fdefn fdefn) (type bit newval))
+  (if (= newval 0)
+      (%primitive unset-fdefn-has-static-callers fdefn)
+      (%primitive set-fdefn-has-static-callers fdefn))
+  fdefn)
+
 (defun %set-fdefn-fun (fdefn fun)
   (declare (type fdefn fdefn) (type function fun)
            (values function))
-  (unless (eql (sb-vm::fdefn-has-static-callers fdefn) 0)
-    (sb-vm::remove-static-links fdefn))
+  (when (fdefn-has-static-callers fdefn)
+    (remove-static-links fdefn))
   (let ((trampoline (when (fun-requires-simplifying-trampoline-p fun)
-                      (fun-immobilize fun)))) ; a newly made CODE object
+                      (make-simplifying-trampoline fun)))) ; a newly made CODE object
     (with-pinned-objects (fdefn trampoline fun)
       (let* ((jmp-target
               (if trampoline
@@ -229,24 +257,8 @@
                   ;; instance w/ builtin trampoline, or a simple-fun.
                   ;; But the result is shifted by N-FIXNUM-TAG-BITS because
                   ;; CELL-REF yields a descriptor-reg, not an unsigned-reg.
-                  (get-lisp-obj-address (%closure-callee fun))))
-             (tagged-ptr-bias
-              ;; compute the difference between the entry address
-              ;; and the tagged pointer to the called object.
-              (the (unsigned-byte 8)
-                   (- jmp-target (get-lisp-obj-address (or trampoline fun)))))
-             (fdefn-addr (- (get-lisp-obj-address fdefn) ; base of the object
-                            other-pointer-lowtag))
-             (jmp-origin ; 5 = instruction length
-              (+ fdefn-addr (ash fdefn-raw-addr-slot word-shift) 5))
-             (jmp-operand
-              (ldb (byte 32 0) (the (signed-byte 32) (- jmp-target jmp-origin))))
-             (instruction
-              (logior #xE9 ; JMP opcode
-                      (ash jmp-operand 8)
-                      (ash #xA890 40) ; "NOP ; TEST %AL, #xNN"
-                      (ash tagged-ptr-bias 56))))
-        (%primitive sb-vm::set-fdefn-fun fdefn fun instruction))))
+                  (get-lisp-obj-address (%closure-callee fun)))))
+        (%primitive set-fdefn-fun fdefn fun jmp-target))))
   fun)
 
 ) ; end PROGN
@@ -270,11 +282,9 @@
 
 ;;; Compute the PC that FDEFN will jump to when called.
 #+immobile-code
-(defun fdefn-call-target (fdefn)
-  (let ((pc (+ (get-lisp-obj-address fdefn)
-               (- other-pointer-lowtag)
-               (ash fdefn-raw-addr-slot word-shift))))
-    (+ pc 5 (signed-sap-ref-32 (int-sap pc) 1)))) ; 5 = length of JMP
+(defun fdefn-raw-addr (fdefn)
+  (sap-ref-word (int-sap (get-lisp-obj-address fdefn))
+                (- (ash fdefn-raw-addr-slot word-shift) other-pointer-lowtag)))
 
 ;;; Undo the effects of XEP-ALLOCATE-FRAME
 ;;; and point PC to FUNCTION
@@ -302,7 +312,6 @@
 ;;; it is impossible to distinguish fdefns that point to the same called function.
 ;;; FIXME: It would be a nice to remove the uniqueness constraint, either
 ;;; by recording ay ambiguous fdefns, or just recording all replacements.
-;;; Perhaps we could remove the static linker mutex as well?
 (defun call-direct-p (fun code-header-funs)
   #-immobile-code (declare (ignore fun code-header-funs))
   #+immobile-code
@@ -325,10 +334,7 @@
 
 ;;; Remove calls via fdefns from CODE when compiling into memory.
 (defun statically-link-code-obj (code fixups)
-  (declare (ignorable fixups))
-  (unless (and (immobile-space-obj-p code)
-               (fboundp 'sb-vm::remove-static-links))
-    (return-from statically-link-code-obj))
+  (declare (ignorable code fixups))
   #+immobile-code
   (let ((insts (code-instructions code))
         (fdefns)) ; group by fdefn
@@ -348,13 +354,13 @@
             ;; Because we're holding the static linker lock, the elements of
             ;; FUNS can not change while this test is performed.
             (when (call-direct-p callee funs)
-              (let ((entry (sb-vm::fdefn-call-target fdefn)))
+              (let ((entry (sb-vm::fdefn-raw-addr fdefn)))
                 (dolist (offset (cdr fdefn-use))
                   ;; Only a CALL or JMP will get statically linked.
                   ;; A MOV will always load the address of the fdefn.
                   (when (eql (logior (sap-ref-8 insts (1- offset)) 1) #xE9)
                     ;; Set the statically-linked flag
-                    (setf (sb-vm::fdefn-has-static-callers fdefn) 1)
+                    (sb-vm::set-fdefn-has-static-callers fdefn 1)
                     ;; Change the machine instruction
                     (setf (signed-sap-ref-32 insts offset)
                           (- entry (+ (sap-int (sap+ insts offset)) 4)))))))))))))

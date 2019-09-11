@@ -201,6 +201,8 @@
   ; (The ATOM predicate is handled separately as (NOT CONS).)
   (define-type-predicate bit-vector-p bit-vector)
   (define-type-predicate characterp character)
+  #+(and sb-unicode (or x86-64 arm64)) ;; others have a source-transform
+  (define-type-predicate base-char-p base-char)
   (define-type-predicate compiled-function-p compiled-function)
   (define-type-predicate complexp complex)
   (define-type-predicate complex-rational-p (complex rational))
@@ -786,6 +788,8 @@
        (delay-ir1-transform node :constraint)
        (transform-instance-typep class)))))
 
+;;; This transform contains more comments than code. I wish there were some way
+;;; to express it more simply.
 (defun transform-instance-typep (class)
   (let* ((name (classoid-name class))
           (layout (let ((res (info :type :compiler-layout name)))
@@ -898,6 +902,17 @@
                     #-(vop-translates sb-c::layout-depthoid-gt)
                     `(> (layout-depthoid ,n-layout) ,depthoid)))
               (aver (equal pred '(%instancep object)))
+              (case name
+                (structure-object
+                 (return-from transform-instance-typep
+                   `(and (%instancep object)
+                         (logtest (layout-%bits (%instance-layout object))
+                                  +structure-layout-flag+))))
+                (pathname
+                 (return-from transform-instance-typep
+                   `(and (%instancep object)
+                         (logtest (layout-%bits (%instance-layout object))
+                                  +pathname-layout-flag+)))))
               ;; For shallow hierarchies, we can avoid reading the 'inherits'
               ;; because the layout has the ancestor layouts directly in it.
               ;; Not even a depthoid check is needed.
@@ -1047,7 +1062,8 @@
   ;; weird roundabout way. -- WHN 2001-03-18
   (if (and (not env)
            (typep spec '(cons (eql quote) (cons t null))))
-      (source-transform-typep object (cadr spec))
+      (with-current-source-form (spec)
+        (source-transform-typep object (cadr spec)))
       (values nil t)))
 
 ;;;; coercion

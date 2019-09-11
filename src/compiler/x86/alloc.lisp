@@ -167,7 +167,7 @@
   (pseudo-atomic (:elide-if stack-allocate-p)
       (allocation result-tn (pad-data-block size) node stack-allocate-p
                   other-pointer-lowtag)
-      (storew (logior (ash (1- size) n-widetag-bits) widetag)
+      (storew (compute-object-header size widetag)
               result-tn 0 other-pointer-lowtag)))
 
 ;;;; CONS, LIST and LIST*
@@ -340,7 +340,7 @@
        (storew (logior (ash (1- size) n-widetag-bits) closure-widetag)
                result 0 fun-pointer-lowtag)))
    ;; Done with pseudo-atomic
-   (inst lea temp (make-ea-for-object-slot function simple-fun-code-offset
+   (inst lea temp (make-ea-for-object-slot function simple-fun-insts-offset
                                            fun-pointer-lowtag))
    (storew temp result closure-fun-slot fun-pointer-lowtag)))
 

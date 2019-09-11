@@ -1344,16 +1344,21 @@
                              'source source-location)))
 
 (defmethod remove-reader-method ((class slot-class) generic-function)
-  (let ((method (get-method generic-function () (list class) nil)))
+  (let ((method
+         (and (= (length (arg-info-metatypes (gf-arg-info generic-function))) 1)
+              (get-method generic-function () (list class) nil))))
     (when method (remove-method generic-function method))))
 
 (defmethod remove-writer-method ((class slot-class) generic-function)
   (let ((method
-          (get-method generic-function () (list *the-class-t* class) nil)))
+         (and (= (length (arg-info-metatypes (gf-arg-info generic-function))) 2)
+              (get-method generic-function () (list *the-class-t* class) nil))))
     (when method (remove-method generic-function method))))
 
 (defmethod remove-boundp-method ((class slot-class) generic-function)
-  (let ((method (get-method generic-function () (list class) nil)))
+  (let ((method
+         (and (= (length (arg-info-metatypes (gf-arg-info generic-function))) 1)
+              (get-method generic-function () (list class) nil))))
     (when method (remove-method generic-function method))))
 
 ;;; MAKE-READER-METHOD-FUNCTION and MAKE-WRITER-METHOD-FUNCTION
@@ -1624,29 +1629,24 @@
 
 (defun %change-class (instance new-class initargs)
   (declare (notinline allocate-instance))
-  (binding* ((old-class (class-of instance))
+  (binding* ((old-wrapper (layout-of instance))
+             (old-class (wrapper-class* old-wrapper))
              (copy (allocate-instance new-class))
              (new-wrapper (get-wrapper copy))
-             (old-wrapper (class-wrapper old-class))
              (old-slots (get-slots instance))
              (new-slots (get-slots copy))
              (safe (safe-p new-class))
-             (new-wrapper-slots (layout-slot-list new-wrapper))
-             (old-wrapper-slots (layout-slot-list old-wrapper)))
-    (labels ((find-instance-slot (name slots)
-               (loop for slot in slots
-                     when (and (eq (slot-definition-allocation slot) :instance)
-                               (eq (slot-definition-name slot) name))
-                     return slot))
-             (initarg-for-slot-p (slot)
+             (new-wrapper-slots (layout-slot-list new-wrapper)))
+    (flet ((initarg-for-slot-p (slot)
+             (when initargs
                (dolist (slot-initarg (slot-definition-initargs slot))
                  (unless (unbound-marker-p
                           (getf initargs slot-initarg +slot-unbound+))
-                   (return t))))
-             (set-value (value slotd)
-               (%set-slot-value-checking-type
-                'change-class new-slots slotd value safe
-                old-class new-class)))
+                   (return t)))))
+           (set-value (value slotd)
+             (%set-slot-value-checking-type
+              'change-class new-slots slotd value safe
+              old-class new-class)))
 
       ;; "The values of local slots specified by both the class CTO
       ;; and CFROM are retained. If such a local slot was unbound, it
@@ -1654,19 +1654,18 @@
       (dolist (new new-wrapper-slots)
         (when (and (not (initarg-for-slot-p new))
                    (eq (slot-definition-allocation new) :instance))
-          (binding* ((old (find-instance-slot (slot-definition-name new) old-wrapper-slots)
-                          :exit-if-null)
-                     (value (clos-slots-ref old-slots (slot-definition-location old))))
-            (set-value value new))))
-
-      ;; "The values of slots specified as shared in the class CFROM and
-      ;; as local in the class CTO are retained."
-      (dolist (old old-wrapper-slots)
-        (when (eq (slot-definition-allocation old) :class)
-         (binding* ((slot-and-val (slot-definition-location old))
-                    (new (find-instance-slot (car slot-and-val) new-wrapper-slots)
-                         :exit-if-null))
-           (set-value (cdr slot-and-val) new)))))
+          (binding* ((cell (find-slot-cell old-wrapper (slot-definition-name new))
+                           :exit-if-null)
+                     (location (car cell))
+                     (value (cond ((fixnump location)
+                                   (clos-slots-ref old-slots location))
+                                  ((not location)
+                                   (if (funcall (slot-info-boundp (cdr cell)) instance)
+                                       (funcall (slot-info-reader (cdr cell)) instance)
+                                       +slot-unbound+))
+                                  (t
+                                   (cdr location)))))
+            (set-value value new)))))
 
     ;; Make the copy point to the old instance's storage, and make the
     ;; old instance point to the new storage.
@@ -1759,8 +1758,7 @@
              `(defmethod ,name ,args
                 (declare (ignore initargs))
                 (error 'metaobject-initialization-violation
-                       :format-control ,(coerce (format nil "~@<~A~@:>" control)
-                                                'base-string)
+                       :format-control ,(format nil "~~@<~A~~@:>" control)
                        :format-arguments (list (class-name class))
                        :references '((:amop :initialization "Class"))))))
   (def initialize-instance ((class system-class) &rest initargs)

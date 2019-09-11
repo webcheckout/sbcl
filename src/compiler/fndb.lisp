@@ -1065,6 +1065,10 @@
 (defknown sxhash (t) hash (foldable flushable))
 (defknown psxhash (t &optional t) hash (foldable flushable))
 (defknown hash-table-equalp (hash-table hash-table) boolean (foldable flushable))
+;; To avoid emitting code to test for nil-function-returned
+(defknown (sb-impl::signal-corrupt-hash-table
+           sb-impl::signal-corrupt-hash-table-bucket)
+ (t) nil ())
 
 ;;;; from the "Arrays" chapter
 
@@ -1667,10 +1671,10 @@
                        &allow-other-keys)
   pathname)
 
-;; FIXME: consider making (OR FUNCTION-DESIGNATOR CONS) something like
-;; EXTENDED-FUNCTION-DESIGNATOR
-(defknown disassemble ((or function-designator cons code-component) &key
-                       (:stream stream) (:use-labels t))
+(defknown disassemble ((or extended-function-designator
+                           (cons (member lambda))
+                           code-component)
+                       &key (:stream stream) (:use-labels t))
   null)
 
 (defknown describe (t &optional (or stream (member t nil))) (values))
@@ -2086,3 +2090,8 @@
 (defknown finalize
     (t (function-designator () * :no-function-conversion t) &key (:dont-save t))
     *)
+
+#+sb-thread
+(defknown sb-thread::call-with-recursive-lock (function t t t) *)
+#+sb-thread
+(defknown sb-thread::call-with-mutex (function t t t t) *)
