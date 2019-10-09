@@ -14,8 +14,7 @@
                                    fun-pointer-lowtag))))
     ((:temp fdefn-tn descriptor-reg fdefn-offset))
   (inst dword simple-fun-widetag) ;; header
-  (inst dword (make-fixup 'undefined-tramp-tagged
-                          :assembly-routine)) ;; self
+  (inst dword (make-fixup 'undefined-tramp-tagged :assembly-routine)) ;; self
   (dotimes (i (- simple-fun-insts-offset 2))
     (inst dword nil-value))
 
@@ -69,6 +68,7 @@
 ;;; state or any CPU register except the one into which allocation occurs.
 ;;; We use a static area in which to perform the spill/restore just prior to
 ;;; this code, making it accessible relative to the instruction pointer on entry.
+#+nil
 (define-assembly-routine
     (xalloc-tramp (:return-style :raw)
                   (:align n-lowtag-bits)
@@ -78,7 +78,7 @@
      (:temp r2 unsigned-reg 2)
      (:temp r3 unsigned-reg 3)
      (:temp r12 unsigned-reg 12)
-     (:temp lip unsigned-reg 31)) ; lisp LIP reg needn't be saved
+     (:temp lip unsigned-reg 31))      ; lisp LIP reg needn't be saved
   ;; Reserve space for spilling 32 GPRs, 32 FPRs, the argument/result,
   ;; the link register, and the caller's link register (already spilled).
   ;; And double-lispword align the start of the routine.
@@ -111,8 +111,8 @@
     ;; without loading r2. Just r12 is enough, because the callee
     ;; can compute r2 from r12 if it needs to.
     ;; big-endian would more accurately be: if this is the v1 ABI
-    #+big-endian (inst ld r2 r12 8) ; TODO: SEE WHAT HAPPENS IF WE DON'T DO THIS AT ALL
-    (inst ld r12 r12 0)
+    #+big-endian (progn (inst ld r2 r12 8) ; TODO: SEE WHAT HAPPENS IF WE DON'T DO THIS AT ALL
+                        (inst ld r12 r12 0))
     ;; load the size argument into the first C argument register
     (inst ld r3 lip -8)
     (inst mtctr r12)
@@ -120,7 +120,7 @@
     ;; We're back.
     (inst mtctr r3) ; stash the result in a reg that won't be clobbered
     ;; Reload a pointer to this asm routine
-    (inst lr lip (make-fixup 'alloc-tramp :assembly-routine))
+    (inst addi lip null-tn (make-fixup 'alloc-tramp :asm-routine-nil-offset))
     ;; Restore the return address from the caller's frame.
     ;; 'sp' hasn't been restored yet, so add our frame size.
     (inst ld r0 machine-sp (+ 32 16))

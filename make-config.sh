@@ -303,6 +303,9 @@ case `uname` in
     HP-UX)
         sbcl_os="hpux"
         ;;
+    Haiku)
+        sbcl_os="haiku"
+        ;;
     *)
         echo unsupported OS type: `uname`
         exit 1
@@ -403,8 +406,7 @@ then
     # If --fancy, enable threads on platforms where they can be built.
     case $sbcl_arch in
         x86|x86-64|ppc|arm64)
-	    if ([ "$sbcl_os" = "sunos" ] && [ "$sbcl_arch" = "x86-64" ]) || \
-                [ "$sbcl_os" = "dragonfly" ]
+	    if [ "$sbcl_os" = "dragonfly" ]
 	    then
 		echo "No threads on this platform."
 	    else
@@ -427,6 +429,14 @@ else
 fi
 
 case "$sbcl_os" in
+    netbsd)
+        # default to using paxctl to disable mprotect restrictions
+        if [ "x$(sysctl -n security.pax.mprotect.enabled 2>/dev/null)" = x1 -a \
+             "x$SBCL_PAXCTL" = x ]; then
+            echo "SBCL_PAXCTL=\"/usr/sbin/paxctl +m\"; export SBCL_PAXCTL" \
+                 >> output/build-config
+        fi
+        ;;
     openbsd)
         # openbsd 6.0 and newer restrict mmap of RWX pages
         if [ $(uname -r | tr -d .) -gt 60 ]; then
@@ -504,6 +514,12 @@ case "$sbcl_os" in
         link_or_copy Config.$sbcl_arch-hpux Config
         link_or_copy $sbcl_arch-hpux-os.h target-arch-os.h
         link_or_copy hpux-os.h target-os.h
+        ;;
+    haiku)
+        printf ' :unix :elf :haiku :sb-dynamic-core' >> $ltf
+        link_or_copy Config.$sbcl_arch-haiku Config
+        link_or_copy $sbcl_arch-haiku-os.h target-arch-os.h
+        link_or_copy haiku-os.h target-os.h
         ;;
     *bsd)
         printf ' :unix' >> $ltf
@@ -664,7 +680,7 @@ if [ "$sbcl_arch" = "x86" ]; then
         sh tools-for-build/openbsd-sigcontext.sh > src/runtime/openbsd-sigcontext.h
     fi
 elif [ "$sbcl_arch" = "x86-64" ]; then
-    printf ' :64-bit :64-bit-registers :gencgc :stack-grows-downward-not-upward :c-stack-is-control-stack :linkage-table' >> $ltf
+    printf ' :64-bit :gencgc :stack-grows-downward-not-upward :c-stack-is-control-stack :linkage-table' >> $ltf
     printf ' :compare-and-swap-vops :unwind-to-frame-and-call-vop' >> $ltf
     printf ' :fp-and-pc-standard-save' >> $ltf
     printf ' :stack-allocatable-closures :stack-allocatable-vectors' >> $ltf
@@ -707,7 +723,7 @@ elif [ "$sbcl_arch" = "ppc" ]; then
 	fi
     fi
 elif [ "$sbcl_arch" = "ppc64" ]; then
-    printf ' :64-bit :64-bit-registers' >> $ltf
+    printf ' :64-bit' >> $ltf
     printf ' :gencgc :stack-allocatable-closures :stack-allocatable-vectors' >> $ltf
     printf ' :stack-allocatable-lists :stack-allocatable-fixed-objects' >> $ltf
     printf ' :linkage-table :sb-dynamic-core' >> $ltf
@@ -717,7 +733,7 @@ elif [ "$sbcl_arch" = "ppc64" ]; then
     # 2.3.1, so define our constant for that)
     echo '#define GLIBC231_STYLE_UCONTEXT 1' > src/runtime/ppc-linux-mcontext.h
 elif [ "$sbcl_arch" = "riscv" ]; then
-    printf ' :64-bit :64-bit-registers' >> $ltf
+    printf ' :64-bit' >> $ltf
     printf ' :gencgc' >> $ltf
     printf ' :stack-allocatable-closures :stack-allocatable-vectors' >> $ltf
     printf ' :stack-allocatable-lists :stack-allocatable-fixed-objects' >> $ltf
@@ -745,7 +761,6 @@ elif [ "$sbcl_arch" = "sparc" ]; then
     printf ' :stack-allocatable-closures :stack-allocatable-lists' >> $ltf
 elif [ "$sbcl_arch" = "alpha" ]; then
     printf ' :cheneygc' >> $ltf
-    printf ' :64-bit-registers' >> $ltf
     printf ' :stack-allocatable-closures :stack-allocatable-lists' >> $ltf
     printf ' :stack-allocatable-fixed-objects' >> $ltf
 elif [ "$sbcl_arch" = "hppa" ]; then
@@ -763,7 +778,7 @@ elif [ "$sbcl_arch" = "arm" ]; then
     printf ' :unwind-to-frame-and-call-vop' >> $ltf
     printf ' :fp-and-pc-standard-save' >> $ltf
 elif [ "$sbcl_arch" = "arm64" ]; then
-    printf ' :64-bit :64-bit-registers :gencgc :linkage-table :fp-and-pc-standard-save' >> $ltf
+    printf ' :64-bit :gencgc :linkage-table :fp-and-pc-standard-save' >> $ltf
     printf ' :alien-callbacks' >> $ltf
     printf ' :stack-allocatable-lists :stack-allocatable-fixed-objects' >> $ltf
     printf ' :stack-allocatable-vectors :stack-allocatable-closures' >> $ltf

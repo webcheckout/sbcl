@@ -19,15 +19,25 @@
             sb-vm::zero sb-vm::immediate-constant
             sb-vm::registers sb-vm::float-registers
             ;; TNs and offsets
-            sb-vm::zero-tn sb-vm::lip-tn
-            sb-vm::zero-offset sb-vm::null-offset)))
+            sb-vm::code-tn
+            #-64-bit
+            sb-vm::zero-tn
+            sb-vm::code-tn-lowtag
+            sb-vm::code-offset
+            sb-vm::lip-tn
+            sb-vm::null-offset)))
 
 ;;;; Constants, types, conversion functions, some disassembler stuff.
+
+;;; This constant is referenced only in files in the ppc64 subdirectory,
+;;; but ppc32 uses this file as well.
+(defconstant code-tn-lowtag #+ppc64 0 #-ppc64 other-pointer-lowtag)
 
 (defun reg-tn-encoding (tn)
   (declare (type tn tn))
   (sc-case tn
-    (zero zero-offset)
+    ;; zero is not a storage class for the 64-bit vm
+    #-64-bit (zero sb-vm::zero-offset)
     (null null-offset)
     (t
      (if (eq (sb-name (sc-sb (tn-sc tn))) 'registers)
@@ -36,7 +46,7 @@
 
 (defun reg-or-0 (tn)
   (cond ((eql tn 0) 0)
-        ((location= tn zero-tn) (error "Can't encode RA=r0"))
+        ((eql (tn-offset tn) 0) (error "Can't encode RA=r0"))
         (t (reg-tn-encoding tn))))
 
 (defun fp-reg-tn-encoding (tn)
@@ -302,7 +312,7 @@
     (error "Bad bits."))
   ``(byte ,(1+ ,(- endbit startbit)) ,(- 31 ,endbit)))
 
-(defconstant-eqx +ppc-field-specs-alist+
+(defglobal *ppc-field-specs-alist*
     `((aa :field ,(ppc-byte 30))
       (ba :field ,(ppc-byte 11 15) :type 'bi-field)
       (bb :field ,(ppc-byte 16 20) :type 'bi-field)
@@ -318,7 +328,7 @@
       ;; (bits that would otherwise be part of the immediate value
       ;; were it not for their use an an opcode extension) have
       ;; a name in the processor manual. I'm naming them SUBOP.
-      (subop :field ,(ppc-byte 30 31))
+      (ds-form-subop :field ,(ppc-byte 30 31))
       (flm :field ,(ppc-byte 7 14) :sign-extend nil)
       (fra :field ,(ppc-byte 11 15) :type 'fp-reg)
       (frb :field ,(ppc-byte 16 20) :type 'fp-reg)
@@ -347,9 +357,20 @@
       (ui :field ,(ppc-byte 16 31) :sign-extend nil)
       (xo21-30 :field ,(ppc-byte 21 30) :sign-extend nil)
       (xo22-30 :field ,(ppc-byte 22 30) :sign-extend nil)
-      (xo26-30 :field ,(ppc-byte 26 30) :sign-extend nil))
-    #'equal)
+      (xo26-30 :field ,(ppc-byte 26 30) :sign-extend nil)
 
+      ;; Apart from abbreviations documented in the ISA manual,
+      ;; I can not figure out the naming convention at all.
+      ;; So I'm making up my own WITH COMMENTS starting now.
+
+      ;; 6-bit mask begin/end
+      (mask6 :field ,(ppc-byte 21 26) :prefilter #'decode-mask6)
+      ;; 6-bit shift amount
+      (sh6 :fields (list ,(ppc-byte 16 20) ,(ppc-byte 30)) :prefilter #'unsplit-sh)
+      (md-form-subop :field ,(ppc-byte 27 29))
+      (mds-form-subop :field ,(ppc-byte 27 30))
+      (xs-form-subop :field ,(ppc-byte 21 29))
+      ))
 
 (define-instruction-format (instr 32)
   (op :field (byte 6 26))
@@ -363,7 +384,7 @@
 
 (defmacro def-ppc-iformat ((name &optional default-printer) &rest specs)
   (flet ((specname-field (specname)
-           (or (assoc specname +ppc-field-specs-alist+)
+           (or (assoc specname *ppc-field-specs-alist*)
                (error "Unknown ppc instruction field spec ~s" specname))))
     (labels ((spec-field (spec)
                (if (atom spec)
@@ -389,7 +410,7 @@
   rt ra d)
 
 (def-ppc-iformat (ds '(:name :tab rt "," ds "(" ra ")")) ; D scaled
-  rt ra ds subop)
+  rt ra ds (subop ds-form-subop))
 
 (def-ppc-iformat (d-si '(:name :tab rt "," ra "," si )) ; D with signed immediate
   rt ra si)
@@ -573,9 +594,6 @@
 (define-bitfield-emitter emit-x-form-inst 32
   (byte 6 26) (byte 5 21) (byte 5 16) (byte 5 11) (byte 10 1) (byte 1 0))
 
-(define-bitfield-emitter emit-xs-form-inst 32
-  (byte 6 26) (byte 5 21) (byte 5 16) (byte 5 11) (byte 9 2) (byte 1 1) (byte 1 0))
-
 (define-bitfield-emitter emit-xfx-form-inst 32
   (byte 6 26) (byte 5 21) (byte 10 11) (byte 10 1) (byte 1 0))
 
@@ -588,9 +606,45 @@
 (define-bitfield-emitter emit-a-form-inst 32
   (byte 6 26) (byte 5 21) (byte 5 16) (byte 5 11) (byte 5 6) (byte 5 1) (byte 1 0))
 
-(define-bitfield-emitter emit-md-form-inst 32
-  (byte 6 26) (byte 5 21) (byte 5 16) (byte 5 11) (byte 6 5) (byte 3 2) (byte 1 1) (byte 1 0))
 
+
+(defun patchable-emit-d-form (segment opcode rt ra si)
+  (cond ((and (label-p si) (= ra code-offset))
+         ;; Assume that the displacement is short enough to
+         ;; be 1 instruction and we never need to use a chooser.
+         (emit-back-patch
+          segment 4
+          (lambda (segment posn)
+            (declare (ignore posn))
+            (emit-d-form-inst segment opcode rt ra
+                              (+ (component-header-length)
+                                 (segment-header-skew segment)
+                                 (label-position si))))))
+        (t
+         (when (typep si 'fixup)
+           (note-fixup segment :l si)
+           (setq si 0))
+         (emit-d-form-inst segment opcode rt ra si))))
+
+(defun patchable-emit-ds-form (segment opcode rt ra si subop)
+  (cond ((and (label-p si) (= ra code-offset))
+         ;; Assume that the displacement is short enough to
+         ;; be 1 instruction and we never need to use a chooser.
+         (emit-back-patch
+          segment 4
+          (lambda (segment posn)
+            (declare (ignore posn))
+            ;; call recursively to get the error check and scaling
+            (patchable-emit-ds-form
+             segment opcode rt ra
+             (+ (component-header-length)
+                (segment-header-skew segment)
+                (label-position si))
+             subop))))
+        (t
+         (if (= (mod si 4) 0)
+             (emit-ds-form-inst segment opcode rt ra (ash si -2) subop)
+             (error "Displacement should be a multiple of 4")))))
 
 (eval-when (:compile-toplevel :execute)
 (defun classify-dependencies (deplist)
@@ -607,7 +661,7 @@
 (macrolet ((define-d-instruction (name op &key (cost 2) other-dependencies pinned)
              (multiple-value-bind (other-reads other-writes) (classify-dependencies other-dependencies)
                `(define-instruction ,name (segment rt ra si)
-                 (:declare (type (signed-byte 16) si))
+                 (:declare (type (or (signed-byte 16) label) si))
                  (:printer d ((op ,op)))
                  (:delay ,cost)
                  (:cost ,cost)
@@ -615,16 +669,14 @@
                  (:dependencies (reads ra) (reads :memory) ,@other-reads
                                 (writes rt) ,@other-writes)
                  (:emitter
-                  (emit-d-form-inst segment ,op (reg-tn-encoding rt) (reg-or-0 ra) si)))))
+                  (patchable-emit-d-form segment ,op (reg-tn-encoding rt) (reg-or-0 ra) si)))))
            (define-ds-instruction (name op subop)
              `(define-instruction ,name (segment rt ra si)
-                (:declare (type (signed-byte 16) si))
+                (:declare (type (or (signed-byte 16) label) si))
                 (:printer ds ((op ,op) (subop ,subop)))
                 (:emitter
-                 (if (= (mod si 4) 0)
-                     (emit-ds-form-inst segment ,op (reg-tn-encoding rt)
-                                        (reg-or-0 ra) (ash si -2) ,subop)
-                     (error "Displacement should be a multiple of 4")))))
+                 (patchable-emit-ds-form segment ,op (reg-tn-encoding rt)
+                                         (reg-or-0 ra) si ,subop))))
            ;; This is really stupid. We use a diffent macro because use a different printer
            ;; because we use a different instruction format.
            ;; Why not just print loads and stores using the SAME format???
@@ -670,7 +722,7 @@
            (define-d-frt-instruction (name op &key (cost 3) other-dependencies)
              (multiple-value-bind (other-reads other-writes) (classify-dependencies other-dependencies)
                `(define-instruction ,name (segment frt ra si)
-                 (:declare (type (signed-byte 16) si))
+                 (:declare (type (or (signed-byte 16) label) si))
                  (:printer d-frt ((op ,op)))
                  (:delay ,cost)
                  (:cost ,cost)
@@ -735,16 +787,14 @@
   (define-x-instruction      lhaux 31 375 :other-dependencies ((writes ra)))
   ;; Word zero-extending)
   (define-instruction lwz (segment rt ra si)
-    (:declare (type (or fixup (signed-byte 16)) si))
+    (:declare (type (or (signed-byte 16) label fixup) si))
     (:printer d ((op 32)))
     (:delay 2)
     (:cost 2)
     (:dependencies (reads ra) (writes rt) (reads :memory))
     (:emitter
-     (when (typep si 'fixup)
-       (note-fixup segment :l si)
-       (setq si 0))
-     (emit-d-form-inst segment 32 (reg-tn-encoding rt) (reg-or-0 ra) si)))
+     (patchable-emit-d-form segment 32 (reg-tn-encoding rt)
+                            (reg-or-0 ra) si)))
   (define-d-instruction      lwzu  33 :other-dependencies ((writes ra)))
   (define-x-instruction      lwzx  31 23)
   (define-x-instruction      lwzux 31 55 :other-dependencies ((writes ra)))
@@ -1082,7 +1132,18 @@
                             0)))))
 
    ;;; The instructions, in numerical order
-
+  #+64-bit
+  (define-instruction unimp (segment data)
+    (:declare (type (signed-byte 16) data))
+    (:printer xinstr ((op-to-a #.(logior (ash 2 10) (ash 1 5) null-offset)))
+              :default :control #'unimp-control)
+    :pinned
+    (:delay 0)
+    (:emitter
+     #.(assert (> nil-value (1- (expt 2 16))))
+     ;; TDI LGT,$NULL,data
+     (emit-d-form-inst segment 2 1 null-offset data)))
+  #-64-bit
   (define-instruction unimp (segment data)
     (:declare (type (signed-byte 16) data))
     (:printer xinstr ((op-to-a #.(logior (ash 3 10) (ash 6 5) 0)))
@@ -1361,23 +1422,50 @@
                                      (reg-tn-encoding rb) mb me ,rc)))))
     (def rlwnm  23 0) ; Rotate Left Word then AND with Mask
     (def rlwnm. 23 1))
+
+  (define-bitfield-emitter emit-md-form-inst 32
+    (byte 6 26) (byte 5 21) (byte 5 16) (byte 5 11) (byte 6 5) (byte 3 2) (byte 1 1) (byte 1 0))
+  (def-ppc-iformat (md-form '(:name :tab ra "," rs "," sh "," mask))
+    rs ra (sh sh6) (mask mask6) (subop md-form-subop) rc)
+  (defun unsplit-sh (dstate sh0-4 sh5)
+    (declare (ignore dstate))
+    (logior (ash sh5 5) sh0-4))
+  (defun encode-mask6 (m)
+    (logior (ash (ldb (byte 5 0) m) 1) (ldb (byte 1 5) m)))
+  (defun decode-mask6 (dstate value)
+    (declare (ignore dstate))
+    (logior (ash (logand value 1) 5) (ash value -1)))
+
   (macrolet ((def (mnemonic op Rc)
                `(define-instruction ,mnemonic (segment ra rs sh m)
-                  ;; This is problematic because 1 bit of the 'sh' value
-                  ;; is stored in the 5-bit RC field.
-                  ;; (:printer m ((op 30) (rc ,rc) (rb nil :type 'reg)))
+                  (:declare (type (integer 0 63) sh m))
+                  (:printer md-form ((op 30) (subop ,op) (rc ,rc)))
                   (:emitter
-                   (emit-md-form-inst
-                    segment 30 (reg-tn-encoding rs) (reg-tn-encoding ra)
-                    (ldb (byte 5 0) sh)
-                    (logior (ash (ldb (byte 5 0) m) 1) (ldb (byte 1 5) m))
-                    ,op (ldb (byte 1 5) sh) ,rc)))))
+                   (emit-md-form-inst segment 30
+                                      (reg-tn-encoding rs) (reg-tn-encoding ra)
+                                      (ldb (byte 5 0) sh)
+                                      (encode-mask6 m)
+                                      ,op (ldb (byte 1 5) sh) ,rc)))))
     (def rldicl  0 0) ; Rotate Left Doubleword Immediate then Clear Left
     (def rldicl. 0 1)
     (def rldicr  1 0) ; Rotate Left Doubleword Immediate then Clear Right
     (def rldicr. 1 1)
     (def rldic   2 0) ; Rotate Left Doubleword Immediate then Clear
     (def rldic.  2 1))
+
+  (define-bitfield-emitter emit-mds-form-inst 32
+    (byte 6 26) (byte 5 21) (byte 5 16) (byte 5 11) (byte 6 5) (byte 4 1) (byte 1 0))
+  (def-ppc-iformat (mds-form '(:name :tab ra "," rs "," rb "," mask))
+    rs ra rb (mask mask6) (subop mds-form-subop) rc)
+  (macrolet ((def (mnemonic op Rc)
+               `(define-instruction ,mnemonic (segment ra rs rb m)
+                  (:printer mds-form ((op 30) (subop ,op) (rc ,rc)))
+                  (:emitter
+                   (emit-mds-form-inst segment 30 (reg-tn-encoding rs)
+                                       (reg-tn-encoding ra) (reg-tn-encoding rb)
+                                       (encode-mask6 m) ,op ,rc)))))
+    (def rldcl  8 0) ; Rotate Left Doubleword then Clear Left
+    (def rldcl. 8 1))
 
   (define-d-rs-ui-instruction ori 24)
 
@@ -1655,9 +1743,14 @@
                                      sh ,xo ,rc)))))
     (def-sraw srawi  824 0)
     (def-sraw srawi. 824 1))
+
+  (define-bitfield-emitter emit-xs-form-inst 32
+    (byte 6 26) (byte 5 21) (byte 5 16) (byte 5 11) (byte 9 2) (byte 1 1) (byte 1 0))
+  (def-ppc-iformat (xs-form '(:name :tab ra "," rs "," sh))
+    rs ra (sh sh6) (subop xs-form-subop) rc)
   (macrolet ((def-srad (mnemonic xo rc)
                `(define-instruction ,mnemonic (segment ra rs sh)
-                  (:printer x-9 ((op 31) (xo ,xo) (rc ,rc)))
+                  (:printer xs-form ((op 31) (subop ,xo) (rc ,rc)))
                   (:cost 1)
                   (:delay 1)
                   (:dependencies (reads rs) (writes ra))
@@ -1714,11 +1807,11 @@
   ;; floating convert with round signed-doubleword to double-precision
   (define-2-x-21-instructions fcfid 63 846)
   ;; floating convert with round unsigned-doubleword to double-precision
-  (define-2-x-21-instructions fcfidu 63 846)
+  (define-2-x-21-instructions fcfidu 63 974)
   ;; floating convert with round signed-doubleword to single-precision
-  (define-2-x-21-instructions fcfids 63 846)
+  (define-2-x-21-instructions fcfids 59 846)
   ;; floating convert with round unsigned-doubleword to single-precision
-  (define-2-x-21-instructions fcfidus 63 846)
+  (define-2-x-21-instructions fcfidus 59 974)
 
   (define-2-a-tab-instructions fdiv 63 18 :cost 31)
   (define-2-a-tab-instructions fsub 63 20)
@@ -1849,10 +1942,12 @@
     `(inst rlwinm. ,ra ,rs (mod (+ ,b ,n) 32) (- 32 ,n) 31))
 
   (define-instruction-macro srwi (ra rs n) ; N < 32
-    `(inst rlwinm ,ra ,rs (- 32 ,n) ,n 31))
+    `(let ((.n. (the (integer 0 31) ,n)))
+       (inst rlwinm ,ra ,rs (logand #b11111 (- 32 .n.)) .n. 31))) ; n=0 -> rotate 0
 
   (define-instruction-macro srwi. (ra rs n)
-    `(inst rlwinm. ,ra ,rs (- 32 ,n) ,n 31))
+    `(let ((.n. (the (integer 0 31) ,n)))
+       (inst rlwinm. ,ra ,rs (logand #b11111 (- 32 .n.)) .n. 31))) ; n=0 -> rotate 0
 
   (define-instruction-macro clrlwi (ra rs n)
     `(inst rlwinm ,ra ,rs 0 ,n 31))
@@ -1890,6 +1985,10 @@
   (define-instruction-macro slwi. (ra rs n)
     `(inst rlwinm. ,ra ,rs ,n 0 (- 31 ,n)))
 
+  (define-instruction-macro rotldi (ra rs n) `(inst rldicl ,ra ,rs ,n 0))
+  (define-instruction-macro rotrdi (ra rs n) `(inst rldicl ,ra ,rs (- 64 ,n) 0))
+  (define-instruction-macro rotld (ra rs rb) `(inst rldcl ,ra ,rs ,rb 0))
+
 ) ; end PROGN
 
   ;; found on page 104 of version 3.0B of the ISA
@@ -1901,10 +2000,12 @@
     `(inst rldicr. ,ra ,rs ,n (- 63 ,n)))
 
   (define-instruction-macro srdi (ra rs n) ; N < 64
-    `(inst rldicl ,ra ,rs (- 64 ,n) ,n))
+    `(let ((.n. (the (integer 0 63) ,n)))
+       (inst rldicl ,ra ,rs (logand #b111111 (- 64 .n.)) .n.))) ; n=0 -> rotate 0
 
   (define-instruction-macro srdi. (ra rs n)
-    `(inst rldicl. ,ra ,rs (- 64 ,n) ,n))
+    `(let ((.n. (the (integer 0 63) ,n)))
+       (inst rldicl. ,ra ,rs (logand #b111111 (- 64 .n.)) .n.))) ; n=0 -> rotate 0
 
   (define-instruction-macro clrrdi (ra rs n) ; N < 64
     `(inst rldicr ,ra ,rs 0 (- 63 ,n)))
@@ -2024,6 +2125,7 @@
 
 ;;; Some more macros
 
+#-64-bit
 (defun %lr (reg value)
   (etypecase value
     ((signed-byte 16)
@@ -2036,30 +2138,36 @@
        (declare (type (unsigned-byte 16) high-half low-half))
        (cond ((and (logbitp 15 low-half) (= high-half #xffff))
               (inst li reg (dpb low-half (byte 16 0) -1)))
+             ((and (not (logbitp 15 low-half)) (zerop high-half))
+              (inst li reg low-half))
              (t
               (inst lis reg (if (logbitp 15 high-half)
                                 (dpb high-half (byte 16 0) -1)
-                                high-half))
+                              high-half))
               (unless (zerop low-half)
-                (inst ori reg reg low-half))))
-       ;; Clear left if sign extension "accidentally" happened.
-       ;; This suggests futher possibilities- any string of consecutive 1 bits
-       ;; (and some discontiguous strings) can be computed in at most 3
-       ;; instructions: load -1, clear left, clear right, possibly omitting
-       ;; either clear if not needed; or: load -1, clear left, rotate.
-       (when (and (plusp value) (logbitp 15 high-half))
-         (inst rldicl reg reg 0 32))))
-    ((or (signed-byte 64) (unsigned-byte 64))
-     (let* ((quarter-1 (ldb (byte 16 0) value))
-            (quarter-2 (ldb (byte 16 16) value))
-            (quarter-3 (ldb (byte 16 32) value))
-            (quarter-4 (ldb (byte 16 48) value)))
-       (inst lis reg quarter-4)
-       (inst ori reg reg quarter-3)
-       (inst sldi reg reg 32)
-       (inst oris reg reg quarter-2)
-       (inst ori reg reg quarter-1)))
+                (inst ori reg reg low-half))))))
+    (fixup
+     (inst lis reg value)
+     (inst addi reg reg value))))
 
+;;; The 64-bit code for %LR is simple - if one 'li' instruction
+;;; isn't adequate, then load the value from memory.
+;;; There are plenty of tricks that we're missing though, such as some large
+;;; positive constants being modularly equivalent to small negative ones,
+;;; and any constant for which a single 'addis' would suffice.
+#+64-bit
+(defun %lr (reg value)
+  (etypecase value
+    ((signed-byte 16)
+     (inst li reg value))
+    ((unsigned-byte 16)
+     (inst lhz reg code-tn (register-inline-constant value :halfword)))
+    ((signed-byte 32)
+     (inst lwa reg code-tn (register-inline-constant value :word)))
+    ((unsigned-byte 32)
+     (inst lwz reg code-tn (register-inline-constant value :word)))
+    ((or (signed-byte 64) (unsigned-byte 64))
+     (inst ld reg code-tn (register-inline-constant value :dword)))
     (fixup
      (inst lis reg value)
      (inst addi reg reg value))))
@@ -2144,7 +2252,7 @@
                    (inst ori temp temp (ldb (byte 16 0) delta))
                    (inst add dst src temp))))))
 
-;; code = lip - header - label-offset + other-pointer-tag
+;; code = lip - header - label-offset + code-tn-lowtag
 (define-instruction compute-code-from-lip (segment dst src label temp)
   (:declare (type tn dst src temp) (type label label))
   (:attributes variable-length)
@@ -2154,13 +2262,11 @@
   (:emitter
    (emit-compute-inst segment vop dst src label temp
                       #'(lambda (label posn delta-if-after)
-                          (- other-pointer-lowtag
-                             ;;function-pointer-type
+                          (- code-tn-lowtag
                              (label-position label posn delta-if-after)
                              (component-header-length))))))
 
-;; code = lra - other-pointer-tag - header - label-offset + other-pointer-tag
-;;      = lra - (header + label-offset)
+;; code = lra - other-pointer-tag - header - label-offset + code-tn-lowtag
 (define-instruction compute-code-from-lra (segment dst src label temp)
   (:declare (type tn dst src temp) (type label label))
   (:attributes variable-length)
@@ -2170,11 +2276,12 @@
   (:emitter
    (emit-compute-inst segment vop dst src label temp
                       #'(lambda (label posn delta-if-after)
-                          (- (+ (label-position label posn delta-if-after)
-                                (component-header-length)))))))
+                          (- code-tn-lowtag
+                             (label-position label posn delta-if-after)
+                             (component-header-length)
+                             other-pointer-lowtag)))))
 
-;; lra = code + other-pointer-tag + header + label-offset - other-pointer-tag
-;;     = code + header + label-offset
+;; lra = code - code-tn-lowtag + header + label-offset + other-pointer-tag
 (define-instruction compute-lra-from-code (segment dst src label temp)
   (:declare (type tn dst src temp) (type label label))
   (:attributes variable-length)
@@ -2185,4 +2292,44 @@
    (emit-compute-inst segment vop dst src label temp
                       #'(lambda (label posn delta-if-after)
                           (+ (label-position label posn delta-if-after)
-                             (component-header-length))))))
+                             (component-header-length)
+                             other-pointer-lowtag
+                             (- code-tn-lowtag))))))
+
+;;; Unboxed constant support
+
+(defun sb-vm::canonicalize-inline-constant (constant)
+  (destructuring-bind (value size) constant
+    (cons size value)))
+
+(defun sb-vm::inline-constant-value (constant)
+  (declare (ignore constant))
+  (let ((label (gen-label)))
+    (values label label)))
+
+#+ppc64
+(defun sort-inline-constants (constants)
+  (stable-sort constants #'> :key (lambda (constant)
+                                    (size-nbyte (caar constant)))))
+
+(defun size-nbyte (size)
+  (ecase size
+    (:byte     1)
+    (:halfword 2)
+    (:word     4)
+    (:dword    8)
+    (:qword   16)))
+
+#+ppc64
+(defun emit-inline-constant (section constant label)
+  (let* ((type (car constant))
+         (size (size-nbyte type)))
+    (emit section
+          `(.align ,(integer-length (1- size)))
+          label
+          (let* ((val (cdr constant))
+                 (bytes (loop repeat size
+                              collect (prog1 (ldb (byte 8 0) val)
+                                        (setf val (ash val -8))))))
+            #+big-endian (setq bytes (nreverse bytes))
+            `(.byte ,@bytes)))))

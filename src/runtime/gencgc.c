@@ -61,6 +61,7 @@
 #include "hopscotch.h"
 #include "genesis/cons.h"
 #include "forwarding-ptr.h"
+#include "lispregs.h"
 
 /* forward declarations */
 page_index_t  gc_find_freeish_pages(page_index_t *restart_page_ptr, sword_t nbytes,
@@ -441,8 +442,6 @@ extern void fpu_restore(void *);
 extern void
 write_generation_stats(FILE *file)
 {
-    generation_index_t i;
-
 #ifdef LISP_FEATURE_X86
     int fpu_state[27];
 
@@ -453,31 +452,49 @@ write_generation_stats(FILE *file)
 
     /* Print the heap stats. */
     fprintf(file,
-            "Gen  Boxed Unboxed   LgBox LgUnbox  Pin       Alloc     Waste        Trig      WP GCs Mem-age\n");
+            "Gen  Boxed   Code    Raw  LgBox LgCode  LgRaw  Pin       Alloc     Waste        Trig      WP GCs Mem-age\n");
 
-    for (i = 0; i <= SCRATCH_GENERATION; i++) {
+    generation_index_t i, begin, end;
+    // Print from the lowest gen that has any allocated pages.
+    for (begin = 0; begin <= PSEUDO_STATIC_GENERATION; ++begin)
+        if (generations[begin].bytes_allocated) break;
+    // Print up to and including the highest gen that has any allocated pages.
+    for (end = SCRATCH_GENERATION; end >= 0; --end)
+        if (generations[end].bytes_allocated) break;
+
+    for (i = begin; i <= end; i++) {
         page_index_t page;
-        // page kinds: small boxed, small unboxed, large boxed, large unboxed
-        page_index_t pagect[4], pinned_cnt = 0, tot_pages = 0;
+        // page kinds: small {boxed,code,unboxed}, large {boxed,code,unboxed}
+        page_index_t pagect[6], pinned_cnt = 0, tot_pages = 0;
 
         memset(pagect, 0, sizeof pagect);
         for (page = 0; page < next_free_page; page++)
             if (!page_free_p(page) && page_table[page].gen == i) {
-                int k = (page_single_obj_p(page)<<1) | !page_boxed_p(page);
+                int k;
+                switch (page_table[page].type & PAGE_TYPE_MASK) {
+                case CODE_PAGE_TYPE: k = 1; break;
+                case UNBOXED_PAGE_FLAG: k = 2; break;
+                default: k = 0; break;
+                }
+                if (page_single_obj_p(page)) k += 3;
                 pagect[k]++;
                 if (page_table[page].pinned) pinned_cnt++;
             }
-        tot_pages = pagect[0] + pagect[1] + pagect[2] + pagect[3];
+        tot_pages = pagect[0] + pagect[1] + pagect[2]
+                  + pagect[3] + pagect[4] + pagect[5];
         struct generation* gen = &generations[i];
         gc_assert(gen->bytes_allocated == count_generation_bytes_allocated(i));
         fprintf(file,
-                " %d %7"PAGE_INDEX_FMT" %7"PAGE_INDEX_FMT" %7"PAGE_INDEX_FMT
-                " %7"PAGE_INDEX_FMT" %4"PAGE_INDEX_FMT
+                " %d %7"PAGE_INDEX_FMT"%7"PAGE_INDEX_FMT"%7"PAGE_INDEX_FMT
+                "%7"PAGE_INDEX_FMT"%7"PAGE_INDEX_FMT"%7"PAGE_INDEX_FMT
+                " %4"PAGE_INDEX_FMT
                 " %11"OS_VM_SIZE_FMT
                 " %9"OS_VM_SIZE_FMT
                 " %11"OS_VM_SIZE_FMT
                 " %7"PAGE_INDEX_FMT" %3d %7.4f\n",
-                i, pagect[0], pagect[1], pagect[2], pagect[3], pinned_cnt,
+                i,
+                pagect[0], pagect[1], pagect[2], pagect[3], pagect[4], pagect[5],
+                pinned_cnt,
                 (uintptr_t)gen->bytes_allocated,
                 (uintptr_t)npage_bytes(tot_pages) - generations[i].bytes_allocated,
                 (uintptr_t)gen->gc_trigger,
@@ -570,7 +587,8 @@ void fast_bzero(void*, size_t); /* in <arch>-assem.S */
  * of zeroing it ourselves, i.e. in practice give the memory back to the
  * OS. Generally done after a large GC.
  */
-static void zero_range_with_mmap(os_vm_address_t addr, os_vm_size_t length) {
+static void __attribute__((unused))
+zero_range_with_mmap(os_vm_address_t addr, os_vm_size_t length) {
 #ifdef LISP_FEATURE_LINUX
     // We use MADV_DONTNEED only on Linux due to differing semantics from BSD.
     // Linux treats it as a demand that the memory be 0-filled, or refreshed
@@ -1613,6 +1631,35 @@ conservative_root_p(lispobj addr, page_index_t addr_page_index)
 
     return object_start;
 }
+#elif defined LISP_FEATURE_PPC64
+/* "Less conservative" than above - only consider code pointers as ambiguous
+ * roots, not all pointers.  Eventually every architecture could use this
+ * because life is so much easier when on-stack code does not move */
+static lispobj*
+conservative_root_p(lispobj addr, page_index_t addr_page_index)
+{
+    struct page* page = &page_table[addr_page_index];
+    // We allow ambiguous pointers to code, and only code.
+    if ((page->type & PAGE_TYPE_MASK) != CODE_PAGE_TYPE)
+        return 0;
+
+    // quick check 1: within from_space and within page usage
+    if ((addr & (GENCGC_CARD_BYTES - 1)) >= page_bytes_used(addr_page_index) ||
+        (compacting_p() && (page->gen != from_space ||
+                            (page->pinned && (page->type & SINGLE_OBJECT_FLAG)))))
+        return 0;
+    gc_assert(!(page->type & OPEN_REGION_PAGE_FLAG));
+
+    // Find the containing object, if any
+    lispobj* object_start = search_dynamic_space((void*)addr);
+    if (!object_start) return 0;
+
+    /* If 'addr' points to object_start exactly or anywhere in
+     * the boxed words, then it points to the object */
+    if ((lispobj*)addr == object_start || instruction_ptr_p((void*)addr, object_start))
+        return object_start;
+    return 0;
+}
 #endif
 
 /* Adjust large bignum and vector objects. This will adjust the
@@ -1896,6 +1943,10 @@ pin_object(lispobj object)
 
     lispobj* object_start = native_pointer(object);
     page_index_t first_page = find_page_index(object_start);
+    if (!page_single_obj_p(first_page)
+        && hopscotch_containsp(&pinned_objects, object))
+        return;
+
     size_t nwords = OBJECT_SIZE(*object_start, object_start);
     page_index_t last_page = find_page_index(object_start + nwords - 1);
     page_index_t page;
@@ -1907,26 +1958,23 @@ pin_object(lispobj object)
          * Assert this here, because the previous logic used to,
          * and page protection bugs are scary */
         gc_assert(!page_table[page].write_protected);
-        /* Mark the page immovable. */
+        /* Mark the page as containing pinned objects. */
         page_table[page].pinned = 1;
     }
 
     if (page_single_obj_p(first_page)) {
-        maybe_adjust_large_object(first_page, nwords);
-        return;
+        return maybe_adjust_large_object(first_page, nwords);
     }
 
-    if (!hopscotch_containsp(&pinned_objects, object)) {
-        hopscotch_insert(&pinned_objects, object, 1);
-        struct code* maybe_code = (struct code*)native_pointer(object);
-        if (widetag_of(&maybe_code->header) == CODE_HEADER_WIDETAG) {
-          for_each_simple_fun(i, fun, maybe_code, 0, {
-              hopscotch_insert(&pinned_objects,
-                               make_lispobj(fun, FUN_POINTER_LOWTAG),
-                               1);
-          })
-        }
-    }
+    hopscotch_insert(&pinned_objects, object, 1);
+    struct code* maybe_code = (struct code*)native_pointer(object);
+    if (widetag_of(&maybe_code->header) == CODE_HEADER_WIDETAG)
+        for_each_simple_fun(i, fun, maybe_code, 0, {
+            hopscotch_insert(&pinned_objects,
+                             make_lispobj(fun, FUN_POINTER_LOWTAG),
+                             1);
+        })
+
     if (lowtag_of(object) == INSTANCE_POINTER_LOWTAG
         && (*(lispobj*)(object - INSTANCE_POINTER_LOWTAG)
             & CUSTOM_GC_SCAVENGE_FLAG)) {
@@ -1946,6 +1994,7 @@ pin_object(lispobj object)
     }
 }
 
+#if !GENCGC_IS_PRECISE || defined LISP_FEATURE_PPC64
 /* Take a possible pointer to a Lisp object and mark its page in the
  * page_table so that it will not be relocated during a GC.
  *
@@ -1971,9 +2020,19 @@ preserve_pointer(void *addr)
             return immobile_space_preserve_pointer(addr);
         return;
     }
-    lispobj *object_start;
+    lispobj *object_start = conservative_root_p((lispobj)addr, page);
+    if (object_start) pin_object(compute_lispobj(object_start));
+}
+#endif
 
-#if GENCGC_IS_PRECISE
+/* Pin an unambiguous descriptor object which may or may not be a pointer.
+ * Ignore objects with immediate lowtags */
+static void __attribute__((unused)) pin_exact_root(lispobj obj)
+{
+    if (!is_lisp_pointer(obj)) return;
+    page_index_t page = find_page_index((void*)obj);
+    if (page < 0) return;
+
     /* If we're in precise gencgc (non-x86oid as of this writing) then
      * we are only called on valid object pointers in the first place,
      * so we just have to do a bounds-check against the heap, a
@@ -1982,7 +2041,7 @@ preserve_pointer(void *addr)
                             (page_single_obj_p(page) &&
                              page_table[page].pinned)))
         return;
-    object_start = native_pointer((lispobj)addr);
+    lispobj *object_start = native_pointer(obj);
     switch (widetag_of(object_start)) {
     case SIMPLE_FUN_WIDETAG:
 #ifdef RETURN_PC_WIDETAG
@@ -1990,10 +2049,6 @@ preserve_pointer(void *addr)
 #endif
         object_start = fun_code_header(object_start);
     }
-#else
-    if ((object_start = conservative_root_p((lispobj)addr, page)) == NULL)
-        return;
-#endif
     pin_object(compute_lispobj(object_start));
 }
 
@@ -3254,9 +3309,41 @@ garbage_collect_generation(generation_index_t generation, int raise)
     for_each_thread(th) {
         lispobj pin_list = read_TLS(PINNED_OBJECTS,th);
         while (pin_list != NIL) {
-            preserve_pointer((void*)(CONS(pin_list)->car));
+            pin_exact_root(CONS(pin_list)->car);
             pin_list = CONS(pin_list)->cdr;
         }
+#ifdef LISP_FEATURE_PPC64
+        // Scan the control stack and interrupt contexts for ambiguous code roots.
+        // Doing it in gc-common would be too late, since all pinned objects have
+        // to be discovered before transporting anything.
+        // I think we never store reg_CODE on the control stack (yet) - it will only
+        // appear in an interrupt context - so this is probably unnecessary for now.
+        // However, I'd like to eliminate LRAs (at least on the PPC64 backend),
+        // in which case all the looks-like-fixnum return PCs on the control stack,
+        // will need to enliven what they point to.
+        // So we will end up doubly traversing the control stack(s), but it should
+        // be a performance gain to avoid all the PC adjustments for call/return.
+        lispobj *object_ptr;
+        for (object_ptr = th->control_stack_start;
+             object_ptr < access_control_stack_pointer(th);
+             object_ptr++)
+            preserve_pointer((void*)*object_ptr);
+        int i = fixnum_value(read_TLS(FREE_INTERRUPT_CONTEXT_INDEX,th));
+        for (i = i - 1; i >= 0; --i) {
+            os_context_t* context = nth_interrupt_context(i, th);
+            int j;
+            // FIXME: if we pick a register to consistently use with m[ft]lr
+            // then we would only need to examine that, and LR and CTR here.
+            // We may already be consistent, I just don't what the consistency is.
+            static int boxed_registers[] = BOXED_REGISTERS;
+            int __attribute__((unused)) ct = 0;
+            for (j = (int)(sizeof boxed_registers / sizeof boxed_registers[0])-1; j >= 0; --j)
+                preserve_pointer((void*)*os_context_register_addr(context,
+                                                                  boxed_registers[j]));
+            preserve_pointer((void*)*os_context_lr_addr(context));
+            preserve_pointer((void*)*os_context_ctr_addr(context));
+        }
+#endif // PPC64
     }
 #endif
 
@@ -3450,7 +3537,11 @@ remap_page_range (page_index_t from, page_index_t to)
      * tricks for memory zeroing. See sbcl-devel thread
      * "Re: patch: standalone executable redux".
      */
-#if defined(LISP_FEATURE_SUNOS)
+    /* I have no idea what the issue with Haiku is, but using the simpler
+     * zero_pages() works where the unmap,map technique does not. Yet the
+     * trick plus a post-check that the pages were correctly zeroed finds
+     * no problem at that time. So what's failing later and why??? */
+#if defined LISP_FEATURE_SUNOS || defined LISP_FEATURE_HAIKU
     zero_pages(from, to);
 #else
     size_t granularity = gencgc_release_granularity;
@@ -4276,7 +4367,7 @@ void gc_load_corefile_ptes(core_entry_elt_t n_ptes, core_entry_elt_t total_bytes
     // Process an integral number of ptes on each read.
     page_index_t max_pages_per_read = sizeof data / sizeof (struct corefile_pte);
     page_index_t page = 0;
-    generation_index_t gen = PSEUDO_STATIC_GENERATION;
+    generation_index_t gen = CORE_PAGE_GENERATION;
     while (page < n_ptes) {
         page_index_t pages_remaining = n_ptes - page;
         page_index_t npages =
@@ -4309,7 +4400,7 @@ void gc_load_corefile_ptes(core_entry_elt_t n_ptes, core_entry_elt_t total_bytes
               ((char*)get_alloc_pointer() - page_address(0)));
     // write-protecting needs the current value of next_free_page
     next_free_page = n_ptes;
-    if (ENABLE_PAGE_PROTECTION)
+    if (gen != 0 && ENABLE_PAGE_PROTECTION)
         write_protect_generation_pages(gen);
 }
 
@@ -4377,8 +4468,8 @@ sword_t scav_code_header(lispobj *object, lispobj header)
 {
     ++n_scav_calls[CODE_HEADER_WIDETAG/4];
 
-    int my_gen = gen_of((lispobj)object) & 7;
-    if (my_gen == from_space) {
+    int my_gen = gc_gen_of((lispobj)object, 127);
+    if (my_gen < 127 && ((my_gen & 7) == from_space)) {
         // Since 'from_space' objects are not directly scavenged - they can
         // only be scavenged after moving to newspace, then this object
         // must be pinned. (It's logically in newspace). Assert that.

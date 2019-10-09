@@ -101,6 +101,7 @@
 (defconstant-eqx float-sticky-bits (byte 5 25) #'equalp)
 (defconstant-eqx float-traps-byte (byte 5 3) #'equalp)
 (defconstant-eqx float-exceptions-byte (byte 5 25) #'equalp)      ; cexc
+(defconstant-eqx float-invalid-byte (byte 6 19) #'equalp)
 
 (defconstant float-fast-bit 2)         ; Non-IEEE mode
 
@@ -121,7 +122,7 @@
 ;;; While on gencgc we don't.
 #+gencgc (!gencgc-space-setup #x04000000 :dynamic-space-start #x1000000000)
 
-(defconstant linkage-table-entry-size 24)
+(defconstant linkage-table-entry-size #+little-endian 28 #+big-endian 24)
 
 #+linux
 (progn

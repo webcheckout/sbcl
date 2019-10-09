@@ -27,10 +27,11 @@
   #-gencgc (:ignore gc-temp)
   (:results (result :scs (descriptor-reg)))
   (:generator 0
-    (pseudo-atomic (pa-flag)
-      (inst addi ndescr rank (+ (* array-dimensions-offset n-word-bytes)
+    (inst sldi ndescr rank (- word-shift n-fixnum-tag-bits))
+    (inst addi ndescr ndescr (+ (* array-dimensions-offset n-word-bytes)
                                 lowtag-mask))
-      (inst clrrwi ndescr ndescr n-lowtag-bits)
+    (inst clrrwi ndescr ndescr n-lowtag-bits)
+    (pseudo-atomic (pa-flag)
       (allocation header ndescr other-pointer-lowtag
                   :temp-tn gc-temp
                   :flag-tn pa-flag)
@@ -108,7 +109,7 @@
        (:translate data-vector-set)
        (:arg-types ,type positive-fixnum ,element-type)
        (:args (object :scs (descriptor-reg))
-              (index :scs (any-reg zero immediate))
+              (index :scs (any-reg immediate))
               (value :scs ,scs))
        (:results (result :scs ,scs))
        (:result-types ,element-type)))))
@@ -139,8 +140,6 @@
     positive-fixnum any-reg)
   (def-data-vector-frobs simple-array-fixnum word-index
     tagged-num any-reg)
-  (def-data-vector-frobs simple-array-signed-byte-32 32-bits-index
-    signed-num signed-reg)
   (def-data-vector-frobs simple-array-signed-byte-64 word-index
     signed-num signed-reg))
 
@@ -188,6 +187,7 @@
                                    other-pointer-lowtag))
            (inst lwzx result object temp)
            (inst andi. temp index ,(1- elements-per-word))
+           #+big-endian
            (inst xori temp temp ,(1- elements-per-word))
            ,@(unless (= bits 1)
                `((inst slwi temp temp ,(1- (integer-length bits)))))
@@ -206,26 +206,27 @@
          (:generator 15
            (multiple-value-bind (word extra)
                (floor index ,elements-per-word)
+             #+big-endian
              (setf extra (logxor extra (1- ,elements-per-word)))
-             (let ((offset (- (* (+ word vector-data-offset)
-                                 n-word-bytes)
+             (let ((offset (- (+ (* word (/ n-word-bytes 2))
+                                 (* vector-data-offset n-word-bytes))
                               other-pointer-lowtag)))
                (cond ((typep offset '(signed-byte 16))
                       (inst lwz result object offset))
                      (t
                       (inst lr temp offset)
                       (inst lwzx result object temp))))
-             (unless (zerop extra)
-               (inst srwi result result (* ,bits extra)))
-             (unless (= extra ,(1- elements-per-word))
-               (inst andi. result result ,(1- (ash 1 bits)))))))
+             (cond ((zerop extra)
+                    (inst rlwinm result result 0 (- 32 ,bits) 31))
+                   (t
+                     (inst rlwinm result result (- 32 (* ,bits extra)) (- 32 ,bits) 31))))))
        (define-vop (,(symbolicate 'data-vector-set/ type))
          (:note "inline array store")
          (:translate data-vector-set)
          (:policy :fast-safe)
          (:args (object :scs (descriptor-reg))
                 (index :scs (unsigned-reg) :target shift)
-                (value :scs (unsigned-reg zero immediate) :target result))
+                (value :scs (unsigned-reg immediate) :target result))
          (:arg-types ,type positive-fixnum positive-fixnum)
          (:results (result :scs (unsigned-reg)))
          (:result-types positive-fixnum)
@@ -238,6 +239,7 @@
                                        other-pointer-lowtag))
            (inst lwzx old object offset)
            (inst andi. shift index ,(1- elements-per-word))
+           #+big-endian
            (inst xori shift shift ,(1- elements-per-word))
            ,@(unless (= bits 1)
                `((inst slwi shift shift ,(1- (integer-length bits)))))
@@ -246,7 +248,7 @@
              (inst lr temp ,(1- (ash 1 bits)))
              (inst slw temp temp shift)
              (inst andc old old temp))
-           (unless (sc-is value zero)
+           (progn
              (sc-case value
                (immediate
                 (inst lr temp (logand (tn-value value) ,(1- (ash 1 bits)))))
@@ -264,7 +266,7 @@
          (:translate data-vector-set)
          (:policy :fast-safe)
          (:args (object :scs (descriptor-reg))
-                (value :scs (unsigned-reg zero immediate) :target result))
+                (value :scs (unsigned-reg immediate) :target result))
          (:arg-types ,type
                      (:constant index)
                      positive-fixnum)
@@ -274,7 +276,10 @@
          (:temporary (:scs (non-descriptor-reg)) offset-reg temp old)
          (:generator 20
            (multiple-value-bind (word extra) (floor index ,elements-per-word)
-             (let ((offset (- (* (+ word vector-data-offset) n-word-bytes)
+             #+big-endian
+             (setf extra (logxor extra ,(1- elements-per-word)))
+             (let ((offset (- (+ (* word (/ n-word-bytes 2))
+                                 (* vector-data-offset n-word-bytes))
                               other-pointer-lowtag)))
                (cond ((typep offset '(signed-byte 16))
                       (inst lwz old object offset))
@@ -283,31 +288,29 @@
                       (inst lwzx old object offset-reg)))
                (unless (and (sc-is value immediate)
                             (= (tn-value value) ,(1- (ash 1 bits))))
-                 (cond ((zerop extra)
+                 (cond #+big-endian
+                       ((= extra ,(1- elements-per-word))
                         (inst clrlwi old old ,bits))
+                       #+little-endian
+                       ((= extra 0)
+                        (inst rlwinm old old 0 0 (- 31 ,bits)))
                        (t
                         (inst lr temp
                               (lognot (ash ,(1- (ash 1 bits))
-                                           (* (logxor extra
-                                                      ,(1- elements-per-word))
-                                              ,bits))))
+                                           (* extra ,bits))))
                         (inst and old old temp))))
                (sc-case value
-                 (zero)
                  (immediate
                   (let ((value (ash (logand (tn-value value)
                                             ,(1- (ash 1 bits)))
-                                    (* (logxor extra
-                                               ,(1- elements-per-word))
-                                       ,bits))))
+                                    (* extra ,bits))))
                     (cond ((typep value '(unsigned-byte 16))
                            (inst ori old old value))
                           (t
                            (inst lr temp value)
                            (inst or old old temp)))))
                  (unsigned-reg
-                  (inst slwi temp value
-                        (* (logxor extra ,(1- elements-per-word)) ,bits))
+                  (inst slwi temp value (* extra ,bits))
                   (inst or old old temp)))
                (if (typep offset '(signed-byte 16))
                    (inst stw old object offset)
@@ -513,7 +516,7 @@
   (:note "setf vector-raw-bits VOP")
   (:translate %set-vector-raw-bits)
   (:args (object :scs (descriptor-reg))
-         (index :scs (any-reg zero immediate))
+         (index :scs (any-reg immediate))
          (value :scs (unsigned-reg)))
   (:arg-types * positive-fixnum unsigned-num)
   (:results (result :scs (unsigned-reg)))
@@ -536,7 +539,7 @@
   (:translate data-vector-set)
   (:arg-types simple-array-signed-byte-8 positive-fixnum tagged-num)
   (:args (object :scs (descriptor-reg))
-         (index :scs (any-reg zero immediate))
+         (index :scs (any-reg immediate))
          (value :scs (signed-reg)))
   (:results (result :scs (signed-reg)))
   (:result-types tagged-num))
@@ -556,7 +559,27 @@
   (:translate data-vector-set)
   (:arg-types simple-array-signed-byte-16 positive-fixnum tagged-num)
   (:args (object :scs (descriptor-reg))
-         (index :scs (any-reg zero immediate))
+         (index :scs (any-reg immediate))
+         (value :scs (signed-reg)))
+  (:results (result :scs (signed-reg)))
+  (:result-types tagged-num))
+
+(define-vop (data-vector-ref/simple-array-signed-byte-32
+             signed-32-bits-index-ref)
+  (:note "inline array access")
+  (:variant vector-data-offset other-pointer-lowtag)
+  (:translate data-vector-ref)
+  (:arg-types simple-array-signed-byte-32 positive-fixnum)
+  (:results (value :scs (signed-reg)))
+  (:result-types tagged-num))
+
+(define-vop (data-vector-set/simple-array-signed-byte-32 32-bits-index-set)
+  (:note "inline array store")
+  (:variant vector-data-offset other-pointer-lowtag)
+  (:translate data-vector-set)
+  (:arg-types simple-array-signed-byte-32 positive-fixnum tagged-num)
+  (:args (object :scs (descriptor-reg))
+         (index :scs (any-reg immediate))
          (value :scs (signed-reg)))
   (:results (result :scs (signed-reg)))
   (:result-types tagged-num))

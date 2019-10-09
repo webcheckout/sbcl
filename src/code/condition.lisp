@@ -638,16 +638,20 @@
   ((not-yet-loaded :initform nil :reader not-yet-loaded :initarg :not-yet-loaded))
   (:report
    (lambda (condition stream)
-     (let ((*package* (find-package :keyword)))
+     (let ((name (cell-error-name condition)))
        (format stream
-               "~@<The function ~S is undefined.~@?~@:>"
-               (cell-error-name condition)
+               (if (and (symbolp name) (macro-function name))
+                   (sb-format:tokens "~@<~/sb-ext:print-symbol-with-prefix/ is a macro, ~
+                                      not a function.~@:>")
+                   (sb-format:tokens "~@<The function ~/sb-ext:print-symbol-with-prefix/ ~
+                                      is undefined.~@?~@:>"))
+               name
                (case (not-yet-loaded condition)
                  (:local
-                  "~:@_It is a local function ~
-                       not available at compile-time.")
-                 ((t) "~:@_It is defined earlier in the ~
-                           file but is not available at compile-time.")
+                  (sb-format:tokens "~:@_It is a local function ~
+                                     not available at compile-time."))
+                 ((t) (sb-format:tokens "~:@_It is defined earlier in the ~
+                                         file but is not available at compile-time."))
                  (t
                   "")))))))
 
@@ -1840,6 +1844,13 @@ the restart does not exist."))
 
 (define-condition simple-control-error (simple-condition control-error) ())
 (define-condition simple-file-error    (simple-condition file-error)    ())
+
+(defun %file-error (pathname &optional datum &rest arguments)
+  (typecase datum
+    (format-control (error 'simple-file-error :pathname pathname
+                                              :format-control datum
+                                              :format-arguments arguments))
+    (t (apply #'error datum :pathname pathname arguments))))
 
 (define-condition file-exists (simple-file-error) ())
 (define-condition file-does-not-exist (simple-file-error) ())

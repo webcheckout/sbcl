@@ -39,10 +39,8 @@
 
 #-sb-safepoint
 (defun unblock-gc-signals ()
-  (with-alien ((%unblock-gc-signals
-                (function void unsigned-long unsigned-long) :extern
-                "unblock_gc_signals"))
-    (alien-funcall %unblock-gc-signals 0 0)
+  (with-alien ((%unblock-gc-signals (function void) :extern "unblock_gc_signals"))
+    (alien-funcall %unblock-gc-signals)
     nil))
 
 
@@ -156,7 +154,7 @@
                       (sap-int (sb-vm:context-pc context))))))))
 
 (define-signal-handler sigill-handler "illegal instruction")
-#-(or linux android)
+#-(or linux android haiku)
 (define-signal-handler sigemt-handler "SIGEMT")
 (define-signal-handler sigbus-handler "bus error")
 #-(or linux android)
@@ -229,7 +227,7 @@
   (enable-interrupt sigint #'sigint-handler)
   (enable-interrupt sigterm #'sigterm-handler)
   (enable-interrupt sigill #'sigill-handler :synchronous t)
-  #-(or linux android)
+  #-(or linux android haiku)
   (enable-interrupt sigemt #'sigemt-handler)
   (enable-interrupt sigfpe #'sb-vm:sigfpe-handler :synchronous t)
   (if (/= (extern-alien "install_sig_memory_fault_handler" int) 0)

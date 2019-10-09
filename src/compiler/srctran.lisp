@@ -3194,17 +3194,28 @@
          (values (+ tru 1) (- rem divisor))
          (values tru rem))))
 
+;;; Float precision prevents from doing the same
+(deftransform floor ((number divisor) (rational rational))
+  `(multiple-value-bind (tru rem) (truncate number divisor)
+     (if (if (minusp divisor)
+             (> rem 0)
+             (< rem 0))
+         (values (1- tru) (+ rem divisor))
+         (values tru rem))))
+
+(deftransform ceiling ((number divisor) (rational rational))
+  `(multiple-value-bind (tru rem) (truncate number divisor)
+     (if (if (minusp divisor)
+             (< rem 0)
+             (> rem 0))
+         (values (+ tru 1) (- rem divisor))
+         (values tru rem))))
+
 (deftransform rem ((number divisor))
   `(nth-value 1 (truncate number divisor)))
 
 (deftransform mod ((number divisor))
-  `(let ((rem (rem number divisor)))
-     (if (and (not (zerop rem))
-              (if (minusp divisor)
-                  (plusp number)
-                  (minusp number)))
-         (+ rem divisor)
-         rem)))
+  `(nth-value 1 (floor number divisor)))
 
 ;;; If arg is a constant power of two, turn FLOOR into a shift and
 ;;; mask. If CEILING, add in (1- (ABS Y)), do FLOOR and correct a

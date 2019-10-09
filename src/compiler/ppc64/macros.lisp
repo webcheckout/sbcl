@@ -35,6 +35,13 @@
 (defmacro load-symbol (reg symbol)
   `(inst addi ,reg null-tn (static-symbol-offset ,symbol)))
 
+#+sb-thread
+(progn
+  (defun load-tls-index (reg symbol)
+    (inst lwz reg symbol (- #+little-endian 4 other-pointer-lowtag)))
+  (defun store-tls-index (reg symbol)
+    (inst stw reg symbol (- #+little-endian 4 other-pointer-lowtag))))
+
 (macrolet
     ((frob (slot)
        (let ((loader (intern (concatenate 'simple-string
@@ -77,9 +84,8 @@
     `(progn
        (inst lwz ,reg null-tn
              (+ (static-symbol-offset ',symbol)
-                (ash symbol-tls-index-slot word-shift)
-                (- other-pointer-lowtag)))
-       (inst lwzx ,reg thread-base-tn ,reg)))
+                (- #+little-endian 4 other-pointer-lowtag)))
+       (inst ldx ,reg thread-base-tn ,reg)))
   #-sb-thread
   (defmacro load-tl-symbol-value (reg symbol)
     `(load-symbol-value ,reg ,symbol))
@@ -89,9 +95,8 @@
     `(progn
        (inst lwz ,temp null-tn
              (+ (static-symbol-offset ',symbol)
-                (ash symbol-tls-index-slot word-shift)
-                (- other-pointer-lowtag)))
-       (inst stwx ,reg thread-base-tn ,temp)))
+                (- #+little-endian 4 other-pointer-lowtag)))
+       (inst stdx ,reg thread-base-tn ,temp)))
   #-sb-thread
   (defmacro store-tl-symbol-value (reg symbol temp)
     (declare (ignore temp))
@@ -209,7 +214,7 @@
   #+nil
   (let ((lip (make-random-tn :kind :normal :sc (sc-or-lose 'unsigned-reg)
                              :offset lip-offset)))
-    (inst lr lip (make-fixup 'alloc-tramp :assembly-routine))
+    (inst addi lip null-tn (make-fixup 'alloc-tramp :asm-routine-nil-offset))
     (if (numberp size)
         (inst lr temp-tn size)
         (move temp-tn size))
@@ -315,7 +320,8 @@
     (inst andi. temp csp-tn lowtag-mask)
     (inst beq aligned)
     (inst addi csp-tn csp-tn n-word-bytes)
-    (storew zero-tn csp-tn -1)
+    (inst li temp 0)
+    (storew temp csp-tn -1)
     (emit-label aligned)))
 
 
@@ -376,4 +382,5 @@
 
 #+sb-safepoint
 (defun emit-safepoint ()
-  (inst lwz zero-tn null-tn (- (+ gc-safepoint-trap-offset n-word-bytes other-pointer-lowtag))))
+  (inst lwz temp-reg-tn null-tn
+        (- (+ gc-safepoint-trap-offset n-word-bytes other-pointer-lowtag))))

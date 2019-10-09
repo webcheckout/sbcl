@@ -174,7 +174,6 @@ futex_wake(int *lock_word, int n)
 #endif
 
 
-int linux_sparc_siginfo_bug = 0;
 
 #ifdef LISP_FEATURE_SB_THREAD
 int
@@ -221,12 +220,7 @@ void os_init(char __attribute__((unused)) *argv[],
         lose("linux kernel version too old: major version=%d (can't run in version < 2.0.0)\n",
              major_version);
     }
-    if (!(major_version>2 || minor_version >= 4)) {
-#ifdef LISP_FEATURE_SPARC
-        FSHOW((stderr,"linux kernel %d.%d predates 2.4;\n enabling workarounds for SPARC kernel bugs in signal handling.\n", major_version,minor_version));
-        linux_sparc_siginfo_bug = 1;
-#endif
-    }
+
 #ifdef LISP_FEATURE_SB_THREAD
 #if defined(LISP_FEATURE_SB_FUTEX) && !defined(LISP_FEATURE_SB_PTHREAD_FUTEX)
     futex_init();
@@ -332,23 +326,6 @@ int os_preinit(char *argv[], char *envp[])
 #endif
     return 0;
 }
-
-
-#ifdef LISP_FEATURE_ALPHA
-/* The Alpha is a 64 bit CPU.  SBCL is a 32 bit application.  Due to all
- * the places that assume we can get a pointer into a fixnum with no
- * information loss, we have to make sure it allocates all its ram in the
- * 0-2Gb region.  */
-
-static void * under_2gb_free_pointer;
-os_set_cheneygc_spaces(uword_t space0_start, uword_t space1_start)
-{
-    uword_t max;
-    max = (space1_start > space0_start) ? space1_start : space0_start;
-    under_2gb_free_pointer = max + dynamic_space_size;
-}
-
-#endif
 
 void
 os_protect(os_vm_address_t address, os_vm_size_t length, os_vm_prot_t prot)

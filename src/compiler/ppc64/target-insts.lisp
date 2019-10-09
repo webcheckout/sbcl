@@ -11,22 +11,37 @@
 
 (in-package "SB-PPC64-ASM")
 
+(defun current-instruction (dstate &optional (offset 0))
+  (sap-ref-int (dstate-segment-sap dstate)
+               (+ (dstate-cur-offs dstate) offset)
+               4
+               (dstate-byte-order dstate)))
+
 (defun maybe-add-notes (regno dstate)
-  (let* ((inst (sap-ref-int (dstate-segment-sap dstate)
-                            (dstate-cur-offs dstate)
-                4
-                (dstate-byte-order dstate)))
-         (op (ldb (byte 6 26) inst)))
-    (case op
-      ;; lwz
-      (32
+  (let ((inst (current-instruction dstate))
+        (symbolic-inst (sb-disassem::dstate-inst dstate)))
+    (case (sb-disassem::inst-name symbolic-inst)
+      (lwz
        (when (= regno (ldb (byte 5 16) inst)) ; only for the second
          (case (ldb (byte 5 16) inst)
            ;; reg_CODE
-           (19
+           (#.sb-vm::code-offset
             (note-code-constant (ldb (byte 16 0) inst) dstate)))))
-      ;; addi
-      (14
+      (ld
+       (when (= regno (ldb (byte 5 16) inst) sb-vm::code-offset)
+         ;; FIXME: should be sign-extended, but we only access words
+         ;; at positive displacement from reg_CODE.
+         (let ((ofs (ash (ldb (byte 14 2) inst) 2))) ; D scaled form
+           (note-code-constant ofs dstate))))
+      (ldx
+       (when (= regno (ldb (byte 5 16) inst) sb-vm::code-offset)
+         (let ((ra (ldb (byte 5 11) inst))
+               (prev (current-instruction dstate -4)))
+           (when (and (= (ldb (byte 6 26) prev) 14) ;; addi
+                      (= (ldb (byte 5 16) prev) 0)
+                      (= (ldb (byte 5 21) prev) ra))
+             (note-code-constant (ldb (byte 16 0) prev) dstate)))))
+      (addi
        (when (= regno null-offset)
          (maybe-note-nil-indexed-object (ldb (byte 16 0) inst) dstate))))))
 

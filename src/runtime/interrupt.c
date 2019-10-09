@@ -77,12 +77,13 @@
  * it later into another ucontext: the ucontext is allocated on the
  * stack by the kernel, so copying a libc-sized sigset_t into it will
  * overflow and cause other data on the stack to be corrupted */
-/* FIXME: do not rely on NSIG being a multiple of 8 */
 /* See https://sourceware.org/bugzilla/show_bug.cgi?id=1780 */
 
 #ifdef LISP_FEATURE_WIN32
 # define REAL_SIGSET_SIZE_BYTES (4)
 #else
+/* FIXME: do not rely on NSIG being a multiple of 8.
+ * In fact it is *not* a multiple of 8 - it it 65 on x86-64-linux */
 # define REAL_SIGSET_SIZE_BYTES ((NSIG/8))
 #endif
 
@@ -99,6 +100,8 @@ sigcopyset(sigset_t *new, sigset_t *old)
  * becomes 'yes'.) */
 boolean internal_errors_enabled = 0;
 
+// SIGRTMAX is not usable in an array size declaration because it might be
+// a variable expression, so use NSIG which is at least as large as SIGRTMAX.
 #ifndef LISP_FEATURE_WIN32
 static
 void (*interrupt_low_level_handlers[NSIG]) (int, siginfo_t*, os_context_t*);
@@ -116,6 +119,49 @@ union interrupt_handler interrupt_handlers[NSIG];
 #define RESTORE_FP_CONTROL_WORD(context,void_context)           \
     os_context_t *context = arch_os_get_context(&void_context);
 #endif
+
+/* The code below wants to iterate from 1 through SIGRTMAX inclusive, not NSIG,
+ * because NSIG is the maximum capacity of a sigset, whereas SIGRTMAX is a
+ * possibly smaller value indicating the number of signal numbers that could
+ * really be in use. For systems which have distinctly different values
+ * (discounting the deliberate off-by-one nature), sigismember() may return -1
+ * for signal numbers in excess of SIGRTMAX, and we would generally take
+ * -1 to mean boolean 'true' unless it is carefully checked for.
+ * The following program illustrates the issue:
+ *    #include <signal.h>
+ *    #include <stdio.h>
+ *    void main() {
+ *      sigset_t ss;
+ *      sigemptyset(&ss);
+ *      printf("%d %d %d\n", SIGRTMAX, NSIG, sigismember(&ss, 41));
+ *    }
+ *  ./sigismembertest => 40 65 -1
+ */
+#ifdef SIGRTMAX
+#  define MAX_SIGNUM SIGRTMAX
+#else
+#  define MAX_SIGNUM (NSIG-1)
+#endif
+
+// For each bit present in 'source', add it to 'dest'.
+// This is the same as "sigorset(dest, dest, source)" if _GNU_SOURCE is defined.
+static void sigmask_logior(sigset_t *dest, const sigset_t *source)
+{
+    int i;
+    for(i = 1; i <= MAX_SIGNUM; i++) {
+        if (sigismember(source, i)) sigaddset(dest, i);
+    }
+}
+
+// For each bit present in 'source', remove it from 'dest'
+// (logically AND with logical complement).
+static void sigmask_logandc(sigset_t *dest, const sigset_t *source)
+{
+    int i;
+    for(i = 1; i <= MAX_SIGNUM; i++) {
+        if (sigismember(source, i)) sigdelset(dest, i);
+    }
+}
 
 /* Foreign code may want to start some threads on its own.
  * Non-targetted, truly asynchronous signals can be delivered to
@@ -138,8 +184,6 @@ add_handled_signals(sigset_t *sigset)
         }
     }
 }
-
-void block_signals(sigset_t *what, sigset_t *where, sigset_t *old);
 #endif
 
 static boolean
@@ -157,14 +201,15 @@ maybe_resignal_to_lisp_thread(int signal, os_context_t *context)
              signal);
 #endif
         }
-        {
-            sigset_t sigset;
-            sigemptyset(&sigset);
-            add_handled_signals(&sigset);
-            block_signals(&sigset, 0, 0);
-            block_signals(&sigset, os_context_sigmask_addr(context), 0);
-            kill(getpid(), signal);
-        }
+        sigset_t sigset;
+        sigemptyset(&sigset);
+        add_handled_signals(&sigset);
+        thread_sigmask(SIG_BLOCK, &sigset, 0);
+        // This arranges for every handled signal to be blocked on return from this
+        // handler invocation, presumably because that avoids further detours through
+        // this thread's handler for signals that we don't want it to handle.
+        sigmask_logior(os_context_sigmask_addr(context), &sigset);
+        kill(getpid(), signal);
         return 1;
     } else
 #endif
@@ -248,45 +293,13 @@ get_current_sigmask(sigset_t *sigset)
     thread_sigmask(SIG_BLOCK, 0, sigset);
 }
 
-void
-block_signals(sigset_t *what, sigset_t *where, sigset_t *old)
-{
-    if (where) {
-        int i;
-        if (old)
-            sigcopyset(old, where);
-        for(i = 1; i < NSIG; i++) {
-            if (sigismember(what, i))
-                sigaddset(where, i);
-        }
-    } else {
-        thread_sigmask(SIG_BLOCK, what, old);
-    }
-}
-
-void
-unblock_signals(sigset_t *what, sigset_t *where, sigset_t *old)
-{
-    if (where) {
-        int i;
-        if (old)
-            sigcopyset(old, where);
-        for(i = 1; i < NSIG; i++) {
-            if (sigismember(what, i))
-                sigdelset(where, i);
-        }
-    } else {
-        thread_sigmask(SIG_UNBLOCK, what, old);
-    }
-}
-
 // Stringify sigset into the supplied result buffer.
 static void
-sigset_tostring(sigset_t *sigset, char* result, int result_length)
+sigset_tostring(const sigset_t *sigset, char* result, int result_length)
 {
     int i;
     int len = 0;
-    for(i = 1; i < NSIG; i++)
+    for(i = 1; i <= MAX_SIGNUM; i++)
         if (sigismember(sigset, i)) {
             // ensure room for (generously) 3 digits + comma + null, or give up
             if (len > result_length - 5) {
@@ -298,12 +311,12 @@ sigset_tostring(sigset_t *sigset, char* result, int result_length)
     result[len] = 0;
 }
 
-/* Return 1 is all signals is sigset2 are masked in sigset, return 0
- * if all re unmasked else die. Passing NULL for sigset is a shorthand
+/* Return 1 if all signals in sigset2 are masked in sigset, return 0
+ * if all are unmasked, else die. Passing NULL for sigset is a shorthand
  * for the current sigmask. */
 boolean
-all_signals_blocked_p(sigset_t *sigset, sigset_t *sigset2,
-                                const char *name)
+all_signals_blocked_p(const sigset_t *sigset, sigset_t *sigset2,
+                      const char *name)
 {
     int i;
     boolean has_blocked = 0, has_unblocked = 0;
@@ -312,7 +325,7 @@ all_signals_blocked_p(sigset_t *sigset, sigset_t *sigset2,
         get_current_sigmask(&current);
         sigset = &current;
     }
-    for(i = 1; i < NSIG; i++) {
+    for(i = 1; i <= MAX_SIGNUM; i++) {
         if (sigismember(sigset2, i)) {
             if (sigismember(sigset, i))
                 has_blocked = 1;
@@ -346,7 +359,11 @@ sigaddset_deferrable(sigset_t *s)
     sigaddset(s, SIGURG);
     sigaddset(s, SIGTSTP);
     sigaddset(s, SIGCHLD);
+#ifdef SIGIO
     sigaddset(s, SIGIO);
+#else
+    sigaddset(s, SIGPOLL);
+#endif
 #ifndef LISP_FEATURE_HPUX
     sigaddset(s, SIGXCPU);
     sigaddset(s, SIGXFSZ);
@@ -477,7 +494,7 @@ void
 block_deferrable_signals(sigset_t *old)
 {
 #if !defined(LISP_FEATURE_WIN32) || defined(LISP_FEATURE_SB_THREAD)
-    block_signals(&deferrable_sigset, 0, old);
+    thread_sigmask(SIG_BLOCK, &deferrable_sigset, old);
 #endif
 }
 
@@ -485,30 +502,38 @@ void
 block_blockable_signals(sigset_t *old)
 {
 #if !defined(LISP_FEATURE_WIN32) || defined(LISP_FEATURE_SB_THREAD)
-    block_signals(&blockable_sigset, 0, old);
+    thread_sigmask(SIG_BLOCK, &blockable_sigset, old);
 #endif
 }
 
+// Do one of two things depending on whether the specified 'where'
+// is non-null or null.
+// 1. If non-null, then alter the mask in *where, removing deferrable signals
+//    from it without affecting the thread's mask from perspective of the OS.
+// 2. If null, the actually change the current thread's signal mask.
 void
-unblock_deferrable_signals(sigset_t *where, sigset_t *old)
+unblock_deferrable_signals(sigset_t *where)
 {
 #if !defined(LISP_FEATURE_WIN32) || defined(LISP_FEATURE_SB_THREAD)
     if (interrupt_handler_pending_p())
         lose("unblock_deferrable_signals: losing proposition\n");
 #ifndef LISP_FEATURE_SB_SAFEPOINT
+    // If 'where' is null, check_gc_signals_unblocked_or_lose() will
+    // fetch the current signal mask (from the OS) and check that.
     check_gc_signals_unblocked_or_lose(where);
 #endif
-    unblock_signals(&deferrable_sigset, where, old);
+    if (where)
+        sigmask_logandc(where, &deferrable_sigset);
+    else
+        thread_sigmask(SIG_UNBLOCK, &deferrable_sigset, 0);
 #endif
 }
 
 #ifndef LISP_FEATURE_SB_SAFEPOINT
-void
-unblock_gc_signals(sigset_t *where, sigset_t *old)
-{
-#ifndef LISP_FEATURE_WIN32
-    unblock_signals(&gc_sigset, where, old);
-#endif
+// This function previously had an #ifdef guard precluding doing anything for
+// win32, which was redundant because SB_SAFEPOINT is always defined for win32.
+void unblock_gc_signals(void) {
+    thread_sigmask(SIG_UNBLOCK, &gc_sigset, 0);
 }
 #endif
 
@@ -523,11 +548,11 @@ unblock_signals_in_context_and_maybe_warn(os_context_t *context)
 "Enabling blocked gc signals to allow returning to Lisp without risking\n\
 gc deadlocks. Since GC signals are only blocked in signal handlers when \n\
 they are not safe to interrupt at all, this is a pretty severe occurrence.\n");
-        unblock_gc_signals(sigset, 0);
+        sigmask_logandc(sigset, &gc_sigset);
     }
 #endif
     if (!interrupt_handler_pending_p()) {
-        unblock_deferrable_signals(sigset, 0);
+        unblock_deferrable_signals(sigset);
     }
 #endif
 }
@@ -1168,7 +1193,7 @@ interrupt_handle_now(int signal, siginfo_t *info, os_context_t *context)
 #ifdef LISP_FEATURE_C_STACK_IS_CONTROL_STACK
         /* handler.lisp will hide from the GC, will be enabled in the handler itself.
          * Not a problem for the conservative GC. */
-        unblock_gc_signals(0, 0);
+        unblock_gc_signals();
 #endif
 #else
         WITH_GC_AT_SAFEPOINTS_ONLY()
@@ -1442,7 +1467,7 @@ interrupt_handle_now_handler(int signal, siginfo_t *info, void *void_context)
     SAVE_ERRNO(signal,context,void_context);
 #ifndef LISP_FEATURE_WIN32
     if ((signal == SIGILL) || (signal == SIGBUS)
-#if !(defined(LISP_FEATURE_LINUX) || defined(LISP_FEATURE_ANDROID))
+#if !(defined LISP_FEATURE_LINUX || defined LISP_FEATURE_ANDROID || defined LISP_FEATURE_HAIKU)
         || (signal == SIGEMT)
 #endif
         )
@@ -1868,7 +1893,7 @@ sigaction_nodefer_test_handler(int signal,
      * the signal we're handling when SA_NODEFER is set; Linux before
      * 2.6.13 or so also doesn't block the other signal when
      * SA_NODEFER is set. */
-    for(i = 1; i < NSIG; i++)
+    for(i = 1; i <= MAX_SIGNUM; i++)
         if (sigismember(&current, i) !=
             (((i == SA_NODEFER_TEST_BLOCK_SIGNAL) || (i == signal)) ? 1 : 0)) {
             FSHOW_SIGNAL((stderr, "SA_NODEFER doesn't work, signal %d\n", i));
@@ -2229,6 +2254,14 @@ lisp_memory_fault_error(os_context_t *context, os_vm_address_t addr)
 #endif
 
 #ifdef LISP_FEATURE_C_STACK_IS_CONTROL_STACK
+    /* Holy hell is this more obfuscated than necessary when using
+     * signal emulation on macOS. It almost makes one want to cry.
+     * We're not actually on an alternate stack at this point.
+     * Instead of telling the emulated sigsegv (which needn't have been
+     * emulated at all) to return to an intruction which executes a
+     * sigtrap (also emulated), we should just go straight where
+     * we need to go and hand it the original context rather than
+     * having to track the context through two bogus signals */
 #  if !(defined(LISP_FEATURE_X86) || defined(LISP_FEATURE_X86_64))
 #    error memory fault emulation needs validating for this architecture
 #  endif

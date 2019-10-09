@@ -835,7 +835,11 @@
                 (if (fixnump lra)
                     (let ((fp (frame-pointer up-frame)))
                       (values lra
-                              (stack-ref fp (1+ lra-save-offset))))
+                              (let ((code (stack-ref fp (1+ lra-save-offset))))
+                                code
+                                #+ppc64
+                                (%make-lisp-obj (logior (ash code n-fixnum-tag-bits)
+                                                        other-pointer-lowtag)))))
                     (values (get-header-data lra)
                             (lra-code-header lra)))
               (if code
@@ -1139,15 +1143,21 @@ register."
                    (t
                     nil)))))
     (dolist (boxed-reg-offset sb-vm::boxed-regs
-             ;; If we can't actually pair the PC then we presume that
-             ;; we're in an assembly-routine and that reg_CODE is, in
-             ;; fact, the right thing to use...  And that it will do
-             ;; no harm to return it here anyway even if it isn't.
-             (normalize-candidate
-              (boxed-context-register context sb-vm::code-offset)))
+                              ;; If we can't actually pair the PC then we presume that
+                              ;; we're in an assembly-routine and that reg_CODE is, in
+                              ;; fact, the right thing to use...  And that it will do
+                              ;; no harm to return it here anyway even if it isn't.
+                              (normalize-candidate
+                               #+ppc64
+                               (let ((code (context-register context sb-vm::code-offset)))
+                                 (%make-lisp-obj (if (logtest sb-vm:lowtag-mask code)
+                                                     code
+                                                     (logior code sb-vm:other-pointer-lowtag))))
+                               #-ppc64
+                               (boxed-context-register context sb-vm::code-offset)))
       (let ((candidate
-             (normalize-candidate
-              (boxed-context-register context boxed-reg-offset))))
+              (normalize-candidate
+               (boxed-context-register context boxed-reg-offset))))
         (when (and (not (symbolp candidate)) ;; NIL or :UNDEFINED-FUNCTION
                    (nth-value 1 (context-code-pc-offset context candidate)))
           (return candidate))))))
@@ -1233,8 +1243,11 @@ register."
                (sap-ref-lispobj catch (* slot n-word-bytes)))
              #-(or x86 x86-64)
              (catch-entry-offset ()
-               (let ((lra (catch-ref catch-block-entry-pc-slot))
-                     (component (catch-ref catch-block-code-slot)))
+               (let* ((lra (catch-ref catch-block-entry-pc-slot))
+                      (component (catch-ref catch-block-code-slot))
+                      #+ppc64
+                      (component (%make-lisp-obj (logior (ash component n-fixnum-tag-bits)
+                                                         other-pointer-lowtag))))
                  (* (- (1+ (get-header-data lra))
                        (code-header-words component))
                     n-word-bytes)))
@@ -1859,12 +1872,12 @@ register."
                                ((logtest sb-c::compiled-debug-var-same-name-p flags)
                                 prev-name)
                                (t (geti))))
+                 ;; Keep the condition in sync with DUMP-1-VAR
+                 (large-fixnums (>= (integer-length sb-xc:most-positive-fixnum) 62))
                  (sc+offset (if deleted 0
-                                #-64-bit (geti)
-                                #+64-bit (ldb (byte 27 8) flags)))
+                                (if large-fixnums (ldb (byte 27 8) flags) (geti))))
                  (save-sc+offset (and save
-                                      #-64-bit (geti)
-                                      #+64-bit (ldb (byte 27 35) flags)))
+                                      (if large-fixnums (ldb (byte 27 35) flags) (geti))))
                  (indirect-sc+offset (and indirect-p
                                           (geti))))
             (aver (not (and args-minimal (not minimal))))

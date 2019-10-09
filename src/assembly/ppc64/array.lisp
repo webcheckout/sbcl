@@ -37,17 +37,6 @@
     (inst srwi ndescr type n-fixnum-tag-bits)
     (storew ndescr vector 0 other-pointer-lowtag)
     (storew length vector vector-length-slot other-pointer-lowtag))
-  ;; This makes sure the zero byte at the end of a string is paged in so
-  ;; the kernel doesn't bitch if we pass it the string.
-  ;;
-  ;; rtoy says to turn this off as it causes problems with CMUCL.
-  ;;
-  ;; I don't think we need to do this anymore. It looks like this
-  ;; inherited from the SPARC port and does not seem to be
-  ;; necessary. Turning this on worked at some point, but I have not
-  ;; tested with the final GENGC-related changes. CLH 20060221
-  ;;
-  ;;  (storew zero-tn alloc-tn 0)
   (move result vector))
 
 #+stack-allocatable-vectors
@@ -62,6 +51,7 @@
      (:res result descriptor-reg a0-offset)
 
      (:temp ndescr non-descriptor-reg nl0-offset)
+     (:temp zero non-descriptor-reg zero-offset)
      (:temp pa-flag non-descriptor-reg nl3-offset)
      (:temp vector descriptor-reg a3-offset)
      (:temp temp non-descriptor-reg nl2-offset))
@@ -75,13 +65,14 @@
     (storew temp vector 0 other-pointer-lowtag)
     ;; Our storage is allocated, but not initialized, and our contract
     ;; calls for it to be zero-fill.  Do so now.
+    (inst li zero 0)
     (let ((loop (gen-label)))
       (inst addi temp vector (- n-word-bytes other-pointer-lowtag))
       ;; The header word has already been set, skip it.
       (inst addi ndescr ndescr (- (fixnumize 1)))
       (emit-label loop)
       (inst addic. ndescr ndescr (- (fixnumize 1)))
-      (storew zero-tn temp 0)
+      (storew zero temp 0)
       (inst addi temp temp n-word-bytes)
       (inst bgt loop))
     ;; Our zero-fill loop always executes at least one store, so to

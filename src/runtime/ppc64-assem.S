@@ -138,11 +138,15 @@ Low Address
    This way the symbol ptr_ symbol lives within a 32 bits offset
    of the TOC. See Store and Load macros in this file */
 #define indirect_ptr(csym) ptr_##csym: .quad csym
+#if !defined(LISP_FEATURE_SB_THREAD)
 indirect_ptr(current_binding_stack_pointer)
 indirect_ptr(current_control_stack_pointer)
 indirect_ptr(current_control_frame_pointer)
+#endif
 indirect_ptr(dynamic_space_free_pointer)
+#if !defined(LISP_FEATURE_SB_THREAD)
 indirect_ptr(foreign_function_call_active)
+#endif
 indirect_ptr(all_threads)
 #if defined(LISP_FEATURE_SB_THREAD)
 indirect_ptr(specials)
@@ -158,7 +162,7 @@ indirect_ptr(specials)
 	GFUNCDEF(call_into_lisp)
 	C_FULL_PROLOG
 	/* NL0 - function, NL1 - frame pointer, NL2 - nargs. */
-#if defined(LISP_FEATURE_SB_THREAD)
+#ifdef LISP_FEATURE_SB_THREAD
 	/* We need to obtain a pointer to our TLS block before we do
 	 * anything else.  For this, we call pthread_getspecific().
 	 * We've preserved all of the callee-saves registers, so we
@@ -170,13 +174,9 @@ indirect_ptr(specials)
 
 	/* Call out to obtain our TLS block. */
 	load(reg_NL0,specials)
-	/* This won't work on darwin: wrong fixup style.  And is it
-	 * supposed to be lis/ori or lis/addi?  Or does it differ
-	 * between darwin and everything else again? */
-	lis reg_CFUNC,pthread_getspecific@h
-	ori reg_CFUNC,reg_CFUNC,pthread_getspecific@l
-	mtctr reg_CFUNC
-	bctrl
+        bl pthread_getspecific
+        nop
+
 	mr reg_THREAD, reg_NL0
 
 	/* Restore our original parameters. */
@@ -203,7 +203,7 @@ indirect_ptr(specials)
 
 	/* Turn on pseudo-atomic */
 	li reg_ALLOC,flag_PseudoAtomic
-#if defined(LISP_FEATURE_SB_THREAD)
+#ifdef LISP_FEATURE_SB_THREAD
 	std reg_ZERO,THREAD_FOREIGN_FUNCTION_CALL_ACTIVE_OFFSET(reg_THREAD)
 	ld reg_BSP,THREAD_BINDING_STACK_POINTER_OFFSET(reg_THREAD)
 	ld reg_CSP,THREAD_CONTROL_STACK_POINTER_OFFSET(reg_THREAD)
@@ -250,7 +250,7 @@ indirect_ptr(specials)
 
 	.align 3
 lra:
-	.long RETURN_PC_WIDETAG
+	.quad RETURN_PC_WIDETAG
 
 	/* Blow off any extra values. */
 	mr reg_CSP,reg_OCFP
@@ -268,7 +268,7 @@ lra:
 	   the load() and store() macros uses register 2 as the base */
 	ld 2, (24)(sp)
 
-#if defined(LISP_FEATURE_SB_THREAD)
+#ifdef LISP_FEATURE_SB_THREAD
 	/* Store lisp state */
 	std reg_BSP,THREAD_BINDING_STACK_POINTER_OFFSET(reg_THREAD)
 	std reg_CSP,THREAD_CONTROL_STACK_POINTER_OFFSET(reg_THREAD)
@@ -330,7 +330,9 @@ lra:
 
 	/* Convert the return address to an offset and save it on the stack. */
 	sub reg_NFP,reg_LIP,reg_CODE
-	la reg_NFP,OTHER_POINTER_LOWTAG(reg_NFP)
+#if 	N_FIXNUM_TAG_BITS == 3
+	sldi reg_NFP,reg_NFP,1
+#endif
 	std reg_NFP,8(reg_CFP)
 
 #ifdef LISP_FEATURE_SB_THREAD
@@ -377,11 +379,12 @@ lra:
 	* it shall first save it in the TOC pointer doubleword." */
 	std reg_TOC, 24(1)
 
-	mfctr 11
+
 	/* "When a function is entered through its global entry point,
 	 * register r12 contains the entry-point address." */
-	ld reg_CFUNC, 0(11)
 #ifdef LISP_FEATURE_BIG_ENDIAN
+	mfctr 11
+	ld reg_CFUNC, 0(11)
 	/* In the v1 64-bit ABI, a function pointer is a pointer to a
 	 * 3-word "function descriptor" the first word of which contains the
 	 * entry address, and the second the value that the callee needs
@@ -391,8 +394,10 @@ lra:
 	 * Actually not all descriptors have 3 words afaict.
 	 * I don't see how they are ABI-compliant */
 	// ld 11, 16(11)
-#endif
 	mtctr reg_CFUNC
+#else
+	mfctr reg_CFUNC
+#endif 
         /* Into C we go. */
 	bctrl
 
@@ -419,7 +424,7 @@ lra:
 	li reg_A3,0
 	li reg_L0,0
 	li reg_L1,0
-#if !defined(LISP_FEATURE_SB_THREAD)
+#ifndef LISP_FEATURE_SB_THREAD
 	/* reg_THREAD is our TLS block pointer. */
 	li reg_THREAD,0
 #endif
@@ -438,7 +443,7 @@ lra:
 	/* Atomic ... */
 	li reg_ALLOC,flag_PseudoAtomic
 
-#if defined(LISP_FEATURE_SB_THREAD)
+#ifdef LISP_FEATURE_SB_THREAD
 	/* No longer in foreign function call. */
 	std reg_ZERO,THREAD_FOREIGN_FUNCTION_CALL_ACTIVE_OFFSET(reg_THREAD)
 
@@ -466,9 +471,11 @@ lra:
 
 	/* Get the return address back. */
 	ld reg_LIP,8(reg_CFP)
+#if 	N_FIXNUM_TAG_BITS == 3
+	srdi reg_LIP,reg_LIP,1
+#endif	
 	ld reg_CODE,16(reg_CFP)
 	add reg_LIP,reg_CODE,reg_LIP
-	la reg_LIP,-OTHER_POINTER_LOWTAG(reg_LIP)
 
         /* Debugger expects LR to be valid when we come out of PA */
 	mtlr reg_LIP
@@ -500,7 +507,7 @@ lra:
 	/* Due to pointer verification in MAKE-LISP-OBJ, this must
 	include its header data (the offset from the start of the
 	code-object to the LRA). */
-	.long  (((CODE_SIZE+1)&~1)<<N_WIDETAG_BITS)|RETURN_PC_WIDETAG
+	.quad  (((CODE_SIZE+1)&~1)<<N_WIDETAG_BITS)|RETURN_PC_WIDETAG
 
 	/* We are receiving unknown multiple values, thus must deal
 	with the single-value and multiple-value cases separately. */
@@ -510,13 +517,13 @@ lra:
 	/* Compute the correct value for reg_CODE based on the LRA.
 	This is a "simple" matter of subtracting a constant from
 	reg_LRA (where the LRA is stored by the return sequence) to
-	obtain a tagged pointer to the enclosing code component.  Both
-	values are tagged OTHER_POINTER_LOWTAG, so we just have to
-	account for N words (see calculation for RETURN_PC_WIDETAG, above)
-	between the two addresses.
+	obtain a tagged pointer to the enclosing code component.
+	Code pointers have no tag, so we have have to subtract
+	OTHER_POINTER_LOWTAG as well as account for the number of
+	boxed words (see calculation for RETURN_PC_WIDETAG, above).
 	Restoring reg_CODE doesn't appear to be strictly necessary
 	here, but let's observe the niceties.*/
-	addi reg_CODE, reg_LRA, ((CODE_SIZE+1)&~1)*-N_WORD_BYTES
+	addi reg_CODE, reg_LRA, ((CODE_SIZE+1)&~1)*-N_WORD_BYTES-OTHER_POINTER_LOWTAG
 
 	/* Multiple values are stored relative to reg_OCFP, which we
 	set to be the current top-of-stack. */
@@ -526,7 +533,7 @@ lra:
 	addi reg_CSP, reg_CSP, 4
 
 	/* Record the number of values we have as a FIXNUM. */
-	li reg_NARGS, 4
+	li reg_NARGS, 1<<N_FIXNUM_TAG_BITS
 
 	/* Blank the remaining arg-passing registers. */
 	mr reg_A1, reg_NULL
@@ -539,11 +546,13 @@ lra:
 fun_end_breakpoint_multiple_values:
 	/* Compute the correct value for reg_CODE.  See the
 	explanation for the single-value case, above. */
+	// And of course this is even more magic since we seem to assume
+	// a certain code size. Wtf is this actually supposed to be????
 	addi reg_CODE, reg_LRA, -24
 
 	/* The actual magic trap. */
 fun_end_breakpoint_trap:
-	twllei	reg_ZERO, trap_FunEndBreakpoint
+        tdlgti  reg_NULL, trap_FunEndBreakpoint
 
 	/* Finally, the debugger needs to know where the end of the
 	fun_end_breakpoint_guts are, so that it may calculate its size

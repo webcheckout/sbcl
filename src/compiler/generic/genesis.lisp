@@ -1664,14 +1664,14 @@ core and return a descriptor to it."
 
   #-immobile-code
   (dolist (sym sb-vm::+c-callable-fdefns+)
-    (cold-fdefinition-object sym nil *static*))
+    (cold-fdefinition-object sym *static*))
 
   ;; With immobile-code, static-fdefns as a concept are useful -
   ;; the implication is that the function's definition will not change.
   ;; But the fdefn per se is not useful - callers refer to callees directly.
   #-immobile-code
   (dovector (sym sb-vm:+static-fdefns+)
-    (let* ((fdefn (cold-fdefinition-object sym nil *static*))
+    (let* ((fdefn (cold-fdefinition-object sym *static*))
            (offset (- (+ (- (descriptor-bits fdefn)
                             sb-vm:other-pointer-lowtag)
                          (* sb-vm:fdefn-raw-addr-slot sb-vm:n-word-bytes))
@@ -1862,7 +1862,16 @@ core and return a descriptor to it."
     (legal-fun-name-or-type-error result)
     result))
 
-(defun cold-fdefinition-object (cold-name &optional leave-fn-raw
+(defvar *cold-assembler-obj*) ; a single code component
+;;; Writing the address of the undefined trampoline into static fdefns
+;;; has to occur after the asm routines are loaded, which occurs after
+;;; the static fdefns are initialized.
+(defvar *deferred-undefined-tramp-refs*)
+(defun fdefn-makunbound (fdefn)
+  (write-wordindexed fdefn sb-vm:fdefn-fun-slot *nil-descriptor*)
+  (write-wordindexed/raw fdefn sb-vm:fdefn-raw-addr-slot
+                         (lookup-assembler-reference 'sb-vm::undefined-tramp :direct)))
+(defun cold-fdefinition-object (cold-name &optional
                                           (gspace #+immobile-space *immobile-fixedobj*
                                                   #-immobile-space *dynamic*))
   (declare (type (or symbol descriptor) cold-name))
@@ -1875,16 +1884,15 @@ core and return a descriptor to it."
            fdefn 0 (logior (ash sb-vm::undefined-fdefn-header 16)
                            (read-bits-wordindexed fdefn 0)))
           (write-wordindexed fdefn sb-vm:fdefn-name-slot cold-name)
-          (write-wordindexed fdefn sb-vm:fdefn-fun-slot *nil-descriptor*)
-          (unless leave-fn-raw
-            (let ((tramp
-                   (or (lookup-assembler-reference
-                        'sb-vm::undefined-tramp
-                        :direct core-file-name)
-                       ;; Our preload for the tramps doesn't happen during host-1,
-                       ;; so substitute a usable value.
-                       0)))
-              (write-wordindexed/raw fdefn sb-vm:fdefn-raw-addr-slot tramp)))
+          (when core-file-name
+            (if *cold-assembler-obj*
+                (fdefn-makunbound fdefn)
+                (push (lambda ()
+                        (when (zerop (read-bits-wordindexed fdefn sb-vm:fdefn-fun-slot))
+                          ;; This is probably irrelevant - it only occurs for static fdefns,
+                          ;; but every static fdefn will eventually get a definition.
+                          (fdefn-makunbound fdefn)))
+                      *deferred-undefined-tramp-refs*)))
           fdefn))))
 
 (defun cold-fun-entry-addr (fun)
@@ -1900,7 +1908,7 @@ core and return a descriptor to it."
                      (if (symbolp name)
                          (values (cold-intern name) name)
                          (values name (warm-fun-name name))))
-             (fdefn (cold-fdefinition-object cold-name t)))
+             (fdefn (cold-fdefinition-object cold-name)))
     (unless (cold-null (cold-fdefn-fun fdefn))
       (error "Duplicate DEFUN for ~S" warm-name))
     ;; There can't be any closures or funcallable instances.
@@ -2068,7 +2076,6 @@ core and return a descriptor to it."
                  *cold-foreign-symbol-table*)
         (error "The foreign symbol ~S is undefined." name))))
 
-(defvar *cold-assembler-obj*) ; a single code component
 (defvar *cold-assembler-routines*)
 (defvar *cold-static-call-fixups*)
 
@@ -2081,20 +2088,19 @@ core and return a descriptor to it."
 (defun code-header-bytes (code-object)
   (ldb (byte 32 0) (read-bits-wordindexed code-object sb-vm:code-boxed-size-slot)))
 
-(defun lookup-assembler-reference (symbol &optional (mode :direct) (errorp t))
+(defun lookup-assembler-reference (symbol &optional (mode :direct))
   (let* ((code-component *cold-assembler-obj*)
          (list *cold-assembler-routines*)
          (offset (or (cdr (assq symbol list))
-                     (and errorp (error "Assembler routine ~S not defined." symbol)))))
-    (when offset
-      (+ (logandc2 (descriptor-bits code-component) sb-vm:lowtag-mask)
-         (ecase mode
-           (:direct
+                     (error "Assembler routine ~S not defined." symbol))))
+    (+ (logandc2 (descriptor-bits code-component) sb-vm:lowtag-mask)
+       (ecase mode
+         (:direct
             (+ (code-header-bytes code-component) offset))
-           (:indirect
+         (:indirect
             (ash (+ (round-up sb-vm:code-constants-offset 2)
                     (count-if (lambda (x) (< (cdr x) offset)) list))
-                 sb-vm:word-shift)))))))
+                 sb-vm:word-shift))))))
 
 ;;; Unlike in the target, FOP-KNOWN-FUN sometimes has to backpatch.
 (defvar *deferred-known-fun-refs*)
@@ -2670,7 +2676,9 @@ core and return a descriptor to it."
           ;; Note: we round the number of constants up to ensure that
           ;; the code vector will be properly aligned.
           (round-up sb-vm:code-constants-offset 2))
-         (space (or #+immobile-space *immobile-varyobj* *read-only*))
+         (space (or #+immobile-space *immobile-varyobj*
+                    #+(and gencgc (or ppc ppc64)) *static*
+                    *read-only*))
          (asm-code
           (allocate-cold-descriptor
                   space
@@ -2704,6 +2712,8 @@ core and return a descriptor to it."
            (ecase flavor
              (:assembly-routine (lookup-assembler-reference sym))
              (:assembly-routine* (lookup-assembler-reference sym :indirect))
+             (:asm-routine-nil-offset
+              (- (lookup-assembler-reference sym) sb-vm:nil-value))
              (:foreign
               (let ((sym (base-string-from-core sym)))
                 #+sb-dynamic-core (dyncore-note-symbol sym nil)
@@ -2997,6 +3007,36 @@ core and return a descriptor to it."
     (format t "#define ~A_MASK 0x~X /* ~:*~A */~%"
             (c-symbol-name symbol)
             (sb-xc:mask-field (symbol-value symbol) -1))))
+
+(defun write-regnames-h (stream)
+  (declare (ignorable stream))
+  #-x86 ;; too weird - "UESP" (user-mode register ESP) is only
+  ;; visible in a ucontext, so not a lisp register.
+  (flet ((prettify (macro list &optional trailing-slash)
+           (aver (not (member nil list)))
+           (format stream "#define ~a " macro)
+           (let ((linelen 100) ; force a line break
+                 (delim nil))
+             (dolist (item list)
+               (cond ((> linelen 70)
+                      (format stream "~:[~;,~]\\~%    " delim)
+                      (setq delim nil linelen 4)) ; four leading spaces
+                     (delim
+                      (write-string ", " stream)
+                      (incf linelen 2)))
+               (write-string item stream)
+               (incf linelen (length item))
+               (setq delim t))
+             (when trailing-slash (write-char #\\ stream))
+             (terpri stream))))
+    (let ((names sb-vm::*register-names*))
+      (prettify "REGNAMES" (map 'list (lambda (x) (format nil "~s" x)) names))
+      (when (boundp 'sb-vm::boxed-regs)
+        (prettify "BOXED_REGISTERS {"
+                  (mapcar (lambda (i) (format nil "reg_~A" (aref names i)))
+                          (symbol-value 'sb-vm::boxed-regs))
+                  t)
+        (format stream "}~%")))))
 
 (defun write-errnames-h (stream)
   ;; C code needs strings for describe_internal_error()
@@ -3335,7 +3375,6 @@ III. initially undefined function references (alphabetically):
 
 #+gencgc
 (defun output-page-table (gspace data-page core-file write-word verbose)
-  (declare (ignore verbose))
   ;; Write as many PTEs as there are pages used.
   ;; A corefile PTE is { uword_t scan_start_offset; page_bytes_t bytes_used; }
   (let* ((data-bytes (* (gspace-free-word-index gspace) sb-vm:n-word-bytes))
@@ -3344,6 +3383,8 @@ III. initially undefined function references (alphabetically):
           (if (typep sb-vm:gencgc-card-bytes '(unsigned-byte 16)) 2 4))
          (sizeof-corefile-pte (+ sb-vm:n-word-bytes sizeof-usage))
          (pte-bytes (round-up (* sizeof-corefile-pte n-ptes) sb-vm:n-word-bytes))
+         (n-code 0)
+         (n-mixed 0)
          (ptes (make-bigvec)))
     (expand-bigvec ptes pte-bytes)
     (dotimes (page-index n-ptes)
@@ -3356,12 +3397,14 @@ III. initially undefined function references (alphabetically):
                       0))
              (type-bits (if (plusp usage)
                             (ecase (page-type pte)
-                              (:code  #b11)
-                              (:mixed #b01))
+                              (:code  (incf n-code)  #b11)
+                              (:mixed (incf n-mixed) #b01))
                             0)))
         (setf (bvref-word ptes pte-offset) (logior sso type-bits))
         (funcall (if (eql sizeof-usage 2) #'(setf bvref-16) #'(setf bvref-32))
                  usage ptes (+ pte-offset sb-vm:n-word-bytes))))
+    (when verbose
+      (format t "~d boxed pages, ~d code pages~%" n-mixed n-code))
     (force-output core-file)
     (let ((posn (file-position core-file)))
       (file-position core-file (* sb-c:+backend-page-bytes+ (1+ data-page)))
@@ -3540,6 +3583,7 @@ III. initially undefined function references (alphabetically):
            *cold-static-call-fixups*
            *cold-assembler-routines*
            *cold-assembler-obj*
+           *deferred-undefined-tramp-refs*
            (*code-fixup-notes* (make-hash-table))
            (*allocation-point-fixup-notes* nil)
            (*deferred-known-fun-refs* nil))
@@ -3547,16 +3591,19 @@ III. initially undefined function references (alphabetically):
       (setf *nil-descriptor* (make-nil-descriptor)
             *simple-vector-0-descriptor* (vector-in-core nil))
 
+      ;; Prepare for cold load.
+      (initialize-layouts)
+      (initialize-packages)
+      (initialize-static-space)
+
       ;; Load all assembler code
       (flet ((assembler-file-p (name) (tailwise-equal (namestring name) ".assem-obj")))
         (dolist (file-name (remove-if-not #'assembler-file-p object-file-names))
           (cold-load file-name verbose))
         (setf object-file-names (remove-if #'assembler-file-p object-file-names)))
+      (mapc 'funcall *deferred-undefined-tramp-refs*)
+      (makunbound '*deferred-undefined-tramp-refs*)
 
-      ;; Prepare for cold load.
-      (initialize-layouts)
-      (initialize-packages)
-      (initialize-static-space)
       (when *cold-assembler-obj*
         (write-wordindexed
          *cold-assembler-obj* sb-vm:code-debug-info-slot
@@ -3565,7 +3612,7 @@ III. initially undefined function references (alphabetically):
          (let ((z (make-fixnum-descriptor 0)))
            (cold-cons z z (ecase (gspace-name
                                   (descriptor-gspace *cold-assembler-obj*))
-                            (:read-only *static*)
+                            ((:read-only :static) *static*)
                             (:immobile-varyobj *dynamic*)))))
         (init-runtime-routines))
 
@@ -3676,6 +3723,7 @@ III. initially undefined function references (alphabetically):
                        (format stream "#endif~%"))))
         (out-to "config" (write-config-h stream))
         (out-to "constants" (write-constants-h stream))
+        (out-to "regnames" (write-regnames-h stream))
         (out-to "errnames" (write-errnames-h stream))
         (out-to "gc-tables" (sb-vm::write-gc-tables stream))
         (out-to "tagnames" (write-tagnames-h stream))

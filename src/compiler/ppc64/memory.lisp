@@ -70,11 +70,12 @@
 ;;; a tagged fixnum to produce a natural index into the data vector for the
 ;;; element size. It works only because n-fixnum-tag-bits = word-shift,
 ;;; and there is no case in which left-shift is required.
-(defmacro define-indexer (name shift write-p ri-op rr-op &optional sign-extend-byte
-                               &aux (net-shift (- shift n-fixnum-tag-bits)))
+(defmacro define-indexer (name shift write-p ri-op rr-op &key sign-extend-byte
+                                                              multiple-of-four
+                          &aux (net-shift (- shift n-fixnum-tag-bits)))
   `(define-vop (,name)
      (:args (object :scs (descriptor-reg))
-            (index :scs (any-reg zero immediate))
+            (index :scs (any-reg immediate))
             ,@(when write-p
                 '((value :scs (any-reg descriptor-reg) :target result))))
      (:arg-types * tagged-num ,@(when write-p '(*)))
@@ -86,15 +87,14 @@
      (:policy :fast-safe)
      (:generator 5
        (sc-case index
-         ((immediate zero)
-          (let ((offset (- (+ (if (sc-is index zero)
-                                  0
-                                  (ash (tn-value index) ,shift))
+         ((immediate)
+          (let ((offset (- (+ (ash (tn-value index) ,shift)
                               (ash offset word-shift))
                            lowtag)))
             (if (and (typep offset '(signed-byte 16))
-                     (or (< ,shift 3) ;; If it's not word-index
-                         (not (logtest offset #b11)))) ;; Or the displacement is a multiple of 4
+                     (or ,@(and (not multiple-of-four)
+                                `((< ,shift 3))) ;; If it's not word-index
+                            (not (logtest offset #b11)))) ;; Or the displacement is a multiple of 4
                 (inst ,ri-op value object offset)
                 (progn
                   (inst lr temp offset)
@@ -115,17 +115,18 @@
 (define-indexer word-index-ref           3 nil ld  ldx) ;; Word means Lisp Word
 (define-indexer word-index-set           3 t   std stdx)
 (define-indexer 32-bits-index-ref        2 nil lwz lwzx)
+(define-indexer signed-32-bits-index-ref 2 nil lwa lwax :multiple-of-four t)
 (define-indexer 32-bits-index-set        2 t   stw stwx)
 (define-indexer 16-bits-index-ref        1 nil lhz lhzx)
 (define-indexer signed-16-bits-index-ref 1 nil lha lhax)
 (define-indexer 16-bits-index-set        1 t   sth sthx)
 (define-indexer byte-index-ref           0 nil lbz lbzx)
-(define-indexer signed-byte-index-ref    0 nil lbz lbzx t)
+(define-indexer signed-byte-index-ref    0 nil lbz lbzx :sign-extend-byte t)
 (define-indexer byte-index-set           0 t   stb stbx)
 
 (define-vop (word-index-cas)
   (:args (object :scs (descriptor-reg))
-         (index :scs (any-reg zero immediate))
+         (index :scs (any-reg immediate))
          (old-value :scs (any-reg descriptor-reg))
          (new-value :scs (any-reg descriptor-reg)))
   (:arg-types * tagged-num * *)
@@ -136,10 +137,8 @@
   (:policy :fast-safe)
   (:generator 5
     (sc-case index
-      ((immediate zero)
-       (let ((offset (- (+ (if (sc-is index zero)
-                               0
-                               (ash (tn-value index) word-shift))
+      ((immediate)
+       (let ((offset (- (+ (ash (tn-value index) word-shift)
                            (ash offset word-shift))
                         lowtag)))
          (inst lr temp offset)))
