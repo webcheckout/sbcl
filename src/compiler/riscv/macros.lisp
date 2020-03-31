@@ -41,15 +41,26 @@
             (ash symbol-value-slot word-shift)
             (- other-pointer-lowtag))))
 
+;;; TODO: these two macros would benefit from linkage-table space being
+;;; located below static space with linkage entries allocated downward
+;;; from the end. Then the sequence would reduce to 2 instructions:
+;;;    lw temp (k)$NULL
+;;;    lw dest, (0)$TEMP
 (defun load-foreign-symbol-value (dest symbol temp)
-  (let ((fixup (make-fixup symbol :foreign)))
+  (aver (string/= symbol "foreign_function_call_active"))
+  (let ((fixup (make-fixup symbol :foreign-dataref)))
     (inst lui temp fixup)
-    (inst #-64-bit lw #+64-bit ld dest temp fixup)))
+    (inst #-64-bit lw #+64-bit ld temp temp fixup)
+    (inst #-64-bit lw #+64-bit ld dest temp 0)))
 
 (defun store-foreign-symbol-value (src symbol temp)
-  (let ((fixup (make-fixup symbol :foreign)))
+  (let ((fixup (make-fixup symbol :foreign-dataref))
+        ;; see comment in globals.c
+        (op (cond #+64-bit ((string/= symbol "foreign_function_call_active") 'sd)
+                  (t 'sw))))
     (inst lui temp fixup)
-    (inst #-64-bit sw #+64-bit sd src temp fixup)))
+    (inst #-64-bit lw #+64-bit ld temp temp fixup)
+    (inst* op src temp 0)))
 
 (defmacro load-type (target source &optional (offset 0))
   "Loads the type bits of a pointer into target independent of
@@ -58,7 +69,7 @@ byte-ordering issues."
 
 (defun lisp-jump (function)
   "Jump to the lisp function FUNCTION."
-  (inst jalr zero-tn function (- (ash simple-fun-code-offset word-shift)
+  (inst jalr zero-tn function (- (ash simple-fun-insts-offset word-shift)
                                  fun-pointer-lowtag)))
 
 (defun lisp-return (return-pc return-style)
@@ -139,9 +150,9 @@ byte-ordering issues."
 If we are doing [reg+offset*n-word-bytes-lowtag+index*scale]
 and
 
--2^11 ≤ offset*n-word-bytes - lowtag + index*scale < 2^11
--2^11 ≤ offset*n-word-bytes - lowtag + index*scale ≤ 2^11-1
--2^11 + lowtag -offset*n-word-bytes ≤ index*scale ≤ 2^11-1 + lowtag - offset*n-word-bytes
+-2^11 <= offset*n-word-bytes - lowtag + index*scale < 2^11
+-2^11 <= offset*n-word-bytes - lowtag + index*scale <= 2^11-1
+-2^11 + lowtag -offset*n-word-bytes <= index*scale <= 2^11-1 + lowtag - offset*n-word-bytes
 |#
 (sb-xc:deftype load/store-index (scale lowtag offset)
   (let* ((encodable (list (- (ash 1 11)) (1- (ash 1 11))))
@@ -516,25 +527,22 @@ and
 ;;; the P-A FLAG-TN is also acceptable here.
 
 #+gencgc
-(defun allocation-tramp (alloc-tn size back-label)
-  (let ((size-tn (cond ((integerp size)
-                        (inst li alloc-tn size)
-                        alloc-tn)
-                       (t size))))
-    ;; Pass alloc-tn on the number stack.
-    ;; Instead of allocating space here, we save some code size by
-    ;; delegating the stack pointer frobbing to the assembly routine.
-    (storew size-tn nsp-tn -1))
-  (invoke-asm-routine 'alloc-tramp)
-  (loadw alloc-tn nsp-tn -1)
-  (inst j back-label))
+(defun alloc-tramp-stub-name (tn-offset type)
+  (declare (type (unsigned-byte 5) tn-offset))
+  (aref (load-time-value
+         (let ((a (make-array 64)))
+           (dotimes (i 32 a)
+             (let ((r (write-to-string i)))
+               (setf (aref a i)  (package-symbolicate "SB-VM" "ALLOC-LIST-TO-R" r)
+                     (aref a (+ i 32)) (package-symbolicate "SB-VM" "ALLOC-TO-R" r)))))
+         t)
+        (if (eq type 'list) tn-offset (+ tn-offset 32))))
 
-(defun allocation (result-tn size lowtag &key flag-tn
-                                              stack-allocate-p
-                                              temp-tn)
+(defun allocation (type size lowtag result-tn &key flag-tn
+                                                   stack-allocate-p
+                                                   temp-tn)
+  (declare (ignorable type))
   #-gencgc (declare (ignore temp-tn))
-  (when (integerp size)
-    (assert (zerop (logand size lowtag-mask))))
   (cond (stack-allocate-p
          ;; Stack allocation
          ;;
@@ -548,7 +556,7 @@ and
          (etypecase size
            (short-immediate
             (inst addi csp-tn csp-tn size))
-           ((signed-byte 32)
+           (u+i-immediate
             (inst li flag-tn size)
             (inst add csp-tn csp-tn flag-tn))
            (tn
@@ -561,7 +569,7 @@ and
          (etypecase size
            (short-immediate
             (inst addi flag-tn flag-tn size))
-           ((signed-byte 32)
+           (u+i-immediate
             (inst li flag-tn (- size lowtag))
             (inst add flag-tn flag-tn result-tn))
            (tn
@@ -570,36 +578,44 @@ and
         #+gencgc
         (t
          (let ((alloc (gen-label))
-               (back-from-alloc (gen-label)))
-           ;; FIXME: Can optimize this to direct lui hi + load lo?
-           ;; Hit problems if the second struct member is past the
-           ;; most positive lo offset. Need relaxation.
-           (inst li flag-tn (make-fixup "gc_alloc_region" :foreign))
-           (loadw result-tn flag-tn)
-           (loadw flag-tn flag-tn 1)
+               (back-from-alloc (gen-label))
+               (boxed-region (- (+ static-space-start
+                                   ;; skip over the array header
+                                   (* 2 n-word-bytes))
+                                nil-value)))
+           (loadw result-tn null-tn 0 (- boxed-region))
+           (loadw flag-tn null-tn 1 (- boxed-region))
            (etypecase size
              (short-immediate
               (inst addi result-tn result-tn size))
-             ((signed-byte 32)
+             (u+i-immediate
               (inst li temp-tn size)
-              (inst add result-tn result-tn size))
+              (inst add result-tn result-tn temp-tn))
              (tn
               (inst add result-tn result-tn size)))
            (inst blt flag-tn result-tn alloc)
-           (store-foreign-symbol-value result-tn "gc_alloc_region" flag-tn)
+           (storew result-tn null-tn 0 (- boxed-region))
            (etypecase size
              (short-immediate
               (inst subi result-tn result-tn size))
-             ((signed-byte 32)
+             (u+i-immediate
               (inst sub result-tn result-tn temp-tn))
              (tn
               (inst sub result-tn result-tn size)))
            (emit-label back-from-alloc)
-           (when lowtag
+           (unless (zerop lowtag)
              (inst ori result-tn result-tn lowtag))
            (assemble (:elsewhere)
              (emit-label alloc)
-             (allocation-tramp result-tn size back-from-alloc))))))
+             (etypecase size
+               (short-immediate
+                (inst li result-tn size))
+               (u+i-immediate
+                (move result-tn temp-tn))
+               (tn
+                (move result-tn size)))
+             (invoke-asm-routine (alloc-tramp-stub-name (tn-offset result-tn) type))
+             (inst j back-from-alloc))))))
 
 (defmacro with-fixed-allocation ((result-tn flag-tn type-code size
                                   &key (lowtag other-pointer-lowtag)
@@ -616,12 +632,12 @@ and
               (stack-allocate-p stack-allocate-p)
               (lowtag lowtag))
     `(pseudo-atomic (,flag-tn)
-       (allocation ,result-tn (pad-data-block ,size) ,lowtag
+       (allocation nil (pad-data-block ,size) ,lowtag ,result-tn
                    :flag-tn ,flag-tn
                    :stack-allocate-p ,stack-allocate-p
                    ,@(when temp-tn `(:temp-tn ,temp-tn)))
        (when ,type-code
-         (inst li ,flag-tn (+ (ash (1- ,size) n-widetag-bits) ,type-code))
+         (inst li ,flag-tn (compute-object-header ,size ,type-code))
          (storew ,flag-tn ,result-tn 0 ,lowtag))
        ,@body)))
 

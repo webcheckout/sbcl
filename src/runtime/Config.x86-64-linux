@@ -11,7 +11,7 @@
 
 NM = ./linux-nm
 
-ASSEM_SRC = x86-64-assem.S ldso-stubs.S
+ASSEM_SRC = x86-64-assem.S
 ARCH_SRC = x86-64-arch.c
 OS_SRC = linux-os.c linux-mman.c x86-64-linux-os.c
 
@@ -43,7 +43,7 @@ ifdef LISP_FEATURE_SB_CORE_COMPRESSION
 endif
 
 CFLAGS += -Wunused-parameter -fno-omit-frame-pointer -momit-leaf-frame-pointer
-CPPFLAGS += -include memcpy.h
+DISABLE_PIE=no
 
 ifdef LISP_FEATURE_IMMOBILE_SPACE
   GC_SRC = fullcgc.c gencgc.c traceroot.c immobile-space.c elf.c

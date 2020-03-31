@@ -187,7 +187,11 @@
                           (setf **character-cases** table))
 
                         (setf **character-collations**
-                              (let* ((table (make-hash-table :size 27978
+                              (let* ((n-entries
+                                      ,(let ((n-entries-file (file "n-collation-entries" "lisp-expr")))
+                                         (with-open-file (s n-entries-file)
+                                           (read s))))
+                                     (table (make-hash-table :size n-entries
                                                              #+64-bit :test #+64-bit #'eq))
                                      (index 0)
                                      (info (make-ubn-vector ,collations 4))
@@ -207,9 +211,12 @@
                                         (dotimes (i key-length)
                                           (setf (ldb (byte 32 (* i 32)) key) (aref info index))
                                           (incf index))
+                                        ;; verify the validity of
+                                        ;; :test 'eq on 64-bit
+                                        #+64-bit (aver (typep (apply #'pack-3-codepoints codepoints) 'fixnum))
                                         (setf (gethash (apply #'pack-3-codepoints codepoints) table)
                                               key)))
-                                (assert (= (hash-table-count table) 27978))
+                                (aver (= (hash-table-count table) n-entries))
                                 table))))
 
                     ,(with-open-file
@@ -575,7 +582,9 @@ argument is an alphabetic character, A-Z or a-z; otherwise NIL."
   (< (ucd-general-category char) 5))
 
 (defmacro with-case-info ((char index-var cases-var
-                           &key miss-value)
+                           &key miss-value
+                                (cases '**character-cases**)
+                                (case-pages '**character-case-pages**))
                           &body body)
   (let ((code-var (gensym "CODE"))
         (shifted-var (gensym "SHIFTED"))
@@ -587,13 +596,13 @@ argument is an alphabetic character, A-Z or a-z; otherwise NIL."
            (let* ((,shifted-var (ash ,code-var -6))
                   (,page-var (if (>= ,shifted-var (length **character-case-pages**))
                                  (return ,miss-value)
-                                 (aref **character-case-pages** ,shifted-var))))
+                                 (aref ,case-pages ,shifted-var))))
              (if (= ,page-var 255)
                  ,miss-value
                  (let ((,index-var (* (+ (ash ,page-var 6)
                                          (ldb (byte 6 0) ,code-var))
                                       2))
-                       (,cases-var **character-cases**))
+                       (,cases-var ,cases))
                    ,@body))))))))
 
 (defun both-case-p (char)

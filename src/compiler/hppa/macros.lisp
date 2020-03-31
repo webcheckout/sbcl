@@ -84,7 +84,7 @@ byte-ordering issues."
 (defmacro lisp-jump (function)
   "Jump to the lisp function FUNCTION."
   `(progn
-     (inst addi (- (ash simple-fun-code-offset word-shift)
+     (inst addi (- (ash simple-fun-insts-offset word-shift)
                    fun-pointer-lowtag) ,function lip-tn)
      (inst bv lip-tn)
      (move ,function code-tn t)))
@@ -157,7 +157,7 @@ initializes the object."
   (once-only ((result-tn result-tn) (temp-tn temp-tn)
               (type-code type-code) (size size)
               (lowtag lowtag))
-    (let ((write-body `((inst li (logior (ash (1- ,size) n-widetag-bits) ,type-code) ,temp-tn)
+    (let ((write-body `((inst li (compute-object-header ,size ,type-code) ,temp-tn)
                         (storew ,temp-tn ,result-tn 0 ,lowtag))))
       `(if ,dynamic-extent-p
          (pseudo-atomic ()

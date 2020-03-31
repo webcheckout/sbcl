@@ -29,7 +29,7 @@ set -a # export all variables at assignment-time.
 SBCL_HOME="${TEST_SBCL_HOME:-$SBCL_PWD/../obj/sbcl-home}"
 SBCL_CORE="${TEST_SBCL_CORE:-$SBCL_PWD/../output/sbcl.core}"
 SBCL_RUNTIME="${TEST_SBCL_RUNTIME:-$SBCL_PWD/../src/runtime/sbcl}"
-SBCL_ARGS="${TEST_SBCL_ARGS:---noinform --no-sysinit --no-userinit --noprint --disable-debugger}"
+SBCL_ARGS="${TEST_SBCL_ARGS:---disable-ldb --noinform --no-sysinit --no-userinit --noprint --disable-debugger}"
 
 # Scripts that use these variables should quote them.
 TEST_BASENAME=`basename $0`
@@ -69,7 +69,6 @@ run_sbcl () (
 
 run_sbcl_with_args () (
     set -u
-    echo "$SBCL_RUNTIME" --core "$SBCL_CORE" "$@"
     "$SBCL_RUNTIME" --core "$SBCL_CORE" "$@"
 )
 
@@ -132,6 +131,16 @@ use_test_subdirectory () {
     fi
     mkdir "$TEST_DIRECTORY"
     cd "$TEST_DIRECTORY"
+    trap "cleanup_test_subdirectory" EXIT
+}
+
+# Do the above but without changing the current directory
+create_test_subdirectory () {
+    if test -d "$TEST_DIRECTORY"
+    then
+        cleanup_test_subdirectory
+    fi
+    mkdir "$TEST_DIRECTORY"
     trap "cleanup_test_subdirectory" EXIT
 }
 

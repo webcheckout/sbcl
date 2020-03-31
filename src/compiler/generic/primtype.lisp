@@ -24,26 +24,26 @@
 (!def-primitive-type positive-fixnum (any-reg signed-reg unsigned-reg)
   :type (unsigned-byte #.sb-vm:n-positive-fixnum-bits))
 (/show0 "primtype.lisp 27")
-#-64-bit-registers
+#-(or 64-bit 64-bit-registers)
 (!def-primitive-type unsigned-byte-31 (signed-reg unsigned-reg descriptor-reg)
   :type (unsigned-byte 31))
 (/show0 "primtype.lisp 31")
-#-64-bit-registers
+#-(or 64-bit 64-bit-registers)
 (!def-primitive-type unsigned-byte-32 (unsigned-reg descriptor-reg)
   :type (unsigned-byte 32))
 (/show0 "primtype.lisp 35")
-#+64-bit-registers
+#+(or 64-bit 64-bit-registers)
 (!def-primitive-type unsigned-byte-63 (signed-reg unsigned-reg descriptor-reg)
   :type (unsigned-byte 63))
-#+64-bit-registers
+#+(or 64-bit 64-bit-registers)
 (!def-primitive-type unsigned-byte-64 (unsigned-reg descriptor-reg)
   :type (unsigned-byte 64))
 (!def-primitive-type fixnum (any-reg signed-reg)
   :type (signed-byte #.(1+ n-positive-fixnum-bits)))
-#-64-bit-registers
+#-(or 64-bit 64-bit-registers)
 (!def-primitive-type signed-byte-32 (signed-reg descriptor-reg)
   :type (signed-byte 32))
-#+64-bit-registers
+#+(or 64-bit 64-bit-registers)
 (!def-primitive-type signed-byte-64 (signed-reg descriptor-reg)
   :type (signed-byte 64))
 
@@ -77,6 +77,7 @@
 
 ;;; primitive other-pointer number types
 (/show0 "primtype.lisp 81")
+(!def-primitive-type integer (descriptor-reg))
 (!def-primitive-type bignum (descriptor-reg))
 (!def-primitive-type ratio (descriptor-reg))
 (!def-primitive-type complex (descriptor-reg))
@@ -257,7 +258,7 @@
                                  (if (or (< hi sb-xc:most-negative-fixnum)
                                          (> lo sb-xc:most-positive-fixnum))
                                      (part-of bignum)
-                                     (any)))
+                                     (part-of integer)))
                           (let ((type (car spec))
                                 (min (cadr spec))
                                 (max (caddr spec)))
@@ -269,7 +270,7 @@
                             (and lo (> lo sb-xc:most-positive-fixnum)))
                         (part-of bignum))
                        (t
-                        (any))))
+                        (part-of integer))))
                 (float
                  (let ((exact (and (null lo) (null hi))))
                    (case (numeric-type-format type)

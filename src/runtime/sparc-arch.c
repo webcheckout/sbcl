@@ -24,15 +24,6 @@
 #include "breakpoint.h"
 #include "monitor.h"
 
-#ifdef LISP_FEATURE_LINUX
-extern int linux_sparc_siginfo_bug;
-#endif
-
-void arch_init(void)
-{
-    return;
-}
-
 os_vm_address_t arch_get_bad_addr(int sig, siginfo_t *code, os_context_t *context)
 {
 #if 1 /* New way. */
@@ -263,8 +254,6 @@ arch_handle_allocation_trap(os_context_t *context)
     int rs1;
     int size;
     int immed;
-    int context_index;
-    boolean were_in_lisp;
     char* memory;
 
     if (foreign_function_call_active)
@@ -304,7 +293,8 @@ arch_handle_allocation_trap(os_context_t *context)
         struct interrupt_data *data =
             arch_os_get_current_thread()->interrupt_data;
         data->allocation_trap_context = context;
-        memory = alloc(size);
+        extern lispobj alloc(sword_t);
+        memory = (char*)alloc(size);
         data->allocation_trap_context = 0;
     }
     *os_context_register_addr(context, rs1) = memory;
@@ -316,11 +306,7 @@ arch_handle_allocation_trap(os_context_t *context)
 static void sigill_handler(int signal, siginfo_t *siginfo,
                            os_context_t *context)
 {
-    if ((siginfo->si_code) == ILL_ILLOPC
-#ifdef LISP_FEATURE_LINUX
-        || (linux_sparc_siginfo_bug && (siginfo->si_code == 2))
-#endif
-        ) {
+    if ((siginfo->si_code) == ILL_ILLOPC) {
         int trap;
         unsigned int inst;
         unsigned int* pc = (unsigned int*) siginfo->si_addr;
@@ -329,11 +315,7 @@ static void sigill_handler(int signal, siginfo_t *siginfo,
         trap = inst & 0xff;
         handle_trap(context,trap);
     }
-    else if ((siginfo->si_code) == ILL_ILLTRP
-#ifdef LISP_FEATURE_LINUX
-             || (linux_sparc_siginfo_bug && (siginfo->si_code) == 192)
-#endif
-             ) {
+    else if ((siginfo->si_code) == ILL_ILLTRP) {
         if (pseudo_atomic_trap_p(context)) {
             /* A trap instruction from a pseudo-atomic.  We just need
                to fixup up alloc-tn to remove the interrupted flag,
@@ -358,7 +340,6 @@ void arch_install_interrupt_handlers()
 }
 
 
-#ifdef LISP_FEATURE_LINKAGE_TABLE
 
 /* This a naive port from CMUCL/sparc, which was mostly stolen from the
  * CMUCL/x86 version, with adjustments for sparc
@@ -388,8 +369,9 @@ void arch_install_interrupt_handlers()
  * Insert the necessary jump instructions at the given address.
  */
 void
-arch_write_linkage_table_entry(char *reloc_addr, void *target_addr, int datap)
+arch_write_linkage_table_entry(int index, void *target_addr, int datap)
 {
+  char *reloc_addr = (char*)LINKAGE_TABLE_SPACE_START + index * LINKAGE_TABLE_ENTRY_SIZE;
   if (datap) {
     *(unsigned long *)reloc_addr = (unsigned long)target_addr;
     return;
@@ -444,4 +426,3 @@ arch_write_linkage_table_entry(char *reloc_addr, void *target_addr, int datap)
 
   os_flush_icache((os_vm_address_t) reloc_addr, (char*) inst_ptr - reloc_addr);
 }
-#endif

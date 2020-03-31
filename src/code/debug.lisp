@@ -162,7 +162,6 @@ Other commands:
                       (return loc))))
         (cond ((and (not (debug-block-elsewhere-p block))
                     start)
-               (format *debug-io* "~%unknown location: using block start~%")
                start)
               (t
                loc)))
@@ -443,6 +442,7 @@ information."
                                (write-string (unprintable-object-string x) s))))
             (:copier nil))
   (string nil :read-only t))
+(declaim (freeze-type unprintable-object))
 
 (defun replace-dynamic-extent-object (obj)
   (if (stack-allocated-p obj)
@@ -1785,7 +1785,7 @@ forms that explicitly control this kind of evaluation.")
     ;;     unwind.
     (let ((catch-block (sap-int/fixnum (find-enclosing-catch-block frame)))
           (unbind-to (find-binding-stack-pointer frame)))
-      ;; This VOP will run the neccessary cleanup forms, reset the fp, and
+      ;; This VOP will run the necessary cleanup forms, reset the fp, and
       ;; then call the supplied function.
       (sb-vm::%primitive sb-vm::unwind-to-frame-and-call
                          (sb-di::frame-pointer frame)

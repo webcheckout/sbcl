@@ -135,6 +135,7 @@
   (declare (ignore type state))
   (list (make-wired-tn* 'unsigned-byte-32 unsigned-reg-sc-number nargs-offset)
         (make-wired-tn* 'unsigned-byte-32 unsigned-reg-sc-number nl3-offset)
+        (make-normal-tn (primitive-type-or-lose 'double-float))
         'move-int-args-to-double))
 
 #-arm-softfp
@@ -178,7 +179,6 @@
         (emit-label fixup-label)
         (inst word (make-fixup foreign-symbol :foreign))))))
 
-#+linkage-table
 (define-vop (foreign-symbol-dataref-sap)
   (:translate foreign-symbol-dataref-sap)
   (:policy :fast-safe)

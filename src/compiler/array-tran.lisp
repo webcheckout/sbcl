@@ -345,6 +345,18 @@
                           fill-pointer displaced-to
                           node))
 
+(defoptimizer (make-array-header* derive-type) ((&rest inits))
+  (let* ((data-position #.(sb-vm::slot-offset
+                           (find 'sb-vm::data (sb-vm:primitive-object-slots
+                                               (find 'array sb-vm:*primitive-objects*
+                                                     :key 'sb-vm:primitive-object-name))
+                                 :key 'sb-vm::slot-name)))
+         (data (nth data-position inits))
+         (type (lvar-type data)))
+    (when (array-type-p type)
+      (make-array-type '* :element-type (array-type-element-type type)
+                          :specialized-element-type (array-type-specialized-element-type type)))))
+
 (defoptimizer (%make-array derive-type)
     ((dims widetag n-bits &key adjustable fill-pointer displaced-to
            &allow-other-keys)
@@ -423,7 +435,7 @@
       (unless (and (typep form '(cons (member list vector)))
                    (do ((items (cdr form))
                         (length 0 (1+ length))
-                        (fun (let ((axis (the (mod #.array-rank-limit) (1+ axis))))
+                        (fun (let ((axis (the (mod #.sb-xc:array-rank-limit) (1+ axis))))
                                (if (= axis rank)
                                    (lambda (item) (push item output))
                                    (lambda (item) (recurse item axis))))))
@@ -704,6 +716,14 @@
                                         ;; we want to avoid reading it.
                                         (the index ,(or c-length 'length))
                                         ,n-words-form))))
+    (when (and c-length
+               fill-pointer
+               (csubtypep (lvar-type fill-pointer) (specifier-type 'index))
+               (not (types-equal-or-intersect (lvar-type fill-pointer)
+                                              (specifier-type `(integer 0 ,c-length)))))
+      (abort-ir1-transform "Invalid fill-pointer ~s for a vector of length ~s."
+                           (type-specifier (lvar-type fill-pointer))
+                           c-length))
     (flet ((eliminate-keywords ()
              (eliminate-keyword-args
               call 1
@@ -713,15 +733,6 @@
                 (:adjustable adjustable)
                 (:fill-pointer fill-pointer))))
            (with-alloc-form (&optional data-wrapper)
-             (when (and c-length
-                        fill-pointer
-                        (csubtypep (lvar-type fill-pointer) (specifier-type 'index))
-                        (not (types-equal-or-intersect (lvar-type fill-pointer)
-                                                       (specifier-type `(integer 0 ,c-length)))))
-               (compiler-warn "Invalid fill-pointer ~s for a vector of length ~s."
-                              (type-specifier (lvar-type fill-pointer))
-                              c-length)
-               (give-up-ir1-transform))
              (cond (complex
                     (let* ((constant-fill-pointer-p (constant-lvar-p fill-pointer))
                            (fill-pointer-value (and constant-fill-pointer-p
@@ -1031,7 +1042,7 @@
                 (not (proper-list-p dims)))
         (give-up-ir1-transform))
       (unless (check-array-dimensions dims call)
-          (give-up-ir1-transform))
+        (give-up-ir1-transform))
       (cond ((singleton-p dims)
              (transform-make-array-vector (car dims) element-type
                                           initial-element initial-contents call
@@ -1236,15 +1247,30 @@
              ;; Might as well catch some easy negation cases.
              (typecase x
                (array-type
-                (let ((dims (array-type-dimensions x)))
+                (let ((dims (array-type-dimensions x))
+                      (et (array-type-element-type x)))
+                  ;; Need to check if the whole type has the same specialization and simplicity,
+                  ;; otherwise it's not clear which part of the type is negated.
                   (cond ((eql dims '*)
                          '*)
-                        ((every (lambda (dim)
-                                  (eql dim '*))
-                                dims)
-                         (list (length dims)))
+                        ((not (every (lambda (dim)
+                                       (eql dim '*))
+                                     dims))
+                         nil)
+                        ((not
+                          (case (array-type-complexp x)
+                            ((t)
+                             (csubtypep ctype (specifier-type '(not simple-array))))
+                            ((nil)
+                             (csubtypep ctype (specifier-type 'simple-array)))
+                            (t t)))
+                         nil)
+                        ((not (or (eq et *wild-type*)
+                                  (csubtypep ctype
+                                             (specifier-type `(array ,(type-specifier et))))))
+                         nil)
                         (t
-                         '()))))
+                         (list (length dims))))))
                (t '()))))
       (declare (dynamic-extent #'over #'under))
       (multiple-value-bind (not-p ranks)
@@ -1393,14 +1419,17 @@
               (let ((index-leaf (ref-leaf index-ref)))
                 (loop for constraint in (ref-constraints array-ref)
                       for y = (constraint-y constraint)
-                      thereis (if (constant-p index-leaf)
-                                  (and (constant-p y)
-                                       (<= (constant-value index-leaf)
-                                           (constant-value y)))
-                                  (eq index-leaf y))))
+                      thereis (and
+                               (eq (constraint-kind constraint) 'array-in-bounds-p)
+                               (if (constant-p index-leaf)
+                                   (and (constant-p y)
+                                        (<= (constant-value index-leaf)
+                                            (constant-value y)))
+                                   (eq index-leaf y)))))
               (loop for constraint in (ref-constraints index-ref)
-                    thereis (eq (constraint-y constraint)
-                                (ref-leaf array-ref)))))
+                    thereis (and (eq (constraint-kind constraint) 'array-in-bounds-p)
+                                 (eq (constraint-y constraint)
+                                     (ref-leaf array-ref))))))
       (give-up-ir1-transform)))
   ;; It's in bounds but it may be of the wrong type
   `(the (and fixnum unsigned-byte) index))
@@ -1819,18 +1848,20 @@
 
 ;;; Pick off some constant cases.
 (defoptimizer (array-header-p derive-type) ((array))
-  (let ((type (lvar-type array)))
-    (cond ((not (types-equal-or-intersect type (specifier-type 'simple-array)))
+  (let ((type (lvar-type array))
+        (array-type (specifier-type 'array)))
+    (cond ((or (not (types-equal-or-intersect type array-type))
+               (csubtypep type (specifier-type '(simple-array * (*)))))
+           (specifier-type 'null))
+          ((and (csubtypep type array-type)
+                (not (types-equal-or-intersect type (specifier-type 'simple-array))))
            (specifier-type '(eql t)))
           ((not (array-type-p type))
            ;; FIXME: use analogue of ARRAY-TYPE-DIMENSIONS-OR-GIVE-UP
            nil)
           (t
            (let ((dims (array-type-dimensions type)))
-             (cond ((csubtypep type (specifier-type '(simple-array * (*))))
-                    ;; no array header
-                    (specifier-type 'null))
-                   ((and (listp dims) (/= (length dims) 1))
+             (cond ((and (listp dims) (/= (length dims) 1))
                     ;; multi-dimensional array, will have a header
                     (specifier-type '(eql t)))
                    ((eql (array-type-complexp type) t)
@@ -1842,3 +1873,8 @@
     ((array) node gen)
   (declare (ignore gen))
   (values array (specifier-type '(and array (not (simple-array * (*)))))))
+
+(defoptimizer (%array-fill-pointer-p constraint-propagate-if)
+    ((array) node gen)
+  (declare (ignore gen))
+  (values array (specifier-type '(and vector (not simple-array)))))

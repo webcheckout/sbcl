@@ -15,12 +15,9 @@
 ;;;
 ;;; The number of bytes reserved above the number stack pointer.  These
 ;;; slots are required by architecture, mostly (?) to make C backtrace
-;;; work. This must be a power of 2 - see BYTES-REQUIRED-FOR-NUMBER-STACK.
+;;; work. This must be a power of 2 - see BYTES-NEEDED-FOR-NON-DESCRIPTOR-STACK-FRAME.
 ;;;
-(defconstant number-stack-displacement
-  (* #-darwin 2
-     #+darwin 8
-     n-word-bytes))
+(defconstant number-stack-displacement (* 4 n-word-bytes))
 
 ;;;; Define the registers
 
@@ -41,7 +38,7 @@
 
   (defreg zero 0)
   (defreg nsp 1)
-  (defreg rtoc 2)                         ; May be "NULL" someday.
+  (defreg rtoc 2)
   (defreg nl0 3)
   (defreg nl1 4)
   (defreg nl2 5)
@@ -52,14 +49,19 @@
   (defreg fdefn 10)
   (defreg nargs 11)
   (defreg cfunc 12)
-  (defreg nfp 13)
+  (defreg r13 13) ; reserved
   (defreg bsp 14)
   (defreg cfp 15)
   (defreg csp 16)
   (defreg alloc 17)
   (defreg null 18)
+  ;; Use of a tagged pointer in reg_CODE on PPC64 is expensive, adding an extra
+  ;; instruction to each load of a boxed constant. We should allow this register
+  ;; to contain an untagged pointer, and allow "fixnums" (ambiguous pointers)
+  ;; to pin code just as is done on the x86 backends.  And if we implicitly pin
+  ;; executing code, then we can get rid all LRA-related noise as well.
   (defreg code 19)
-  (defreg cname 20)
+  (defreg nfp 20)
   (defreg lexenv 21)
   (defreg ocfp 22)
   (defreg lra 23)
@@ -76,11 +78,10 @@
       nl0 nl1 nl2 nl3 nl4 nl5 nl6 cfunc nargs nfp)
 
   (defregset descriptor-regs
-      fdefn a0 a1 a2 a3  ocfp lra cname lexenv l0 l1)
+      fdefn a0 a1 a2 a3  ocfp lra lexenv l0 l1)
 
-  ;; OAOOM: Same as runtime/ppc-lispregs.h
   (defregset boxed-regs
-      fdefn code cname lexenv ocfp lra
+      fdefn code lexenv ocfp lra
       a0 a1 a2 a3
       l0 l1 thread)
 
@@ -106,8 +107,7 @@
   ;; Non-immediate contstants in the constant pool
   (constant constant)
 
-  ;; ZERO and NULL are in registers.
-  (zero immediate-constant)
+  ;; NULL is in a register.
   (null immediate-constant)
 
   ;; Anything else that can be an immediate.
@@ -129,8 +129,7 @@
   (any-reg
    registers
    :locations #.(append non-descriptor-regs descriptor-regs)
-   :reserve-locations (#.nl6-offset)
-   :constant-scs (zero immediate)
+   :constant-scs (immediate)
    :save-p t
    :alternate-scs (control-stack))
 
@@ -147,10 +146,9 @@
   (character-stack non-descriptor-stack) ; non-descriptor characters.
   (sap-stack non-descriptor-stack) ; System area pointers.
   (single-stack non-descriptor-stack) ; single-floats
-  (double-stack non-descriptor-stack
-                :element-size 2 :alignment 2) ; double floats.
-  (complex-single-stack non-descriptor-stack :element-size 2)
-  (complex-double-stack non-descriptor-stack :element-size 4 :alignment 2)
+  (double-stack non-descriptor-stack) ; double floats.
+  (complex-single-stack non-descriptor-stack :element-size 2 :alignment 2)
+  (complex-double-stack non-descriptor-stack :element-size 2 :alignment 2)
 
 
   ;; **** Things that can go in the integer registers.
@@ -158,7 +156,6 @@
   ;; Non-Descriptor characters
   (character-reg registers
    :locations #.non-descriptor-regs
-   :reserve-locations (#.nl6-offset)
    :constant-scs (immediate)
    :save-p t
    :alternate-scs (character-stack))
@@ -166,7 +163,6 @@
   ;; Non-Descriptor SAP's (arbitrary pointers into address space)
   (sap-reg registers
    :locations #.non-descriptor-regs
-   :reserve-locations (#.nl6-offset)
    :constant-scs (immediate)
    :save-p t
    :alternate-scs (sap-stack))
@@ -174,14 +170,12 @@
   ;; Non-Descriptor (signed or unsigned) numbers.
   (signed-reg registers
    :locations #.non-descriptor-regs
-   :reserve-locations (#.nl6-offset)
-   :constant-scs (zero immediate)
+   :constant-scs (immediate)
    :save-p t
    :alternate-scs (signed-stack))
   (unsigned-reg registers
    :locations #.non-descriptor-regs
-   :reserve-locations (#.nl6-offset)
-   :constant-scs (zero immediate)
+   :constant-scs (immediate)
    :save-p t
    :alternate-scs (unsigned-stack))
 
@@ -199,8 +193,6 @@
   ;; Non-Descriptor single-floats.
   (single-reg float-registers
    :locations #.(loop for i from 0 to 31 collect i)
-   ;; ### Note: We really should have every location listed, but then we
-   ;; would have to make load-tns work with element-sizes other than 1.
    :constant-scs ()
    :save-p t
    :alternate-scs (single-stack))
@@ -208,8 +200,6 @@
   ;; Non-Descriptor double-floats.
   (double-reg float-registers
    :locations #.(loop for i from 0 to 31 collect i)
-   ;; ### Note: load-tns don't work with an element-size other than 1.
-   ;; :element-size 2 :alignment 2
    :constant-scs ()
    :save-p t
    :alternate-scs (double-stack))
@@ -241,7 +231,6 @@
                     :sc (sc-or-lose ',sc)
                     :offset ,offset-sym)))))
 
-  (defregtn zero any-reg)
   (defregtn lip interior-reg)
   (defregtn null descriptor-reg)
   (defregtn code descriptor-reg)
@@ -260,8 +249,6 @@
 ;;; appropriate SC number, otherwise return NIL.
 (defun immediate-constant-sc (value)
   (typecase value
-    ((integer 0 0)
-     zero-sc-number)
     (null
      null-sc-number)
     ((or (integer #.sb-xc:most-negative-fixnum #.sb-xc:most-positive-fixnum)
@@ -273,8 +260,7 @@
          nil))))
 
 (defun boxed-immediate-sc-p (sc)
-  (or (eql sc zero-sc-number)
-      (eql sc null-sc-number)
+  (or (eql sc null-sc-number)
       (eql sc immediate-sc-number)))
 
 ;;;; function call parameters
@@ -389,7 +375,9 @@
 ;;; or store instruction of 8 bytes.
 ;;; Those instructions require the displacement be a multiple of 4 bytes
 ;;; which precludes subtracting a lowtag in the same instruction.
-;;; See ld instruction for reference
-(defglobal nl6-tn (make-random-tn :kind :normal
-                                  :sc (sc-or-lose 'unsigned-reg)
-                                  :offset nl6-offset))
+;;; See ld instruction for reference.
+;;; See also the comments above DEFINE-INDEXER for some thoughts on how to
+;;; regain the ability to subtract lowtags "for free".
+(defglobal temp-reg-tn (make-random-tn :kind :normal
+                                       :sc (sc-or-lose 'unsigned-reg)
+                                       :offset zero-offset))

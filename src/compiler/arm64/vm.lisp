@@ -79,7 +79,6 @@
   (defregset non-descriptor-regs
       nl0 nl1 nl2 nl3 nl4 nl5 nl6 nl7 nl8 nl9 nargs nfp ocfp)
 
-  ;; OAOOM: Same as runtime/arm64-lispregs.h
   (defregset boxed-regs
       r0 r1 r2 r3 r4 r5 r6
       r7 r8 r9 #-sb-thread r10 #+sb-thread thread lexenv code)
@@ -373,3 +372,15 @@
 #+sb-thread
 (defconstant pseudo-atomic-interrupted-flag
     (ash list-pointer-lowtag #+little-endian 32 #+big-endian 0))
+
+#+sb-xc-host
+(setq *backend-cross-foldable-predicates*
+      '(char-immediate-p
+        abs-add-sub-immediate-p
+        fixnum-abs-add-sub-immediate-p
+        sb-arm64-asm::add-sub-immediate-p
+        sb-arm64-asm::fixnum-add-sub-immediate-p
+        sb-arm64-asm::encode-logical-immediate
+        sb-arm64-asm::fixnum-encode-logical-immediate
+        bic-encode-immediate
+        bic-fixnum-encode-immediate))

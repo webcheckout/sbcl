@@ -29,7 +29,7 @@
   (let* ((v (make-array (the index array-length)))
          (ht (make-hash-table :test 'eq :weakness :key)))
     (setf (%instance-ref ht (get-dsd-index hash-table flags))
-          (logior (%instance-ref ht (get-dsd-index hash-table flags)) 4))
+          (logior (hash-table-flags ht) hash-table-finalizer-flag))
     ;; The recycle bin has a dummy item in front so that the simple-vector
     ;; is growable without messing up RUN-PENDING-FINALIZERS when it atomically
     ;; pushes items into the recycle bin - it is unaffected by looking at
@@ -293,8 +293,11 @@ Examples:
              (sb-thread:condition-notify *finalizer-queue*)))
           #+sb-thread
           ((eq *finalizer-thread* t) ; Create a new thread
-           (sb-thread:make-thread
+           (sb-thread::make-ephemeral-thread
+            "finalizer"
             (lambda ()
+              ;; If we already called FINALIZER-THREAD-STOP, then
+              ;; *FINALIZER-THREAD* is NIL, and this WHEN test is false.
               (when (eq t (cas *finalizer-thread* t
                                sb-thread:*current-thread*))
                 ;; Don't enter the loop if this thread lost the
@@ -312,8 +315,7 @@ Examples:
                     ;; Spurious wakeup is of no concern to us here.
                     (sb-thread:condition-wait
                      *finalizer-queue* *finalizer-queue-lock*)))))
-            :name "finalizer"
-            :ephemeral t))
+            nil))
           (t
            (scan-finalizers)))))
 
@@ -324,10 +326,28 @@ Examples:
 (defun finalizer-thread-stop ()
   #+sb-thread
   (let ((thread *finalizer-thread*))
-    (when thread ; if it was NIL it can't become a thread. So there's no race.
-      ;; Setting to NIL causes the thread to exit after waking
-      (setq thread (cas *finalizer-thread* thread nil))
-      (when (%instancep thread) ; only if it was a thread, do this
-        (sb-thread::with-system-mutex (*finalizer-queue-lock*)
-          (sb-thread:condition-notify *finalizer-queue*))
-        (sb-thread:join-thread thread))))) ; wait for it
+    ;; valid state transitions:
+    ;;   T to a #<thread>
+    ;;   #<thread> to NIL
+    ;;   T to NIL
+    ;; If it was NIL, it is latched at that state, so we can ignore it.
+    (when (null thread)
+      (return-from finalizer-thread-stop))
+    (let ((oldval (cas *finalizer-thread* thread nil)))
+      ;; If GC had started the thread, and it got to its main body only after
+      ;; we observed *FINALIZER-THREAD* = T, then we could see a transition
+      ;; from T to #<thread> now. That is unlikely, but we must try once
+      ;; again to CAS the value to NIL.
+      (unless (eq oldval thread)
+        (setq thread oldval)
+        ;; Also, we could be racing with someone else trying to stop the
+        ;; thread, so we could see T | #<thread> -> NIL.
+        (when (null thread)
+          (return-from finalizer-thread-stop))
+        (aver (eq (cas *finalizer-thread* thread nil) thread))))
+    (when (%instancep thread)
+      ;; The finalizer thread will exit when we wake it up
+      ;; and it sees that *FINALIZER-THREAD* is NIL.
+      (sb-thread::with-system-mutex (*finalizer-queue-lock*)
+        (sb-thread:condition-notify *finalizer-queue*))
+      (sb-thread:join-thread thread)))) ; wait for it

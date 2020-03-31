@@ -16,7 +16,7 @@
 (macrolet ((define-generic-arith-routine ((fun cost) &body body)
              `(define-assembly-routine (,(symbolicate "GENERIC-" fun)
                                         (:cost ,cost)
-                                        (:return-style :full-call)
+                                        (:return-style :full-call-no-return)
                                         (:translate ,fun)
                                         (:policy :safe)
                                         (:save-p t))
@@ -25,12 +25,16 @@
 
                  (:res res (descriptor-reg any-reg) edx-offset)
 
-                 (:temp eax unsigned-reg eax-offset)
+                 ,@(if (eq fun '*)
+                       '((:temp eax unsigned-reg eax-offset)))
                  (:temp ecx unsigned-reg ecx-offset))
 
-                (inst mov ecx x)
-                (inst or ecx y)
-                (inst test ecx fixnum-tag-mask)  ; both fixnums?
+                ,@(multiple-value-bind (reg byte)
+                      (if (eq fun '*) (values 'eax 'al-tn) (values 'ecx 'cl-tn))
+                    `((inst mov ,reg x)
+                      (inst or ,reg y)
+                      (inst test ,byte fixnum-tag-mask))) ; both fixnums?
+
                 (inst jmp :nz DO-STATIC-FUN)     ; no - do generic
 
                 ,@body
@@ -60,7 +64,7 @@
 
     (move ecx res)
 
-    (fixed-alloc res bignum-widetag (1+ bignum-digits-offset) nil)
+    (alloc-other res bignum-widetag (1+ bignum-digits-offset) nil)
     (storew ecx res bignum-digits-offset other-pointer-lowtag)
 
     OKAY)
@@ -75,7 +79,7 @@
 
     (move ecx res)
 
-    (fixed-alloc res bignum-widetag (1+ bignum-digits-offset) nil)
+    (alloc-other res bignum-widetag (1+ bignum-digits-offset) nil)
     (storew ecx res bignum-digits-offset other-pointer-lowtag)
     OKAY)
 
@@ -96,14 +100,14 @@
     (inst cmp x ecx)
     (inst jmp :e SINGLE-WORD-BIGNUM)
 
-    (fixed-alloc res bignum-widetag (+ bignum-digits-offset 2) nil)
+    (alloc-other res bignum-widetag (+ bignum-digits-offset 2) nil)
     (storew eax res bignum-digits-offset other-pointer-lowtag)
     (storew ecx res (1+ bignum-digits-offset) other-pointer-lowtag)
     (inst jmp DONE)
 
     SINGLE-WORD-BIGNUM
 
-    (fixed-alloc res bignum-widetag (1+ bignum-digits-offset) nil)
+    (alloc-other res bignum-widetag (1+ bignum-digits-offset) nil)
     (storew eax res bignum-digits-offset other-pointer-lowtag)
     (inst jmp DONE)
 
@@ -141,7 +145,7 @@
   (inst shr res n-fixnum-tag-bits)      ; sign bit is data - remove type bits
   (move ecx res)
 
-  (fixed-alloc res bignum-widetag (1+ bignum-digits-offset) nil)
+  (alloc-other res bignum-widetag (1+ bignum-digits-offset) nil)
   (storew ecx res bignum-digits-offset other-pointer-lowtag)
 
   OKAY)

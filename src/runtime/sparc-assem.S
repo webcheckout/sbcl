@@ -1,4 +1,4 @@
-#ifdef __ELF__
+#ifdef __linux__
 // Mark the object as not requiring an executable stack.
 .section .note.GNU-stack,"",%progbits
 #endif
@@ -87,7 +87,7 @@ call_into_lisp:
         /* Indirect closure */
         ld      [reg_LEXENV+CLOSURE_FUN_OFFSET], reg_CODE
 
-        jmp     reg_CODE+SIMPLE_FUN_CODE_OFFSET
+        jmp     reg_CODE+SIMPLE_FUN_INSTS_OFFSET
         nop
 
         .align  8

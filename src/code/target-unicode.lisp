@@ -15,11 +15,6 @@
 (sb-ext:define-load-time-global **special-numerics**
   #.(sb-cold:read-from-file "output/numerics.lisp-expr"))
 
-(declaim (type (simple-array (unsigned-byte 32) (*)) **block-ranges**))
-(sb-ext:define-load-time-global **block-ranges**
-  #.(sb-xc:coerce (sb-cold:read-from-file "output/blocks.lisp-expr")
-                  '(vector (unsigned-byte 32))))
-
 (macrolet ((unicode-property-init ()
              (let ((confusable-sets
                      (sb-cold:read-from-file "output/confusables.lisp-expr"))
@@ -122,113 +117,14 @@ with underscores replaced by dashes."
   (ordered-ranges-member (char-code character)
                          (gethash property **proplist-properties**)))
 
-;; WARNING: These have to be manually kept in sync with the values in ucd.lisp
-(declaim (type simple-vector *general-categories* *bidi-classes* *east-asian-widths*
-               *scripts* *line-break-classes* *blocks*))
-(sb-ext:define-load-time-global *general-categories*
-  #(:Lu :Ll :Lt :Lm :Lo :Cc :Cf :Co :Cs :Cn :Mc :Me :Mn :Nd
-    :Nl :No :Pc :Pd :Pe :Pf :Pi :Po :Ps :Sc :Sk :Sm :So :Zl
-    :Zp :Zs))
-
-(sb-ext:define-load-time-global *bidi-classes*
-  #(:BN :AL :AN :B :CS :EN :ES :ET :L :LRE :LRO :NSM :ON
-    :PDF :R :RLE :RLO :S :WS :LRI :RLI :FSI :PDI))
-
-(sb-ext:define-load-time-global *east-asian-widths*
-  #(:N :A :H :W :F :Na))
-
-(sb-ext:define-load-time-global *scripts*
-  #(:Unknown :Common :Latin :Greek :Cyrillic :Armenian :Hebrew :Arabic :Syriac
-    :Thaana :Devanagari :Bengali :Gurmukhi :Gujarati :Oriya :Tamil :Telugu
-    :Kannada :Malayalam :Sinhala :Thai :Lao :Tibetan :Myanmar :Georgian :Hangul
-    :Ethiopic :Cherokee :Canadian-Aboriginal :Ogham :Runic :Khmer :Mongolian
-    :Hiragana :Katakana :Bopomofo :Han :Yi :Old-Italic :Gothic :Deseret
-    :Inherited :Tagalog :Hanunoo :Buhid :Tagbanwa :Limbu :Tai-Le :Linear-B
-    :Ugaritic :Shavian :Osmanya :Cypriot :Braille :Buginese :Coptic :New-Tai-Lue
-    :Glagolitic :Tifinagh :Syloti-Nagri :Old-Persian :Kharoshthi :Balinese
-    :Cuneiform :Phoenician :Phags-Pa :Nko :Sundanese :Lepcha :Ol-Chiki :Vai
-    :Saurashtra :Kayah-Li :Rejang :Lycian :Carian :Lydian :Cham :Tai-Tham
-    :Tai-Viet :Avestan :Egyptian-Hieroglyphs :Samaritan :Lisu :Bamum :Javanese
-    :Meetei-Mayek :Imperial-Aramaic :Old-South-Arabian :Inscriptional-Parthian
-    :Inscriptional-Pahlavi :Old-Turkic :Kaithi :Batak :Brahmi :Mandaic :Chakma
-    :Meroitic-Cursive :Meroitic-Hieroglyphs :Miao :Sharada :Sora-Sompeng
-    :Takri :Bassa-Vah :Mahajani :Pahawh-Hmong :Caucasian-Albanian :Manichaean
-    :Palmyrene :Duployan :Mende-Kikakui :Pau-Cin-Hau :Elbasan :Modi
-    :Psalter-Pahlavi :Grantha :Mro :Siddham :Khojki :Nabataean :Tirhuta
-    :Khudawadi :Old-North-Arabian :Warang-Citi :Linear-A :Old-Permic))
-
-(sb-ext:define-load-time-global *line-break-classes*
-    #(:XX :AI :AL :B2 :BA :BB :BK :CB :CJ :CL :CM :CP :CR :EX :GL
-      :HL :HY :ID :IN :IS :LF :NL :NS :NU :OP :PO :PR :QU :RI :SA
-      :SG :SP :SY :WJ :ZW))
-
-(sb-ext:define-load-time-global *blocks*
-  #(:Basic-Latin :Latin-1-Supplement :Latin-Extended-A :Latin-Extended-B
-    :IPA-Extensions :Spacing-Modifier-Letters :Combining-Diacritical-Marks
-    :Greek-and-Coptic :Cyrillic :Cyrillic-Supplement :Armenian :Hebrew :Arabic
-    :Syriac :Arabic-Supplement :Thaana :NKo :Samaritan :Mandaic
-    :Arabic-Extended-A :Devanagari :Bengali :Gurmukhi :Gujarati :Oriya :Tamil
-    :Telugu :Kannada :Malayalam :Sinhala :Thai :Lao :Tibetan :Myanmar :Georgian
-    :Hangul-Jamo :Ethiopic :Ethiopic-Supplement :Cherokee
-    :Unified-Canadian-Aboriginal-Syllabics :Ogham :Runic :Tagalog :Hanunoo
-    :Buhid :Tagbanwa :Khmer :Mongolian
-    :Unified-Canadian-Aboriginal-Syllabics-Extended :Limbu :Tai-Le :New-Tai-Lue
-    :Khmer-Symbols :Buginese :Tai-Tham :Combining-Diacritical-Marks-Extended
-    :Balinese :Sundanese :Batak :Lepcha :Ol-Chiki :Sundanese-Supplement
-    :Vedic-Extensions :Phonetic-Extensions :Phonetic-Extensions-Supplement
-    :Combining-Diacritical-Marks-Supplement :Latin-Extended-Additional
-    :Greek-Extended :General-Punctuation :Superscripts-and-Subscripts
-    :Currency-Symbols :Combining-Diacritical-Marks-for-Symbols
-    :Letterlike-Symbols :Number-Forms :Arrows :Mathematical-Operators
-    :Miscellaneous-Technical :Control-Pictures :Optical-Character-Recognition
-    :Enclosed-Alphanumerics :Box-Drawing :Block-Elements :Geometric-Shapes
-    :Miscellaneous-Symbols :Dingbats :Miscellaneous-Mathematical-Symbols-A
-    :Supplemental-Arrows-A :Braille-Patterns :Supplemental-Arrows-B
-    :Miscellaneous-Mathematical-Symbols-B :Supplemental-Mathematical-Operators
-    :Miscellaneous-Symbols-and-Arrows :Glagolitic :Latin-Extended-C :Coptic
-    :Georgian-Supplement :Tifinagh :Ethiopic-Extended :Cyrillic-Extended-A
-    :Supplemental-Punctuation :CJK-Radicals-Supplement :Kangxi-Radicals
-    :Ideographic-Description-Characters :CJK-Symbols-and-Punctuation :Hiragana
-    :Katakana :Bopomofo :Hangul-Compatibility-Jamo :Kanbun :Bopomofo-Extended
-    :CJK-Strokes :Katakana-Phonetic-Extensions :Enclosed-CJK-Letters-and-Months
-    :CJK-Compatibility :CJK-Unified-Ideographs-Extension-A
-    :Yijing-Hexagram-Symbols :CJK-Unified-Ideographs :Yi-Syllables :Yi-Radicals
-    :Lisu :Vai :Cyrillic-Extended-B :Bamum :Modifier-Tone-Letters
-    :Latin-Extended-D :Syloti-Nagri :Common-Indic-Number-Forms :Phags-pa
-    :Saurashtra :Devanagari-Extended :Kayah-Li :Rejang :Hangul-Jamo-Extended-A
-    :Javanese :Myanmar-Extended-B :Cham :Myanmar-Extended-A :Tai-Viet
-    :Meetei-Mayek-Extensions :Ethiopic-Extended-A :Latin-Extended-E
-    :Meetei-Mayek :Hangul-Syllables :Hangul-Jamo-Extended-B :High-Surrogates
-    :High-Private-Use-Surrogates :Low-Surrogates :Private-Use-Area
-    :CJK-Compatibility-Ideographs :Alphabetic-Presentation-Forms
-    :Arabic-Presentation-Forms-A :Variation-Selectors :Vertical-Forms
-    :Combining-Half-Marks :CJK-Compatibility-Forms :Small-Form-Variants
-    :Arabic-Presentation-Forms-B :Halfwidth-and-Fullwidth-Forms :Specials
-    :Linear-B-Syllabary :Linear-B-Ideograms :Aegean-Numbers
-    :Ancient-Greek-Numbers :Ancient-Symbols :Phaistos-Disc :Lycian :Carian
-    :Coptic-Epact-Numbers :Old-Italic :Gothic :Old-Permic :Ugaritic :Old-Persian
-    :Deseret :Shavian :Osmanya :Elbasan :Caucasian-Albanian :Linear-A
-    :Cypriot-Syllabary :Imperial-Aramaic :Palmyrene :Nabataean :Phoenician
-    :Lydian :Meroitic-Hieroglyphs :Meroitic-Cursive :Kharoshthi
-    :Old-South-Arabian :Old-North-Arabian :Manichaean :Avestan
-    :Inscriptional-Parthian :Inscriptional-Pahlavi :Psalter-Pahlavi :Old-Turkic
-    :Rumi-Numeral-Symbols :Brahmi :Kaithi :Sora-Sompeng :Chakma :Mahajani
-    :Sharada :Sinhala-Archaic-Numbers :Khojki :Khudawadi :Grantha :Tirhuta
-    :Siddham :Modi :Takri :Warang-Citi :Pau-Cin-Hau :Cuneiform
-    :Cuneiform-Numbers-and-Punctuation :Egyptian-Hieroglyphs :Bamum-Supplement
-    :Mro :Bassa-Vah :Pahawh-Hmong :Miao :Kana-Supplement :Duployan
-    :Shorthand-Format-Controls :Byzantine-Musical-Symbols :Musical-Symbols
-    :Ancient-Greek-Musical-Notation :Tai-Xuan-Jing-Symbols
-    :Counting-Rod-Numerals :Mathematical-Alphanumeric-Symbols :Mende-Kikakui
-    :Arabic-Mathematical-Alphabetic-Symbols :Mahjong-Tiles :Domino-Tiles
-    :Playing-Cards :Enclosed-Alphanumeric-Supplement
-    :Enclosed-Ideographic-Supplement :Miscellaneous-Symbols-and-Pictographs
-    :Emoticons :Ornamental-Dingbats :Transport-and-Map-Symbols
-    :Alchemical-Symbols :Geometric-Shapes-Extended :Supplemental-Arrows-C
-    :CJK-Unified-Ideographs-Extension-B :CJK-Unified-Ideographs-Extension-C
-    :CJK-Unified-Ideographs-Extension-D :CJK-Compatibility-Ideographs-Supplement
-    :Tags :Variation-Selectors-Supplement :Supplementary-Private-Use-Area-A
-    :Supplementary-Private-Use-Area-B))
+(eval-when (:compile-toplevel)
+  (defvar *slurped-random-constants*
+    (sb-cold:read-from-file "tools-for-build/more-ucd-consts.lisp-expr"))
+  (defun read-ucd-constant (symbol)
+    (map 'vector
+         (lambda (x) (keywordicate (substitute #\- #\_ (string-upcase x))))
+         (or (cadr (assoc symbol *slurped-random-constants*))
+             (error "Missing entry in more-ucd-consts for ~S" symbol)))))
 
 (declaim (inline svref-or-null))
 (defun svref-or-null (vector index)
@@ -237,7 +133,8 @@ with underscores replaced by dashes."
 
 (defun general-category (character)
   "Returns the general category of CHARACTER as it appears in UnicodeData.txt"
-  (svref-or-null *general-categories* (sb-impl::ucd-general-category character)))
+  (svref-or-null #.(read-ucd-constant '*general-categories*)
+                 (sb-impl::ucd-general-category character)))
 
 (defun bidi-class (character)
   "Returns the bidirectional class of CHARACTER"
@@ -245,7 +142,7 @@ with underscores replaced by dashes."
            (default-ignorable-p character))
       :Bn
       (svref-or-null
-       *bidi-classes*
+       #.(read-ucd-constant '*bidi-classes*)
        (aref **character-misc-database** (1+ (misc-index character))))))
 
 (declaim (inline combining-class))
@@ -300,7 +197,7 @@ Otherwise, returns NIL."
   "Returns the East Asian Width property of CHARACTER as
 one of the keywords :N (Narrow), :A (Ambiguous), :H (Halfwidth),
 :W (Wide), :F (Fullwidth), or :NA (Not applicable)"
-  (svref-or-null *east-asian-widths*
+  (svref-or-null #.(read-ucd-constant '*east-asian-widths*)
                  (ldb (byte 3 0)
                       (aref **character-misc-database**
                             (+ 5 (misc-index character))))))
@@ -308,16 +205,20 @@ one of the keywords :N (Narrow), :A (Ambiguous), :H (Halfwidth),
 (defun script (character)
   "Returns the Script property of CHARACTER as a keyword.
 If CHARACTER does not have a known script, returns :UNKNOWN"
-  (svref-or-null *scripts*
+  (svref-or-null #.(read-ucd-constant '*scripts*)
                  (aref **character-misc-database** (+ 6 (misc-index character)))))
 
 (defun char-block (character)
   "Returns the Unicode block in which CHARACTER resides as a keyword.
 If CHARACTER does not have a known block, returns :NO-BLOCK"
   (let* ((code (char-code character))
-         (block-index (ordered-ranges-position code **block-ranges**)))
+         (block-index (ordered-ranges-position
+                       code
+                       #.(sb-xc:coerce (sb-cold:read-from-file "output/block-ranges.lisp-expr")
+                                       '(vector (unsigned-byte 32))))))
     (if block-index
-        (aref *blocks* block-index) :no-block)))
+        (aref #.(sb-cold:read-from-file "output/block-names.lisp-expr") block-index)
+        :no-block)))
 
 (defun unicode-1-name (character)
   "Returns the name assigned to CHARACTER in Unicode 1.0 if it is distinct
@@ -367,7 +268,7 @@ Ideographic (:ID) class instead of Alphabetic (:AL)."
   (when (and resolve (listp character)) (setf character (car character)))
   (when (and resolve (not character)) (return-from line-break-class :nil))
   (let ((raw-class
-         (svref-or-null *line-break-classes*
+         (svref-or-null #.(read-ucd-constant '*line-break-classes*)
                         (aref **character-misc-database** (+ 7 (misc-index character)))))
         (syllable-type (hangul-syllable-type character)))
     (when syllable-type
@@ -550,22 +451,18 @@ disappears when accents are placed on top of it. and NIL otherwise"
                 for char = (schar string i)
                 do
                 (decompose-char char compatibility calback))))
-      (let ((result (make-string length)))
-        (loop for char in chars
-              for i from (1- length) downto 0
-              do (setf (schar result i) char))
-        result))))
-
-(defun composition-hangul-syllable-type (cp)
-  (cond
-    ((and (<= #x1100 cp) (<= cp #x1112)) :L)
-    ((and (<= #x1161 cp) (<= cp #x1175)) :V)
-    ((and (<= #x11a8 cp) (<= cp #x11c2)) :T)
-    ((and (<= #xac00 cp) (<= cp #.(+ #xac00 11171)))
-     (if (= 0 (rem (- cp #xac00) 28)) :LV :LVT))))
+      (nreverse chars))))
 
 (defun primary-composition (char1 char2)
-  (flet ((maybe (fn x) (when x (funcall fn x))))
+  (flet ((maybe (fn x) (when x (funcall fn x)))
+         (composition-hangul-syllable-type (cp)
+           (cond
+             ((and (<= #x1100 cp) (<= cp #x1112)) :L)
+             ((and (<= #x1161 cp) (<= cp #x1175)) :V)
+             ((and (<= #x11a8 cp) (<= cp #x11c2)) :T)
+             ((and (<= #xac00 cp) (<= cp #.(+ #xac00 11171)))
+              (if (= 0 (rem (- cp #xac00) 28)) :LV :LVT)))))
+    (declare (inline composition-hangul-syllable-type))
     (let ((c1 (char-code char1))
           (c2 (char-code char2)))
       (maybe
@@ -582,100 +479,42 @@ disappears when accents are placed on top of it. and NIL otherwise"
                (eql (composition-hangul-syllable-type c2) :T))
           (+ c1 (- c2 #x11a7))))))))
 
-;;; This implements a sequence data structure, specialized for
-;;; efficient deletion of characters at an index, along with tolerable
-;;; random access.  The purpose is to support the canonical
-;;; composition algorithm from Unicode, which involves replacing (not
-;;; necessarily consecutive) pairs of code points with a single code
-;;; point (e.g. [#\e #\combining_acute_accent] with
-;;; #\latin_small_letter_e_with_acute).  The data structure is a list
-;;; of three-element lists, each denoting a chunk of string data
-;;; starting at the first index and ending at the second.
-;;;
-;;; Actually, the implementation isn't particularly efficient, and
-;;; would probably benefit from being rewritten in terms of displaced
-;;; arrays, which would substantially reduce copying.
-;;;
-;;; (also, generic sequences.  *sigh*.)
-(defun lref (lstring index)
-  (dolist (l lstring)
-    (when (and (<= (first l) index)
-               (< index (second l)))
-      (return (aref (third l) (- index (first l)))))))
-
-(defun (setf lref) (newchar lstring index)
-  (dolist (l lstring)
-    (when (and (<= (first l) index)
-               (< index (second l)))
-      (return (setf (aref (third l) (- index (first l))) newchar)))))
-
-(defun llength (lstring)
-  (second (first (last lstring))))
-
-(defun lstring (lstring)
-  (let ((result (make-string (llength lstring))))
-    (dolist (l lstring result)
-      (replace result (third l) :start1 (first l) :end1 (second l)))))
-
-(defun ldelete (lstring index)
-  (do* ((ls lstring (cdr ls))
-        (l (car ls) (car ls))
-        so-fars)
-       ((and (<= (first l) index)
-             (< index (second l)))
-        (append
-         (nreverse so-fars)
-         (cond
-           ((= (first l) index)
-            (list (list (first l) (1- (second l)) (subseq (third l) 1))))
-           ((= index (1- (second l)))
-            (list (list (first l) (1- (second l)) (subseq (third l) 0 (1- (length (third l)))))))
-           (t
-            (list
-             (list (first l) index
-                   (subseq (third l) 0 (- index (first l))))
-             (list index (1- (second l))
-                   (subseq (third l) (1+ (- index (first l))))))))
-         (mapcar (lambda (x) (list (1- (first x)) (1- (second x)) (third x)))
-                 (cdr ls))))
-    (push l so-fars)))
-
-(defun canonically-compose (string)
-  (let* ((result (list (list 0 (length string) string)))
-         (previous-starter-index (position 0 string :key #'combining-class))
-         (i (and previous-starter-index (1+ previous-starter-index))))
-    (when (or (not i) (= i (length string)))
-      (return-from canonically-compose string))
+(defun canonically-compose (list)
+  (let* ((result list)
+         (combine-with (member 0 result :key #'combining-class))
+         (previous combine-with)
+         (current (cdr combine-with)))
+    (when (null current)
+      (return-from canonically-compose list))
     (tagbody
      again
-       (when (and (>= (- i previous-starter-index) 2)
+       (when (and (neq previous combine-with)
                   ;; test for Blocked (Unicode 3.11 para. D115)
                   ;;
                   ;; (assumes here that string has sorted combiners,
                   ;; so can look back just one step)
-                  (>= (combining-class (lref result (1- i)))
-                      (combining-class (lref result i))))
-         (when (= (combining-class (lref result i)) 0)
-           (setf previous-starter-index i))
-         (incf i)
+                  (>= (combining-class (car previous))
+                      (combining-class (car current))))
+         (when (= (combining-class (car current)) 0)
+           (setf combine-with current))
+         (setf previous current)
+         (pop current)
          (go next))
 
-       (let ((comp (primary-composition (lref result previous-starter-index)
-                                        (lref result i))))
+       (let ((comp (primary-composition (car combine-with) (car current))))
          (cond
            (comp
-            (setf (lref result previous-starter-index) comp)
-            (setf result (ldelete result i)))
+            (setf (car combine-with) comp
+                  (cdr previous) (setf current (cdr current))))
            (t
-            (when (= (combining-class (lref result i)) 0)
-              (setf previous-starter-index i))
-            (incf i))))
+            (when (= (combining-class (car current)) 0)
+              (setf combine-with current))
+            (setf previous current)
+            (pop current))))
      next
-       (unless (= i (llength result))
+       (when current
          (go again)))
-    (if (= i (length string))
-        string
-        (lstring result))))
+    result))
 
 (defun normalize-string (string &optional (form :nfd)
                                           filter)
@@ -697,21 +536,40 @@ only characters for which it returns T are collected."
   (etypecase string
     (base-string string)
     ((array character (*))
-     (ecase form
-       ((:nfc)
-        (canonically-compose (decompose-string string nil filter)))
-       ((:nfd)
-        (decompose-string string nil filter))
-       ((:nfkc)
-        (canonically-compose (decompose-string string t filter)))
-       ((:nfkd)
-        (decompose-string string t filter))))
+     (coerce
+      (ecase form
+        ((:nfc)
+         (canonically-compose (decompose-string string nil filter)))
+        ((:nfd)
+         (decompose-string string nil filter))
+        ((:nfkc)
+         (canonically-compose (decompose-string string t filter)))
+        ((:nfkd)
+         (decompose-string string t filter)))
+      'string))
     ((array nil (*)) string)))
 
 (defun normalized-p (string &optional (form :nfd))
   "Tests if STRING is normalized to FORM"
-  ;; FIXME: can be optimized
-  (string= string (normalize-string string form)))
+  (etypecase string
+    (base-string t)
+    ((array character (*))
+     (flet ((=-to-list (list)
+              (sb-kernel:with-array-data ((string string) (start) (end)
+                                          :check-fill-pointer t)
+                (loop for i from start below end
+                      for char = (schar string i)
+                      always (eql char (pop list))))))
+       (ecase form
+         ((:nfc)
+          (=-to-list (canonically-compose (decompose-string string nil nil))))
+         ((:nfd)
+          (=-to-list (decompose-string string nil nil)))
+         ((:nfkc)
+          (=-to-list (canonically-compose (decompose-string string t nil))))
+         ((:nfkd)
+          (=-to-list (decompose-string string t nil))))))
+    ((array nil (*)) t)))
 
 
 ;;; Unicode case algorithms
@@ -1148,8 +1006,8 @@ word breaking rules specified in UAX #29. Returns a list of strings"
       ((binary-search cp scontinues) :scontinue)
       ((proplist-p char :sterm) :sterm)
       ((and (or (member gc '(:Po :Ps :Pe :Pf :Pi))
-                (eql (line-break-class char) :qu))
-            (not (eql cp #x05F3))) :close)
+                (eql (line-break-class char) :qu)))
+       :close)
       (t nil))))
 
 (defun sentence-prebreak (string)
@@ -1214,7 +1072,7 @@ sentence breaking rules specified in UAX #29"
           ((eql state :nobrk-next) (nobrk) (setf state nil))
           ((member c1 '(:sep :cr :lf)) (brk))
           ((and (eql c1 :aterm) (eql c2 :numeric)) (nobrk))
-          ((and (eql c1 :upper) (eql c2 :aterm)
+          ((and (member c1 '(:lower :upper)) (eql c2 :aterm)
                 (eql c3 :upper)) (nobrk) (setf state :nobrk-next))
           ((or (and (member c1 '(:sterm :aterm)) (member c2 '(:close :sp))
                     (member c3 '(:scontinue :sterm :aterm)))
@@ -1364,12 +1222,16 @@ sentence breaking rules specified in UAX #29"
          (between :qu :any :cant)
          (between :any :cb :can)
          (between :cb :any :can)
+         (when (and (eql t1 :hl) (member t2 '(:hy :ba)))
+           (cmpush :cant) (cmpush second)
+           (setf first second tail (cdr tail))
+           (setf second (car tail))
+           (cmpush (if second :cant :must)) (cmpush second)
+           (setf after-spaces :can) (go tail))
          (between :any '(:ba :hy :ns) :cant)
          (between :bb :any :cant)
-         (when (and (eql t1 :hl) (eql t2 :hy))
-           (cmpush :cant) (cmpush second)
-           (setf after-spaces :can) (go tail))
-         (between '(:al :hl :id :in :nu) :in :cant)
+         (between :sy :hl :cant)
+         (between '(:al :hl :ex :id :in :nu) :in :cant)
          (between :id :po :cant)
          (between '(:al :hl) :nu :cant)
          (between '(:nu :po) '(:al :hl) :cant)

@@ -1,9 +1,6 @@
 ;;;; Generate stubs for C-linkage library functions which we need to refer to
 ;;;; from Lisp.
 ;;;;
-;;;; (But note this is only the Linux version, as per the FIXME
-;;;; note in the BSD version in undefineds.h.)
-;;;;
 ;;;; These stubs exist for the benefit of Lisp code that needs to refer
 ;;;; to foreign symbols when dlsym() is not available (i.e. when dumping
 ;;;; cold-sbcl.core, when we may be running in a host that's not SBCL,
@@ -24,21 +21,8 @@
 ;;; This is an attempt to follow DB's hint of sbcl-devel
 ;;; 2001-09-18. -- CSR
 ;;;
-;;; And an attempt to work around the Sun toolchain... --ns
 (defun ldso-stubify (index fct stream)
   (declare (ignorable index))
-  #+sparc
-  (apply #'format stream "
-.globl ldso_stub__~A ;                          \\
-        FUNCDEF(ldso_stub__~A) ;                \\
-ldso_stub__~A: ;                                \\
-        sethi %hi(~A),%g1       ;               \\
-        jmpl %g1+%lo(~A),%g0    ;               \\
-        nop /* delay slot*/     ;               \\
-.L~Ae1: ;                                       \\
-        .size    ldso_stub__~A,.L~Ae1-ldso_stub__~A ;~%"
-          (make-list 9 :initial-element fct))
-
   #+hppa
   (let ((stub (format nil "ldso_stub__~a" fct)))
     (apply #'format stream (list
@@ -50,47 +34,10 @@ ldso_stub__~A: ;                                \\
     .procend
     .import ~a,code~%" stub stub fct fct)))
 
-  #+ppc64
-  ;; The ABI requires that we leave a 'nop' where the linker can insert a load
-  ;; of r2 after the callee returns. Naively making the obvious change to the
-  ;; 32-bit stub - adding a nop after the 'b' - does not work; it gets the same
-  ;; error as if the nop were absent.  I think the linker expects to see a
-  ;; function descriptor for this stub, to decide whether r2 differs for the
-  ;; callee. The error message is suboptimal in claiming that there was no nop
-  ;; despite that there is.
-  ;; Ironically we don't care if r2 is restored when coming back into Lisp
-  ;; because we don't use. Nonetheless, this makes the C code build.
-  ;; It would be nice to figure out if we can have the effect of tail call
-  ;; by just using 'b' instead of 'bl' though.
-  (format stream " .globl ~A
- .p2align 2
- .type ~:*~A,@function
- .section .opd,\"aw\",@progbits
-~:*~A:
- .p2align 3
- .quad .Lfunc_begin~D, .TOC.@tocbase, 0
- .text
-.Lfunc_begin~:*~D:
- mflr 0
- std 0, 16(1)
- stdu 1, -112(1)
- bl ~A
- nop
- addi 1, 1, 112
- ld 0, 16(1)
- mtlr 0
- blr
- .long 0
- .quad 0
-.Lfunc_end~2:*~D:
- .size ~2:*~A, .Lfunc_end~D-.Lfunc_begin~:*~D~2%"
-          (format nil "ldso_stub__~a" fct)
-          index fct)
-
-  #-(or sparc hppa ppc64)
+  #-hppa
   (format stream "LDSO_STUBIFY(~A)~%" fct))
 
-(defvar *preludes* '("
+(defvar *preludes* (list "
 /* This is an automatically generated file, please do not hand-edit it.
  * See the program tools-for-build/ldso-stubs.lisp. */
 
@@ -98,41 +45,6 @@ ldso_stub__~A: ;                                \\
 #define __ASSEMBLER__
 #endif
 #include \"sbcl.h\""
-
-#+arm "
-#define LDSO_STUBIFY(fct)               \\
-  .align                              ; \\
-  .global ldso_stub__ ## fct          ; \\
-  .type ldso_stub__ ## fct, %function ; \\
-ldso_stub__ ## fct:                   ; \\
-  ldr r8, =fct                        ; \\
-  bx r8                               ; \\
-  .size ldso_stub__ ## fct, .-ldso_stub__ ## fct"
-#+arm64"
-#define LDSO_STUBIFY(fct)               \\
-  .align                              ; \\
-  .global ldso_stub__ ## fct          ; \\
-  .type ldso_stub__ ## fct, %function ; \\
-ldso_stub__ ## fct:                   ; \\
-  ldr x8, =fct                        ; \\
-  br x8                               ; \\
-  .size ldso_stub__ ## fct, .-ldso_stub__ ## fct"
-
-#+sparc "
-#ifdef LISP_FEATURE_SPARC
-#include \"sparc-funcdef.h\"
-#endif
-        .text"
-
-#+(and (or x86 x86-64) (not darwin)) "
-#define LDSO_STUBIFY(fct)                       \\
-        .align 16 ;                             \\
-.globl ldso_stub__ ## fct ;                     \\
-        .type    ldso_stub__ ## fct,@function ; \\
-ldso_stub__ ## fct: ;                           \\
-        jmp fct ;                               \\
-.L ## fct ## e1: ;                              \\
-        .size    ldso_stub__ ## fct,.L ## fct ## e1-ldso_stub__ ## fct ;"
 
 #+(and linux alpha) "
 #define LDSO_STUBIFY(fct)                       \\
@@ -147,105 +59,10 @@ ldso_stub__ ## fct: ;                           \\
         .level  2.0
         .text"
 
-#+(and (not darwin) ppc) "
-#define LDSO_STUBIFY(fct)                       \\
-.globl ldso_stub__ ## fct ;                     \\
-        .type    ldso_stub__ ## fct,@function ; \\
-ldso_stub__ ## fct: ;                           \\
-        b fct ;                                 \\
-.L ## fct ## e1: ;                              \\
-        .size    ldso_stub__ ## fct,.L ## fct ## e1-ldso_stub__ ## fct ;"
+))
 
-#+(and darwin ppc) "
-#define LDSO_STUBIFY(fct)                       @\\
-.text                                           @\\
-.globl  _ldso_stub__ ## fct                      @\\
-_ldso_stub__ ## fct:                             @\\
-        b _ldso_stub__ ## fct ## stub            @\\
-.symbol_stub _ldso_stub__ ## fct ## stub:        @\\
-.indirect_symbol _ ## fct                       @\\
-        lis     r11,ha16(_ldso_stub__ ## fct ## $lazy_ptr)       @\\
-        lwz     r12,lo16(_ldso_stub__ ## fct ## $lazy_ptr)(r11)  @\\
-        mtctr   r12                             @\\
-        addi    r11,r11,lo16(_ldso_stub__ ## fct ## $lazy_ptr)   @\\
-        bctr                                    @\\
-.lazy_symbol_pointer                            @\\
-_ldso_stub__ ## fct ## $lazy_ptr:                @\\
-        .indirect_symbol _ ## fct               @\\
-        .long dyld_stub_binding_helper"
-
-#+ppc64 ""
-
-#+riscv "
-#define LDSO_STUBIFY(fct)                \\
-  .global ldso_stub__ ## fct           ; \\
-  .type ldso_stub__ ## fct, @function  ; \\
-ldso_stub__ ## fct:                    ; \\
-  j fct                                ; \\
-  .size ldso_stub__ ## fct, .-ldso_stub__ ## fct"
-
-;;; darwin x86 assembler is weird and follows the ppc assembler syntax
-#+(and darwin x86) "
-#define LDSO_STUBIFY(fct)                       \\
-.text                           ;               \\
-        .align 4 ;                              \\
-.globl _ldso_stub__ ## fct ;                    \\
-_ldso_stub__ ## fct: ;                          \\
-        jmp L ## fct ## $stub ;                 \\
-        .section __IMPORT,__jump_table,symbol_stubs,self_modifying_code+pure_instructions,5 ;   \\
-L ## fct ## $stub: ;                    \\
-        .indirect_symbol _ ## fct ;     \\
-        hlt                       ;     \\
-        hlt                       ;     \\
-        hlt                       ;     \\
-        hlt                       ;     \\
-        hlt                       ;     \\
-        .subsections_via_symbols  ;    "
-
-;;; darwin x86-64
-#+(and darwin x86-64) "
-#define LDSO_STUBIFY(fct)                       \\
-        .align 4 ;                              \\
-.globl _ldso_stub__ ## fct ;                    \\
-_ldso_stub__ ## fct: ;                          \\
-        jmp _ ## fct ;                          \\
-.L ## fct ## e1: ;                            "
-
-;;; KLUDGE: set up the vital fifth argument, passed on the
-;;; stack.  Do this unconditionally, even if the stub is for a
-;;; function with few arguments: it can't hurt.  We only do this for
-;;; the fifth argument, as the first four are passed in registers
-;;; and we apparently don't ever need to pass six arguments to a
-;;; libc function.  -- CSR, 2003-10-29
-;;; Expanded to 8 arguments regardless.  -- ths, 2005-03-24
-#+mips "
-#define LDSO_STUBIFY(fct)                      \\
-        .globl  ldso_stub__ ## fct ;           \\
-        .type   ldso_stub__ ## fct,@function ; \\
-        .ent    ldso_stub__ ## fct ;           \\
-ldso_stub__ ## fct: ;                  \\
-        .set noat ;                    \\
-        addiu $29,-48 ;                \\
-        sw $28,40($29) ;               \\
-        sw $31,44($29) ;               \\
-        lw $25,64($29) ;               \\
-        lw  $1,68($29) ;               \\
-        sw $25,16($29) ;               \\
-        sw  $1,20($29) ;               \\
-        lw $25,72($29) ;               \\
-        lw  $1,76($29) ;               \\
-        sw $25,24($29) ;               \\
-        sw  $1,28($29) ;               \\
-        .set at ;                      \\
-        la $25, fct ;                  \\
-        jalr $25 ;                     \\
-        lw $31,44($29) ;               \\
-        lw $28,40($29) ;               \\
-        addiu $29,48 ;                 \\
-        jr $31 ;                       \\
-        .end    ldso_stub__ ## fct ;   \\
-        .size   ldso_stub__ ## fct,.-ldso_stub__ ## fct ;"))
-
+;;; Most of the #+- in here is just noise, but so is this whole file.
+;;; So I don't really care to go through with a comb and remove the fluff.
 (defvar *stubs* (append
                  '("_exit"
                    "accept"
@@ -340,7 +157,6 @@ ldso_stub__ ## fct: ;                  \\
                    #-hpux "tzname"
                    "unlink"
                    "utimes"
-                   "wait3"
                    "waitpid"
                    "write")
                  ;; These aren't needed on the X86 because they're microcoded into the
@@ -403,9 +219,4 @@ ldso_stub__ ## fct: ;                  \\
   (let ((i -1))
     (dolist (stub *stubs*)
       (check-type stub string)
-      (ldso-stubify (incf i) stub f)))
-  (format f "
-#ifdef __ELF__
-// Mark the object as not requiring an executable stack.
-.section .note.GNU-stack,\"\",%progbits
-#endif~%"))
+      (ldso-stubify (incf i) stub f))))

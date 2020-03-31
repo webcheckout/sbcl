@@ -63,10 +63,11 @@
 #include "gc.h"
 #include "alloc.h"
 #include "dynbind.h"
-#include "pseudo-atomic.h"
+#include "getallocptr.h"
 #include "genesis/fdefn.h"
 #include "genesis/simple-fun.h"
 #include "genesis/cons.h"
+#include "genesis/vector.h"
 
 /*
  * This is a workaround for some slightly silly Linux/GNU Libc
@@ -76,12 +77,13 @@
  * it later into another ucontext: the ucontext is allocated on the
  * stack by the kernel, so copying a libc-sized sigset_t into it will
  * overflow and cause other data on the stack to be corrupted */
-/* FIXME: do not rely on NSIG being a multiple of 8 */
 /* See https://sourceware.org/bugzilla/show_bug.cgi?id=1780 */
 
 #ifdef LISP_FEATURE_WIN32
 # define REAL_SIGSET_SIZE_BYTES (4)
 #else
+/* FIXME: do not rely on NSIG being a multiple of 8.
+ * In fact it is *not* a multiple of 8 - it it 65 on x86-64-linux */
 # define REAL_SIGSET_SIZE_BYTES ((NSIG/8))
 #endif
 
@@ -98,6 +100,8 @@ sigcopyset(sigset_t *new, sigset_t *old)
  * becomes 'yes'.) */
 boolean internal_errors_enabled = 0;
 
+// SIGRTMAX is not usable in an array size declaration because it might be
+// a variable expression, so use NSIG which is at least as large as SIGRTMAX.
 #ifndef LISP_FEATURE_WIN32
 static
 void (*interrupt_low_level_handlers[NSIG]) (int, siginfo_t*, os_context_t*);
@@ -115,6 +119,49 @@ union interrupt_handler interrupt_handlers[NSIG];
 #define RESTORE_FP_CONTROL_WORD(context,void_context)           \
     os_context_t *context = arch_os_get_context(&void_context);
 #endif
+
+/* The code below wants to iterate from 1 through SIGRTMAX inclusive, not NSIG,
+ * because NSIG is the maximum capacity of a sigset, whereas SIGRTMAX is a
+ * possibly smaller value indicating the number of signal numbers that could
+ * really be in use. For systems which have distinctly different values
+ * (discounting the deliberate off-by-one nature), sigismember() may return -1
+ * for signal numbers in excess of SIGRTMAX, and we would generally take
+ * -1 to mean boolean 'true' unless it is carefully checked for.
+ * The following program illustrates the issue:
+ *    #include <signal.h>
+ *    #include <stdio.h>
+ *    void main() {
+ *      sigset_t ss;
+ *      sigemptyset(&ss);
+ *      printf("%d %d %d\n", SIGRTMAX, NSIG, sigismember(&ss, 41));
+ *    }
+ *  ./sigismembertest => 40 65 -1
+ */
+#ifdef SIGRTMAX
+#  define MAX_SIGNUM SIGRTMAX
+#else
+#  define MAX_SIGNUM (NSIG-1)
+#endif
+
+// For each bit present in 'source', add it to 'dest'.
+// This is the same as "sigorset(dest, dest, source)" if _GNU_SOURCE is defined.
+static void sigmask_logior(sigset_t *dest, const sigset_t *source)
+{
+    int i;
+    for(i = 1; i <= MAX_SIGNUM; i++) {
+        if (sigismember(source, i)) sigaddset(dest, i);
+    }
+}
+
+// For each bit present in 'source', remove it from 'dest'
+// (logically AND with logical complement).
+static void sigmask_logandc(sigset_t *dest, const sigset_t *source)
+{
+    int i;
+    for(i = 1; i <= MAX_SIGNUM; i++) {
+        if (sigismember(source, i)) sigdelset(dest, i);
+    }
+}
 
 /* Foreign code may want to start some threads on its own.
  * Non-targetted, truly asynchronous signals can be delivered to
@@ -137,8 +184,6 @@ add_handled_signals(sigset_t *sigset)
         }
     }
 }
-
-void block_signals(sigset_t *what, sigset_t *where, sigset_t *old);
 #endif
 
 static boolean
@@ -156,14 +201,15 @@ maybe_resignal_to_lisp_thread(int signal, os_context_t *context)
              signal);
 #endif
         }
-        {
-            sigset_t sigset;
-            sigemptyset(&sigset);
-            add_handled_signals(&sigset);
-            block_signals(&sigset, 0, 0);
-            block_signals(&sigset, os_context_sigmask_addr(context), 0);
-            kill(getpid(), signal);
-        }
+        sigset_t sigset;
+        sigemptyset(&sigset);
+        add_handled_signals(&sigset);
+        thread_sigmask(SIG_BLOCK, &sigset, 0);
+        // This arranges for every handled signal to be blocked on return from this
+        // handler invocation, presumably because that avoids further detours through
+        // this thread's handler for signals that we don't want it to handle.
+        sigmask_logior(os_context_sigmask_addr(context), &sigset);
+        kill(getpid(), signal);
         return 1;
     } else
 #endif
@@ -247,45 +293,13 @@ get_current_sigmask(sigset_t *sigset)
     thread_sigmask(SIG_BLOCK, 0, sigset);
 }
 
-void
-block_signals(sigset_t *what, sigset_t *where, sigset_t *old)
-{
-    if (where) {
-        int i;
-        if (old)
-            sigcopyset(old, where);
-        for(i = 1; i < NSIG; i++) {
-            if (sigismember(what, i))
-                sigaddset(where, i);
-        }
-    } else {
-        thread_sigmask(SIG_BLOCK, what, old);
-    }
-}
-
-void
-unblock_signals(sigset_t *what, sigset_t *where, sigset_t *old)
-{
-    if (where) {
-        int i;
-        if (old)
-            sigcopyset(old, where);
-        for(i = 1; i < NSIG; i++) {
-            if (sigismember(what, i))
-                sigdelset(where, i);
-        }
-    } else {
-        thread_sigmask(SIG_UNBLOCK, what, old);
-    }
-}
-
 // Stringify sigset into the supplied result buffer.
 static void
-sigset_tostring(sigset_t *sigset, char* result, int result_length)
+sigset_tostring(const sigset_t *sigset, char* result, int result_length)
 {
     int i;
     int len = 0;
-    for(i = 1; i < NSIG; i++)
+    for(i = 1; i <= MAX_SIGNUM; i++)
         if (sigismember(sigset, i)) {
             // ensure room for (generously) 3 digits + comma + null, or give up
             if (len > result_length - 5) {
@@ -297,12 +311,12 @@ sigset_tostring(sigset_t *sigset, char* result, int result_length)
     result[len] = 0;
 }
 
-/* Return 1 is all signals is sigset2 are masked in sigset, return 0
- * if all re unmasked else die. Passing NULL for sigset is a shorthand
+/* Return 1 if all signals in sigset2 are masked in sigset, return 0
+ * if all are unmasked, else die. Passing NULL for sigset is a shorthand
  * for the current sigmask. */
 boolean
-all_signals_blocked_p(sigset_t *sigset, sigset_t *sigset2,
-                                const char *name)
+all_signals_blocked_p(const sigset_t *sigset, sigset_t *sigset2,
+                      const char *name)
 {
     int i;
     boolean has_blocked = 0, has_unblocked = 0;
@@ -311,7 +325,7 @@ all_signals_blocked_p(sigset_t *sigset, sigset_t *sigset2,
         get_current_sigmask(&current);
         sigset = &current;
     }
-    for(i = 1; i < NSIG; i++) {
+    for(i = 1; i <= MAX_SIGNUM; i++) {
         if (sigismember(sigset2, i)) {
             if (sigismember(sigset, i))
                 has_blocked = 1;
@@ -322,7 +336,7 @@ all_signals_blocked_p(sigset_t *sigset, sigset_t *sigset2,
     if (has_blocked && has_unblocked) {
         char buf[3*64]; // assuming worst case 64 signals present in sigset
         sigset_tostring(sigset, buf, sizeof buf);
-        lose("%s signals partially blocked: {%s}\n", name, buf);
+        lose("%s signals partially blocked: {%s}", name, buf);
     }
     if (has_blocked)
         return 1;
@@ -345,7 +359,11 @@ sigaddset_deferrable(sigset_t *s)
     sigaddset(s, SIGURG);
     sigaddset(s, SIGTSTP);
     sigaddset(s, SIGCHLD);
+#ifdef SIGIO
     sigaddset(s, SIGIO);
+#else
+    sigaddset(s, SIGPOLL);
+#endif
 #ifndef LISP_FEATURE_HPUX
     sigaddset(s, SIGXCPU);
     sigaddset(s, SIGXFSZ);
@@ -387,7 +405,7 @@ check_deferrables_unblocked_or_lose(sigset_t *sigset)
 {
 #if !defined(LISP_FEATURE_WIN32) || defined(LISP_FEATURE_SB_THREAD)
     if (deferrables_blocked_p(sigset))
-        lose("deferrables blocked\n");
+        lose("deferrables blocked");
 #endif
 }
 
@@ -396,7 +414,7 @@ check_deferrables_blocked_or_lose(sigset_t *sigset)
 {
 #if !defined(LISP_FEATURE_WIN32) || defined(LISP_FEATURE_SB_THREAD)
     if (!deferrables_blocked_p(sigset))
-        lose("deferrables unblocked\n");
+        lose("deferrables unblocked");
 #endif
 }
 
@@ -413,7 +431,7 @@ check_blockables_unblocked_or_lose(sigset_t *sigset)
 {
 #if !defined(LISP_FEATURE_WIN32) || defined(LISP_FEATURE_SB_THREAD)
     if (blockables_blocked_p(sigset))
-        lose("blockables blocked\n");
+        lose("blockables blocked");
 #endif
 }
 
@@ -440,7 +458,7 @@ check_blockables_blocked_or_lose(sigset_t *sigset)
      *   -- DFL, trying to expand on a comment by AK.
      */
     if (!blockables_blocked_p(sigset))
-        lose("blockables unblocked\n");
+        lose("blockables unblocked");
 #endif
 }
 
@@ -458,7 +476,7 @@ check_gc_signals_unblocked_or_lose(sigset_t *sigset)
 {
 #if !defined(LISP_FEATURE_WIN32)
     if (gc_signals_blocked_p(sigset))
-        lose("gc signals blocked\n");
+        lose("gc signals blocked");
 #endif
 }
 
@@ -467,7 +485,7 @@ check_gc_signals_blocked_or_lose(sigset_t *sigset)
 {
 #if !defined(LISP_FEATURE_WIN32)
     if (!gc_signals_blocked_p(sigset))
-        lose("gc signals unblocked\n");
+        lose("gc signals unblocked");
 #endif
 }
 #endif
@@ -476,7 +494,7 @@ void
 block_deferrable_signals(sigset_t *old)
 {
 #if !defined(LISP_FEATURE_WIN32) || defined(LISP_FEATURE_SB_THREAD)
-    block_signals(&deferrable_sigset, 0, old);
+    thread_sigmask(SIG_BLOCK, &deferrable_sigset, old);
 #endif
 }
 
@@ -484,30 +502,38 @@ void
 block_blockable_signals(sigset_t *old)
 {
 #if !defined(LISP_FEATURE_WIN32) || defined(LISP_FEATURE_SB_THREAD)
-    block_signals(&blockable_sigset, 0, old);
+    thread_sigmask(SIG_BLOCK, &blockable_sigset, old);
 #endif
 }
 
+// Do one of two things depending on whether the specified 'where'
+// is non-null or null.
+// 1. If non-null, then alter the mask in *where, removing deferrable signals
+//    from it without affecting the thread's mask from perspective of the OS.
+// 2. If null, the actually change the current thread's signal mask.
 void
-unblock_deferrable_signals(sigset_t *where, sigset_t *old)
+unblock_deferrable_signals(sigset_t *where)
 {
 #if !defined(LISP_FEATURE_WIN32) || defined(LISP_FEATURE_SB_THREAD)
     if (interrupt_handler_pending_p())
-        lose("unblock_deferrable_signals: losing proposition\n");
+        lose("unblock_deferrable_signals: losing proposition");
 #ifndef LISP_FEATURE_SB_SAFEPOINT
+    // If 'where' is null, check_gc_signals_unblocked_or_lose() will
+    // fetch the current signal mask (from the OS) and check that.
     check_gc_signals_unblocked_or_lose(where);
 #endif
-    unblock_signals(&deferrable_sigset, where, old);
+    if (where)
+        sigmask_logandc(where, &deferrable_sigset);
+    else
+        thread_sigmask(SIG_UNBLOCK, &deferrable_sigset, 0);
 #endif
 }
 
 #ifndef LISP_FEATURE_SB_SAFEPOINT
-void
-unblock_gc_signals(sigset_t *where, sigset_t *old)
-{
-#ifndef LISP_FEATURE_WIN32
-    unblock_signals(&gc_sigset, where, old);
-#endif
+// This function previously had an #ifdef guard precluding doing anything for
+// win32, which was redundant because SB_SAFEPOINT is always defined for win32.
+void unblock_gc_signals(void) {
+    thread_sigmask(SIG_UNBLOCK, &gc_sigset, 0);
 }
 #endif
 
@@ -522,11 +548,11 @@ unblock_signals_in_context_and_maybe_warn(os_context_t *context)
 "Enabling blocked gc signals to allow returning to Lisp without risking\n\
 gc deadlocks. Since GC signals are only blocked in signal handlers when \n\
 they are not safe to interrupt at all, this is a pretty severe occurrence.\n");
-        unblock_gc_signals(sigset, 0);
+        sigmask_logandc(sigset, &gc_sigset);
     }
 #endif
     if (!interrupt_handler_pending_p()) {
-        unblock_deferrable_signals(sigset, 0);
+        unblock_deferrable_signals(sigset);
     }
 #endif
 }
@@ -537,9 +563,9 @@ check_interrupts_enabled_or_lose(os_context_t *context)
 {
     __attribute__((unused)) struct thread *thread = arch_os_get_current_thread();
     if (read_TLS(INTERRUPTS_ENABLED,thread) == NIL)
-        lose("interrupts not enabled\n");
+        lose("interrupts not enabled");
     if (arch_pseudo_atomic_atomic(context))
-        lose ("in pseudo atomic section\n");
+        lose ("in pseudo atomic section");
 }
 
 /* Save sigset (or the current sigmask if 0) if there is no pending
@@ -562,7 +588,7 @@ maybe_save_gc_mask_and_block_deferrables(sigset_t *sigset)
     /* With threads a SIG_STOP_FOR_GC and a normal GC may also want to
      * block. */
     if (data->gc_blocked_deferrables)
-        lose("gc_blocked_deferrables already true\n");
+        lose("gc_blocked_deferrables already true");
 #endif
     if ((!data->pending_handler) &&
         (!data->gc_blocked_deferrables)) {
@@ -641,32 +667,32 @@ check_interrupt_context_or_lose(os_context_t *context)
      * call this function. */
     if (interrupt_deferred_p) {
         if (!(!interrupts_enabled || pseudo_atomic_interrupted || in_race_p))
-            lose("Stray deferred interrupt.\n");
+            lose("Stray deferred interrupt.");
     }
     if (gc_pending)
         if (!(pseudo_atomic_interrupted || gc_inhibit || in_race_p || safepoint_active))
-            lose("GC_PENDING, but why?\n");
+            lose("GC_PENDING, but why?");
 #if defined(LISP_FEATURE_SB_THREAD)
     {
         int stop_for_gc_pending =
             (read_TLS(STOP_FOR_GC_PENDING,thread) != NIL);
         if (stop_for_gc_pending)
             if (!(pseudo_atomic_interrupted || gc_inhibit || in_race_p || safepoint_active))
-                lose("STOP_FOR_GC_PENDING, but why?\n");
+                lose("STOP_FOR_GC_PENDING, but why?");
         if (pseudo_atomic_interrupted)
             if (!(gc_pending || stop_for_gc_pending || interrupt_deferred_p))
-                lose("pseudo_atomic_interrupted, but why?\n");
+                lose("pseudo_atomic_interrupted, but why?");
     }
 #else
     if (pseudo_atomic_interrupted)
         if (!(gc_pending || interrupt_deferred_p))
-            lose("pseudo_atomic_interrupted, but why?\n");
+            lose("pseudo_atomic_interrupted, but why?");
 #endif
 #endif
     if (interrupt_pending && !interrupt_deferred_p)
-        lose("INTERRUPT_PENDING but not pending handler.\n");
+        lose("INTERRUPT_PENDING but not pending handler.");
     if ((data->gc_blocked_deferrables) && interrupt_pending)
-        lose("gc_blocked_deferrables and interrupt pending\n.");
+        lose("gc_blocked_deferrables and interrupt pending.");
     if (data->gc_blocked_deferrables)
         check_deferrables_blocked_or_lose(sigset);
     if (interrupt_pending || interrupt_deferred_p ||
@@ -759,10 +785,6 @@ fake_foreign_function_call(os_context_t *context)
     /* context_index incrementing must not be interrupted */
     check_blockables_blocked_or_lose(0);
 
-    /* Get current Lisp state from context. */
-#if (defined(LISP_FEATURE_ARM) || defined(LISP_FEATURE_RISCV)) && !defined(LISP_FEATURE_GENCGC)
-    dynamic_space_free_pointer = SymbolValue(ALLOCATION_POINTER, thread);
-#endif
 #ifdef reg_ALLOC
 #ifdef LISP_FEATURE_SB_THREAD
     thread->pseudo_atomic_bits =
@@ -775,13 +797,13 @@ fake_foreign_function_call(os_context_t *context)
 /*             dynamic_space_free_pointer); */
 #if defined(LISP_FEATURE_ALPHA) || defined(LISP_FEATURE_MIPS)
     if ((sword_t)dynamic_space_free_pointer & 1) {
-        lose("dead in fake_foreign_function_call, context = %x\n", context);
+        lose("dead in fake_foreign_function_call, context = %x", context);
     }
 #endif
 /* why doesnt PPC and SPARC do something like this: */
 #if defined(LISP_FEATURE_HPPA)
     if ((sword_t)dynamic_space_free_pointer & 4) {
-        lose("dead in fake_foreign_function_call, context = %x, d_s_f_p = %x\n", context, dynamic_space_free_pointer);
+        lose("dead in fake_foreign_function_call, context = %x, d_s_f_p = %x", context, dynamic_space_free_pointer);
     }
 #endif
 #endif
@@ -805,7 +827,7 @@ fake_foreign_function_call(os_context_t *context)
         fixnum_value(read_TLS(FREE_INTERRUPT_CONTEXT_INDEX,thread));
 
     if (context_index >= (MAX_INTERRUPTS-THREAD_HEADER_SLOTS)) {
-        lose("maximum interrupt nesting depth (%d) exceeded\n",
+        lose("maximum interrupt nesting depth (%d) exceeded",
              MAX_INTERRUPTS-THREAD_HEADER_SLOTS);
     }
 
@@ -875,9 +897,6 @@ undo_fake_foreign_function_call(os_context_t __attribute__((unused)) *context)
      * not updating them. */
     thread->pseudo_atomic_bits = 0;
 #endif
-#if (defined(LISP_FEATURE_ARM) || defined (LISP_FEATURE_RISCV)) && !defined(LISP_FEATURE_GENCGC)
-    SetSymbolValue(ALLOCATION_POINTER, dynamic_space_free_pointer, thread);
-#endif
 }
 
 /* a handler for the signal caused by execution of a trap opcode
@@ -893,7 +912,7 @@ interrupt_internal_error(os_context_t *context, boolean continuable)
         describe_internal_error(context);
         /* There's no good way to recover from an internal error
          * before the Lisp error handling mechanism is set up. */
-        lose("internal error too early in init, can't recover\n");
+        lose("internal error too early in init, can't recover");
     }
 
     thread_sigmask(SIG_SETMASK, os_context_sigmask_addr(context), 0);
@@ -1108,7 +1127,7 @@ interrupt_handle_pending(os_context_t *context)
 #endif
 #ifdef LISP_FEATURE_GENCGC
     if (get_pseudo_atomic_interrupted(thread))
-        lose("pseudo_atomic_interrupted after interrupt_handle_pending\n");
+        lose("pseudo_atomic_interrupted after interrupt_handle_pending");
 #endif
     /* It is possible that the end of this function was reached
      * without never actually doing anything, the tests in Lisp for
@@ -1151,8 +1170,10 @@ interrupt_handle_now(int signal, siginfo_t *info, os_context_t *context)
         /* This can happen if someone tries to ignore or default one
          * of the signals we need for runtime support, and the runtime
          * support decides to pass on it. */
-        lose("no handler for signal %d in interrupt_handle_now(..)\n", signal);
+        lose("no handler for signal %d in interrupt_handle_now(..)", signal);
 
+        // BUG: if a C function pointer can be misaligned such that it
+        // looks to satisfy functionp() then we do the wrong thing.
     } else if (functionp(handler.lisp)) {
         /* Once we've decided what to do about contexts in a
          * return-elsewhere world (the original context will no longer
@@ -1165,7 +1186,7 @@ interrupt_handle_now(int signal, siginfo_t *info, os_context_t *context)
 #ifdef LISP_FEATURE_C_STACK_IS_CONTROL_STACK
         /* handler.lisp will hide from the GC, will be enabled in the handler itself.
          * Not a problem for the conservative GC. */
-        unblock_gc_signals(0, 0);
+        unblock_gc_signals();
 #endif
 #else
         WITH_GC_AT_SAFEPOINTS_ONLY()
@@ -1233,11 +1254,11 @@ maybe_defer_handler(void *handler, struct interrupt_data *data,
     check_blockables_blocked_or_lose(0);
 
     if (read_TLS(INTERRUPT_PENDING,thread) != NIL)
-        lose("interrupt already pending\n");
+        lose("interrupt already pending");
     if (thread->interrupt_data->pending_handler)
-        lose("there is a pending handler already (PA)\n");
+        lose("there is a pending handler already (PA)");
     if (data->gc_blocked_deferrables)
-        lose("maybe_defer_handler: gc_blocked_deferrables true\n");
+        lose("maybe_defer_handler: gc_blocked_deferrables true");
 
     /* If interrupts are disabled then INTERRUPT_PENDING is set and
      * not PSEDUO_ATOMIC_INTERRUPTED. This is important for a pseudo
@@ -1250,8 +1271,8 @@ maybe_defer_handler(void *handler, struct interrupt_data *data,
     if ((read_TLS(INTERRUPTS_ENABLED,thread) == NIL) ||
         in_leaving_without_gcing_race_p(thread)) {
         FSHOW_SIGNAL((stderr,
-                      "/maybe_defer_handler(%x,%d): deferred (RACE=%d)\n",
-                      (unsigned int)handler,signal,
+                      "/maybe_defer_handler(%p,%d): deferred (RACE=%d)\n",
+                      handler,signal,
                       in_leaving_without_gcing_race_p(thread)));
         store_signal_data_for_later(data,handler,signal,info,context);
         write_TLS(INTERRUPT_PENDING, T,thread);
@@ -1263,8 +1284,8 @@ maybe_defer_handler(void *handler, struct interrupt_data *data,
      * may succeed even when context is null (gencgc alloc()) */
     if (arch_pseudo_atomic_atomic(context)) {
         FSHOW_SIGNAL((stderr,
-                      "/maybe_defer_handler(%x,%d): deferred(PA)\n",
-                      (unsigned int)handler,signal));
+                      "/maybe_defer_handler(%p,%d): deferred(PA)\n",
+                      handler,signal));
         store_signal_data_for_later(data,handler,signal,info,context);
         arch_set_pseudo_atomic_interrupted(context);
         check_interrupt_context_or_lose(context);
@@ -1274,8 +1295,8 @@ maybe_defer_handler(void *handler, struct interrupt_data *data,
     check_interrupt_context_or_lose(context);
 
     FSHOW_SIGNAL((stderr,
-                  "/maybe_defer_handler(%x,%d): not deferred\n",
-                  (unsigned int)handler,signal));
+                  "/maybe_defer_handler(%p,%d): not deferred\n",
+                  handler,signal));
     return 0;
 }
 
@@ -1288,7 +1309,7 @@ store_signal_data_for_later (struct interrupt_data *data, void *handler,
         lose("tried to overwrite pending interrupt handler %p with %p",
              data->pending_handler, handler);
     if (!handler)
-        lose("tried to defer null interrupt handler\n");
+        lose("tried to defer null interrupt handler");
     data->pending_handler = handler;
     data->pending_signal = signal;
     if(info)
@@ -1439,7 +1460,7 @@ interrupt_handle_now_handler(int signal, siginfo_t *info, void *void_context)
     SAVE_ERRNO(signal,context,void_context);
 #ifndef LISP_FEATURE_WIN32
     if ((signal == SIGILL) || (signal == SIGBUS)
-#if !(defined(LISP_FEATURE_LINUX) || defined(LISP_FEATURE_ANDROID))
+#if !(defined LISP_FEATURE_LINUX || defined LISP_FEATURE_ANDROID || defined LISP_FEATURE_HAIKU)
         || (signal == SIGEMT)
 #endif
         )
@@ -1478,7 +1499,7 @@ arrange_return_to_c_function(os_context_t *context,
 #endif
 #if !(defined(LISP_FEATURE_X86) || defined(LISP_FEATURE_X86_64))
     void * fun=native_pointer(function);
-    void *code = &(((struct simple_fun *) fun)->code);
+    void *code = &(((struct simple_fun *) fun)->insts);
 #endif
 
     /* Build a stack frame showing `interrupted' so that the
@@ -1702,15 +1723,6 @@ void reset_thread_control_stack_guard_page(struct thread *th)
     fprintf(stderr, "INFO: Control stack guard page reprotected\n");
 }
 
-/* Called from the REPL, too. */
-void reset_control_stack_guard_page(void)
-{
-    struct thread *th=arch_os_get_current_thread();
-    if (th->control_stack_guard_page_protected == NIL) {
-        reset_thread_control_stack_guard_page(th);
-    }
-}
-
 boolean
 handle_guard_page_triggered(os_context_t *context,os_vm_address_t addr)
 {
@@ -1728,7 +1740,17 @@ handle_guard_page_triggered(os_context_t *context,os_vm_address_t addr)
          * protection so the error handler has some headroom, protect the
          * previous page so that we can catch returns from the guard page
          * and restore it. */
-        if (lose_on_corruption_p || gc_active_p) {
+        if (gc_active_p) {
+            fake_foreign_function_call(context);
+            lose("Control stack exhausted with gc_active_p, fault: %p, PC: %p",
+                 addr, (void*)*os_context_pc_addr(context));
+        }
+        if (arch_pseudo_atomic_atomic(context)) {
+            fake_foreign_function_call(context);
+            lose("Control stack exhausted while pseudo-atomic, fault: %p, PC: %p",
+                 addr, (void*)*os_context_pc_addr(context));
+        }
+        if (lose_on_corruption_p) {
             fake_foreign_function_call(context);
             lose("Control stack exhausted, fault: %p, PC: %p",
                  addr, (void*)*os_context_pc_addr(context));
@@ -1753,7 +1775,7 @@ handle_guard_page_triggered(os_context_t *context,os_vm_address_t addr)
          * exhaustion instead. */
         if (th->control_stack_guard_page_protected != NIL)
             lose("control_stack_guard_page_protected not NIL");
-        reset_control_stack_guard_page();
+        reset_thread_control_stack_guard_page(th);
         return 1;
     }
     else if(addr >= BINDING_STACK_HARD_GUARD_PAGE(th) &&
@@ -1855,7 +1877,7 @@ sigaction_nodefer_test_handler(int signal,
      * the signal we're handling when SA_NODEFER is set; Linux before
      * 2.6.13 or so also doesn't block the other signal when
      * SA_NODEFER is set. */
-    for(i = 1; i < NSIG; i++)
+    for(i = 1; i <= MAX_SIGNUM; i++)
         if (sigismember(&current, i) !=
             (((i == SA_NODEFER_TEST_BLOCK_SIGNAL) || (i == signal)) ? 1 : 0)) {
             FSHOW_SIGNAL((stderr, "SA_NODEFER doesn't work, signal %d\n", i));
@@ -1865,9 +1887,12 @@ sigaction_nodefer_test_handler(int signal,
         sigaction_nodefer_works = 1;
 }
 
+void set_sigaction_nodefer_works() { sigaction_nodefer_works = 1; }
+
 static void
 see_if_sigaction_nodefer_works(void)
 {
+    if (sigaction_nodefer_works > 0) return; // good
     struct sigaction sa, old_sa;
 
     sa.sa_flags = SA_SIGINFO | SA_NODEFER;
@@ -1890,6 +1915,16 @@ see_if_sigaction_nodefer_works(void)
 #undef SA_NODEFER_TEST_BLOCK_SIGNAL
 #undef SA_NODEFER_TEST_KILL_SIGNAL
 
+extern void restore_sbcl_signals () {
+    int signal;
+    for (signal = 0; signal < NSIG; signal++) {
+        interrupt_handler_t handler = interrupt_low_level_handlers[signal];
+        if (handler) {
+            undoably_install_low_level_interrupt_handler(signal, handler);
+        }
+    }
+}
+
 #if defined(LISP_FEATURE_SB_SAFEPOINT_STRICTLY) && !defined(LISP_FEATURE_WIN32)
 
 static void *
@@ -1898,13 +1933,13 @@ signal_thread_trampoline(void *pthread_arg)
     intptr_t signo = (intptr_t) pthread_arg;
     os_context_t fake_context;
     siginfo_t fake_info;
-#ifdef LISP_FEATURE_PPC
+#if defined LISP_FEATURE_PPC || defined LISP_FEATURE_PPC64
     mcontext_t uc_regs;
 #endif
 
     memset(&fake_info, 0, sizeof(fake_info));
     memset(&fake_context, 0, sizeof(fake_context));
-#ifdef LISP_FEATURE_PPC
+#if defined LISP_FEATURE_PPC || defined LISP_FEATURE_PPC64
     memset(&uc_regs, 0, sizeof(uc_regs));
     fake_context.uc_mcontext.uc_regs = &uc_regs;
 #endif
@@ -2014,7 +2049,7 @@ undoably_install_low_level_interrupt_handler (int signal,
     struct sigaction sa;
 
     if (0 > signal || signal >= NSIG) {
-        lose("bad signal number %d\n", signal);
+        lose("bad signal number %d", signal);
     }
 
     if (ARE_SAME_HANDLER(handler, SIG_DFL))
@@ -2058,12 +2093,12 @@ undoably_install_low_level_interrupt_handler (int signal,
 /* This is called from Lisp. */
 uword_t
 install_handler(int signal, void handler(int, siginfo_t*, os_context_t*),
+                lispobj ohandler, // (SIMPLE-VECTOR 1) as a tagged pointer
                 int __attribute__((unused)) synchronous)
 {
 #ifndef LISP_FEATURE_WIN32
     struct sigaction sa;
     sigset_t old;
-    union interrupt_handler oldhandler;
 
     FSHOW((stderr, "/entering POSIX install_handler(%d, ..)\n", signal));
 
@@ -2072,9 +2107,10 @@ install_handler(int signal, void handler(int, siginfo_t*, os_context_t*),
     FSHOW((stderr, "/interrupt_low_level_handlers[signal]=%p\n",
            interrupt_low_level_handlers[signal]));
     if (interrupt_low_level_handlers[signal]==0) {
-        if (ARE_SAME_HANDLER(handler, SIG_DFL) ||
-            ARE_SAME_HANDLER(handler, SIG_IGN))
-            sa.sa_sigaction = (void (*)(int, siginfo_t*, void*))handler;
+        if (handler == 0)
+            sa.sa_sigaction = (void (*)(int, siginfo_t*, void*))SIG_DFL;
+        else if ((lispobj)handler == 1)
+            sa.sa_sigaction = (void (*)(int, siginfo_t*, void*))SIG_IGN;
 #ifdef LISP_FEATURE_SB_SAFEPOINT_STRICTLY
         else if (signal == SIGPROF)
             sa.sa_sigaction = sigprof_handler_trampoline;
@@ -2095,14 +2131,37 @@ install_handler(int signal, void handler(int, siginfo_t*, os_context_t*),
         sigaction(signal, &sa, NULL);
     }
 
-    oldhandler = interrupt_handlers[signal];
+    // We can GC-safely read interrupt_low_level_handlers[signal] and assign
+    // into ohandler despite that the C stack and registers are not roots on
+    // precise GC. That is, if GC were to occur as depicted:
+    //   obj = old_handler
+    //   -- GC signal occurs here --
+    //   result = obj
+    // then the register or stack word holding 'obj' could be obsolete.
+    // But that won't happen- the STOP_FOR_GC signal is currently blocked
+    // due to the block_blockable_signals() at the top of this function.
+    // However, there is an unlikely other reason for a wrong result -
+    // if the C function address does not have at least N_FIXNUM_TAG_BITS
+    // of alignment, then we say that it was NIL instead of a fixnum.
+    lispobj obj = interrupt_handlers[signal].lisp;
+    uword_t result = -1;
+    if ((void*)obj == (void*)SIG_DFL)
+        result = 0;
+    else if ((void*)obj == (void*)SIG_IGN)
+        result = 1;
+    else if (ohandler) // only store into 'ohandler' when it was supplied
+        VECTOR(ohandler)->data[0] = (functionp(obj)||fixnump(obj)) ? obj : NIL;
+
     interrupt_handlers[signal].c = handler;
 
     thread_sigmask(SIG_SETMASK, &old, 0);
 
     FSHOW((stderr, "/leaving POSIX install_handler(%d, ..)\n", signal));
 
-    return (uword_t)oldhandler.lisp;
+    // After the thread's signal mask is restored to the mask in 'old',
+    // it is not possible to GC-safely refer to a Lisp function from C code,
+    // which is to say, naively utilizing "return obj;" would be wrong.
+    return result;
 #else
     /* Probably-wrong Win32 hack */
     return 0;
@@ -2119,7 +2178,7 @@ sigabrt_handler(int __attribute__((unused)) signal,
     /* Save the interrupt context. No need to undo it, since lose()
      * shouldn't return. */
     fake_foreign_function_call(context);
-    lose("SIGABRT received.\n");
+    lose("SIGABRT received.");
 }
 
 void
@@ -2170,18 +2229,34 @@ lisp_memory_fault_error(os_context_t *context, os_vm_address_t addr)
 
     /* To allow debugging memory faults in signal handlers and such. */
 #ifdef ARCH_HAS_STACK_POINTER
-    corruption_warning_and_maybe_lose("Memory fault at %p (pc=%p, fp=%p, sp=%p) tid %#lx",
-                                      addr,
-                                      *os_context_pc_addr(context),
-                                      os_context_frame_pointer(context),
-                                      *os_context_sp_addr(context),
-                                      thread_self()); // = 0 if -sb-thread
+    char* pc = (char*)*os_context_pc_addr(context);
+    struct code* code = (struct code*)component_ptr_from_pc(pc);
+    unsigned int offset = code ? pc - (char*)code : 0;
+    if (offset)
+        corruption_warning_and_maybe_lose(
+            "Memory fault at %p (pc=%p [code %p+0x%X ID 0x%x], fp=%p, sp=%p) tid %#lx",
+            addr, pc, code, offset, code_serialno(code),
+            os_context_frame_pointer(context),
+            *os_context_sp_addr(context), thread_self()); // = 0 if -sb-thread
+    else
+        corruption_warning_and_maybe_lose(
+            "Memory fault at %p (pc=%p, fp=%p, sp=%p) tid %#lx",
+            addr, pc, os_context_frame_pointer(context),
+            *os_context_sp_addr(context), thread_self()); // = 0 if -sb-thread
 #else
     corruption_warning_and_maybe_lose("Memory fault at %p (pc=%p)",
                                       addr, *os_context_pc_addr(context));
 #endif
 
 #ifdef LISP_FEATURE_C_STACK_IS_CONTROL_STACK
+    /* Holy hell is this more obfuscated than necessary when using
+     * signal emulation on macOS. It almost makes one want to cry.
+     * We're not actually on an alternate stack at this point.
+     * Instead of telling the emulated sigsegv (which needn't have been
+     * emulated at all) to return to an intruction which executes a
+     * sigtrap (also emulated), we should just go straight where
+     * we need to go and hand it the original context rather than
+     * having to track the context through two bogus signals */
 #  if !(defined(LISP_FEATURE_X86) || defined(LISP_FEATURE_X86_64))
 #    error memory fault emulation needs validating for this architecture
 #  endif
@@ -2278,8 +2353,14 @@ handle_trap(os_context_t *context, int trap)
 #ifdef trap_InvalidArgCount
     case trap_InvalidArgCount:
 #endif
+#ifdef trap_UninitializedLoad
+# define CONTINUABLE_P (trap==trap_Cerror || trap==trap_UninitializedLoad)
+    case trap_UninitializedLoad:
+#else
+# define CONTINUABLE_P (trap==trap_Cerror)
+#endif
         FSHOW((stderr, "/<trap error/cerror %d>\n", trap));
-        interrupt_internal_error(context, trap==trap_Cerror);
+        interrupt_internal_error(context, CONTINUABLE_P);
         break;
     case trap_Breakpoint:
         arch_handle_breakpoint(context);
@@ -2325,7 +2406,7 @@ handle_trap(os_context_t *context, int trap)
 #endif
     case trap_Halt:
         fake_foreign_function_call(context);
-        lose("%%PRIMITIVE HALT called; the party is over.\n");
+        lose("%%PRIMITIVE HALT called; the party is over.");
     default:
         unhandled_trap_error(context);
     }

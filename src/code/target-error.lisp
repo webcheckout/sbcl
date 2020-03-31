@@ -16,9 +16,6 @@
   (declare (special *muffled-warnings*))
   (typep warning *muffled-warnings*))
 
-;; Host lisp does not need a value for this, so start it out as NIL.
-(define-load-time-global **initial-handler-clusters** nil)
-
 ;;; Each cluster is an alist of the form
 ;;;
 ;;;  ((TYPE-TEST1 . HANDLER1) (TYPE-TEST2 . HANDLER2) ...)
@@ -33,23 +30,19 @@
 ;;;
 ;;; Lists to which *HANDLER-CLUSTERS* is bound generally have dynamic
 ;;; extent.
-#+sb-thread (!define-thread-local *handler-clusters* **initial-handler-clusters**)
-#-sb-thread (defvar *handler-clusters* **initial-handler-clusters**)
-
-;;; a list of lists of currently active RESTART instances. maintained
-;;; by RESTART-BIND.
-(!define-thread-local *restart-clusters* nil)
 
 (defun !target-error-cold-init ()
+  ;; Anonymous lambdas are too complicated to dump as constants in genesis.
+  ;; (that's sad, I wish we could do something about it)
   (setq **initial-handler-clusters**
         `(((,(find-classoid-cell 'warning :create t)
             .
             ,(named-lambda "MAYBE-MUFFLE" (warning)
                (when (muffle-warning-p warning)
-                 (muffle-warning warning)))))))
-  ;;; If multithreaded, *HANDLER-CLUSTERS* is #<unbound> at this point.
-  ;;; This SETQ assigns to TLS since the value is not no-tls-value-marker.
-  (setq *handler-clusters* **initial-handler-clusters**))
+                 (muffle-warning warning))))
+           (,(find-classoid-cell 'step-condition)
+            .
+            sb-impl::invoke-stepper)))))
 
 (defmethod print-object ((restart restart) stream)
   (if *print-escape*
@@ -224,25 +217,32 @@ with that condition (or with no condition) will be returned."
           (funcall function condition)))))
 
 
-(defun assert-error (assertion &optional args-and-values places datum &rest arguments)
-  (let ((cond (if datum
-                  (apply #'coerce-to-condition
-                         datum 'simple-error 'error arguments)
-                  (make-condition
-                   'simple-error
-                   :format-control "~@<The assertion ~S failed~:[.~:; ~
-                                    with ~:*~{~{~S = ~S~}~^, ~}.~]~:@>"
-                   :format-arguments (list assertion args-and-values)))))
-    (restart-case
-        (error cond)
-      (continue ()
-        :report (lambda (stream)
-                  (format stream "Retry assertion")
-                  (if places
-                      (format stream " with new value~P for ~{~S~^, ~}."
-                              (length places) places)
-                      (format stream ".")))
-        nil))))
+(defun assert-error (assertion &rest rest)
+  (let* ((rest rest)
+         (n-args-and-values (if (fixnump (car rest))
+                                (* (pop rest) 2)
+                                0))
+         (args-and-values (subseq rest 0 n-args-and-values)))
+    (destructuring-bind (&optional places datum &rest arguments)
+        (subseq rest n-args-and-values)
+      (let ((cond (if datum
+                      (apply #'coerce-to-condition
+                             datum 'simple-error 'error arguments)
+                      (make-condition
+                       'simple-error
+                       :format-control "~@<The assertion ~S failed~:[.~:; ~
+                                           with ~:*~{~S = ~S~^, ~}.~]~:@>"
+                       :format-arguments (list assertion args-and-values)))))
+        (restart-case
+            (error cond)
+          (continue ()
+            :report (lambda (stream)
+                      (format stream "Retry assertion")
+                      (if places
+                          (format stream " with new value~P for ~{~S~^, ~}."
+                                  (length places) places)
+                          (format stream ".")))
+            nil))))))
 
 ;;; READ-EVALUATED-FORM is used as the interactive method for restart cases
 ;;; setup by the Common Lisp "casing" (e.g., CCASE and CTYPECASE) macros
@@ -301,6 +301,10 @@ with that condition (or with no condition) will be returned."
 
 (defun ecase-failure (value keys)
   (declare (optimize allow-non-returning-tail-call))
+  ;; inline definition not seen yet. Can't move this file later
+  ;; in build because **<foo>-clusters** are needed early.
+  (declare (notinline coerce))
+  (when (vectorp keys) (setq keys (coerce keys 'list)))
   (error 'case-failure
          :name 'ecase
          :datum value

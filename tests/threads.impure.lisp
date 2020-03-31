@@ -189,32 +189,6 @@
 (with-test (:name (join-thread :self-join))
   (assert-error (join-thread *current-thread*) join-thread-error))
 
-;;; We had appalling scaling properties for a while.  Make sure they
-;;; don't reappear.
-(defun scaling-test (function &optional (nthreads 5))
-  "Execute FUNCTION with NTHREADS lurking to slow it down."
-  (let ((queue (make-waitqueue))
-        (mutex (make-mutex)))
-    ;; Start NTHREADS idle threads.
-    (dotimes (i nthreads)
-      (make-join-thread (lambda ()
-                          (with-mutex (mutex)
-                            (condition-wait queue mutex))
-                          (abort-thread))))
-    (prog1 (runtime (funcall function))
-      (condition-broadcast queue))))
-
-(defun fact (n)
-  "A function that does work with the CPU."
-  (if (zerop n) 1 (* n (fact (1- n)))))
-(compile 'fact)
-(with-test (:name :lurking-threads)
-  (let ((work (lambda () (fact 15000))))
-    (let ((zero (scaling-test work 0))
-          (four (scaling-test work 4)))
-      ;; a slightly weak assertion, but good enough for starters.
-      (assert (< four (* 2 zero))))))
-
 ;;; For one of the interupt-thread tests, we want a foreign function
 ;;; that does not make syscalls
 
@@ -627,7 +601,8 @@
         (sb-ext:gc)))
 
 (defparameter *aaa* nil)
-(with-test (:name (:one-thread-runs-gc-while-other-conses :again))
+(with-test (:name (:one-thread-runs-gc-while-other-conses :again)
+            :broken-on :win32)
   (loop for i below 100 do
         (princ "!")
         (force-output)
@@ -642,7 +617,7 @@
 (with-test (:name :all-threads-have-abort-restart
                   :broken-on :win32)
   (loop repeat 100 do
-        (let ((thread (make-kill-thread (lambda () (sleep 0.1)))))
+        (let ((thread (make-kill-thread (lambda () (sleep 100000000)))))
           (interrupt-thread thread (lambda ()
                                      (assert (find-restart 'abort))))
           (process-all-interrupts thread))))
@@ -724,7 +699,7 @@
                                       (sleep 0.1)
                                       (send-gc))))
                  threads)
-           (sleep 4))
+           (sleep 3))
       (mapc #'terminate-thread threads))))
 
 (with-test (:name :test-%thread-local-references)
@@ -865,7 +840,7 @@
 ;; to have the test summary show that a test was disabled.
 #+gencgc
 (unless (eql (extern-alien "verify_gens" int)
-             (1+ sb-vm:+highest-normal-generation+))
+             (+ sb-vm:+highest-normal-generation+ 2))
   (pushnew :verify-gens *features*))
 
 (with-test (:name :backtrace :broken-on :verify-gens)

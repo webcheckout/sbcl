@@ -194,9 +194,6 @@
             (sb-ext:with-timeout 2
               (sleep 2))))))
 
-(defun wait-for-threads (threads)
-  (loop while (some #'sb-thread:thread-alive-p threads) do (sleep 0.01)))
-
 (with-test (:name (:with-timeout :many-at-the-same-time)
                   :skipped-on (not :sb-thread)
                   :broken-on :win32)
@@ -209,11 +206,10 @@
                                   (sleep 5)
                                   (setf ok nil)
                                   (format t "~%not ok~%"))
-                              (timeout ()
-                                )))))))
+                              (timeout ())))))))
       (assert (not (raises-timeout-p
                     (sb-ext:with-timeout 20
-                      (wait-for-threads threads)))))
+                      (mapc #'sb-thread:join-thread threads)))))
       (assert ok))))
 
 ;;; FIXME: Since timeouts do not work on Windows this would loop
@@ -247,16 +243,17 @@
       (sb-sys:with-deadline (:seconds 30)
         (loop repeat 5
               do (mapcar #'sb-thread:join-thread
-                           (loop for i from 1 upto 10
-                                 collect (let* ((thread (sb-thread:make-thread #'flop
-                                                                               :name (format nil "scheduler ~A" i)))
-                                                (ticker (make-limited-timer (lambda () 13)
-                                                                            1000
-                                                                            :thread (or other thread)
-                                                                            :name (format nil "ticker ~A" i))))
-                                           (setf other thread)
-                                           (sb-ext:schedule-timer ticker 0 :repeat-interval 0.00001)
-                                           thread))))))))
+                         (loop for i from 1 upto 10
+                               collect (let* ((thread (sb-thread:make-thread #'flop
+                                                                             :name (format nil "scheduler ~A" i)))
+                                              (ticker (make-limited-timer (lambda () 13)
+                                                                          1000
+                                                                          :thread (or other thread)
+                                                                          :name (format nil "ticker ~A" i))))
+                                         (setf other thread)
+                                         (sb-ext:schedule-timer ticker 0 :repeat-interval 0.00001)
+                                         thread)))))
+      (sb-ext:unschedule-timer timer))))
 
 ;;;; FIXME: OS X 10.4 doesn't like these being at all, and gives us a SIGSEGV
 ;;;; instead of using the Mach expection system! 10.5 on the other tends to

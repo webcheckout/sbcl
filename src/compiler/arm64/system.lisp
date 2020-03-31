@@ -136,8 +136,7 @@
   (:results (res :scs (any-reg descriptor-reg)))
   (:policy :fast-safe)
   (:generator 1
-    (inst and res ptr (dpb -1 (byte (- n-word-bits n-fixnum-tag-bits 1)
-                                    n-fixnum-tag-bits) 0))))
+    (inst and res ptr (lognot fixnum-tag-mask))))
 
 ;;;; Allocation
 
@@ -248,7 +247,7 @@
     (inst brk halt-trap)))
 
 ;;;; Dummy definition for a spin-loop hint VOP
-(define-vop (spin-loop-hint)
+(define-vop ()
   (:translate spin-loop-hint)
   (:policy :fast-safe)
   (:generator 0))

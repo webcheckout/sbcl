@@ -92,7 +92,7 @@
          (lip ,lip))
      (aver (sc-is lip interior-reg))
      (inst add lip function
-           (- (ash simple-fun-code-offset word-shift)
+           (- (ash simple-fun-insts-offset word-shift)
               fun-pointer-lowtag))
      (inst br lip)))
 
@@ -124,7 +124,7 @@
 
 ;;; Move a stack TN to a register and vice-versa.
 (defun load-stack-offset (reg stack stack-tn)
-  (inst ldr reg (@ stack (load-store-offset (* (tn-offset stack-tn) n-word-bytes)))))
+  (inst ldr reg (@ stack (load-store-offset (tn-byte-offset stack-tn)))))
 
 (defmacro load-stack-tn (reg stack)
   `(let ((reg ,reg)
@@ -134,7 +134,7 @@
         (load-stack-offset reg cfp-tn stack)))))
 
 (defun store-stack-offset (reg stack stack-tn)
-  (let ((offset (* (tn-offset stack-tn) n-word-bytes)))
+  (let ((offset (tn-byte-offset stack-tn)))
     (inst str reg (@ stack (load-store-offset offset)))))
 
 (defmacro store-stack-tn (stack reg)
@@ -174,88 +174,75 @@
 ;;; P-A FLAG-TN is also acceptable here.
 
 #+gencgc
-(defun allocation-tramp (alloc-tn size back-label return-in-tmp lip)
+(defun allocation-tramp (type alloc-tn size back-label return-in-tmp lip)
   (unless (eq size tmp-tn)
     (inst mov tmp-tn size))
-  (load-inline-constant alloc-tn '(:fixup alloc-tramp :assembly-routine) lip)
+  (let ((asm-routine (if (eq type 'list) 'list-alloc-tramp 'alloc-tramp)))
+    (load-inline-constant alloc-tn `(:fixup ,asm-routine :assembly-routine) lip))
   (inst blr alloc-tn)
   (unless return-in-tmp
     (move alloc-tn tmp-tn))
   (inst b back-label))
 
-(defmacro allocation (result-tn size lowtag &key flag-tn
-                                                 stack-allocate-p
-                                                 (lip (if stack-allocate-p
-                                                          nil
-                                                          (missing-arg))))
+(defun allocation (type size lowtag result-tn
+                      &key flag-tn
+                           stack-allocate-p
+                           (lip (if stack-allocate-p nil (missing-arg))))
+  (declare (ignorable type lip))
   ;; Normal allocation to the heap.
-  (once-only ((result-tn result-tn)
-              (size size)
-              (lowtag lowtag)
-              (flag-tn flag-tn)
-              (stack-allocate-p stack-allocate-p)
-              (lip lip))
-    `(cond (,stack-allocate-p
-            (assemble ()
-              (move ,result-tn csp-tn)
-              (inst tst ,result-tn lowtag-mask)
-              (inst b :eq ALIGNED)
-              (inst add ,result-tn ,result-tn n-word-bytes)
-              ALIGNED
-              (inst add csp-tn ,result-tn (add-sub-immediate ,size))
-              ;; :ne is from TST above, this needs to be done after the
-              ;; stack pointer has been stored.
-              (inst b :eq ALIGNED2)
-              (storew zr-tn ,result-tn -1 0)
-              ALIGNED2
-              (when ,lowtag
-                (inst add ,result-tn ,result-tn ,lowtag))))
-           #-gencgc
-           (t
-            (load-symbol-value ,flag-tn *allocation-pointer*)
-            (inst add ,result-tn ,flag-tn ,lowtag)
-            (inst add ,flag-tn ,flag-tn (add-sub-immediate ,size))
-            (store-symbol-value ,flag-tn *allocation-pointer*))
-           #+gencgc
-           (t
-            (let ((alloc (gen-label))
-                  (back-from-alloc (gen-label))
-                  size)
-              #-sb-thread
-              (progn
-                (load-inline-constant ,flag-tn '(:fixup "gc_alloc_region" :foreign) ,lip)
-                (inst ldp ,result-tn ,flag-tn (@ ,flag-tn)))
-              #+sb-thread
-              (inst ldp ,result-tn ,flag-tn (@ thread-tn
-                                               (* n-word-bytes thread-alloc-region-slot)))
-              (setf size (add-sub-immediate ,size))
-              (inst add ,result-tn ,result-tn size)
-              (inst cmp ,result-tn ,flag-tn)
-              (inst b :hi ALLOC)
-              #-sb-thread
-              (progn
-                (load-inline-constant ,flag-tn '(:fixup "gc_alloc_region" :foreign) ,lip)
-                (storew ,result-tn ,flag-tn))
-              #+sb-thread
-              (storew ,result-tn thread-tn thread-alloc-region-slot)
-
-              ;; alloc_tramp uses tmp-tn for returning the result,
-              ;; save on a move when possible
-              (inst sub (if ,lowtag
-                            tmp-tn
-                            ,result-tn) ,result-tn size)
-
-              (emit-label BACK-FROM-ALLOC)
-              (when ,lowtag
-                (inst add ,result-tn tmp-tn ,lowtag))
-
-              (assemble (:elsewhere)
-                (emit-label ALLOC)
-                (allocation-tramp ,result-tn
-                                  ,size BACK-FROM-ALLOC
-                                  ;; see the comment above aboout alloc_tramp
-                                  (and ,lowtag t)
-                                  ,lip)))))))
+  (if stack-allocate-p
+      (assemble ()
+        (move result-tn csp-tn)
+        (inst tst result-tn lowtag-mask)
+        (inst b :eq ALIGNED)
+        (inst add result-tn result-tn n-word-bytes)
+        ALIGNED
+        (inst add csp-tn result-tn (add-sub-immediate size))
+        ;; :ne is from TST above, this needs to be done after the
+        ;; stack pointer has been stored.
+        (inst b :eq ALIGNED2)
+        (storew zr-tn result-tn -1 0)
+        ALIGNED2
+        (when lowtag
+          (inst add result-tn result-tn lowtag)))
+      #-gencgc
+      (progn
+        (load-symbol-value flag-tn *allocation-pointer*)
+        (inst add result-tn flag-tn lowtag)
+        (inst add flag-tn flag-tn (add-sub-immediate size))
+        (store-symbol-value flag-tn *allocation-pointer*))
+      #+gencgc
+      (let ((alloc (gen-label)) (back-from-alloc (gen-label)))
+        #-sb-thread
+        (progn
+          ;; load-pair can't base off null-tn because the displacement
+          ;; has to be a multiple of 8
+          (load-immediate-word flag-tn static-space-start)
+          (inst ldp result-tn flag-tn (@ flag-tn (* 2 n-word-bytes))))
+        #+sb-thread
+        (inst ldp result-tn flag-tn (@ thread-tn (* n-word-bytes thread-alloc-region-slot)))
+        (setf size (add-sub-immediate size))
+        (inst add result-tn result-tn size)
+        (inst cmp result-tn flag-tn)
+        (inst b :hi ALLOC)
+        #-sb-thread (inst str result-tn (@ null-tn  (- (+ static-space-start (* 2 n-word-bytes))
+                                                       nil-value)))
+        #+sb-thread (storew result-tn thread-tn thread-alloc-region-slot)
+        ;; alloc_tramp uses tmp-tn for returning the result,
+        ;; save on a move when possible
+        (inst sub (if lowtag tmp-tn result-tn) result-tn size)
+        (emit-label BACK-FROM-ALLOC)
+        (when lowtag
+          (inst add result-tn tmp-tn lowtag))
+        (assemble (:elsewhere)
+          (emit-label ALLOC)
+          (allocation-tramp type
+                            result-tn
+                            size
+                            BACK-FROM-ALLOC
+                            ;; see the comment above aboout alloc_tramp
+                            lowtag
+                            lip)))))
 
 (defmacro with-fixed-allocation ((result-tn flag-tn type-code size
                                             &key (lowtag other-pointer-lowtag)
@@ -272,13 +259,12 @@
               (stack-allocate-p stack-allocate-p)
               (lip lip))
     `(pseudo-atomic (,flag-tn)
-       (allocation ,result-tn (pad-data-block ,size) ,lowtag
+       (allocation nil (pad-data-block ,size) ,lowtag ,result-tn
                    :flag-tn ,flag-tn
                    :stack-allocate-p ,stack-allocate-p
                    :lip ,lip)
        (when ,type-code
-         (load-immediate-word ,flag-tn (+ (ash (1- ,size) n-widetag-bits)
-                                          ,type-code))
+         (load-immediate-word ,flag-tn (compute-object-header ,size ,type-code))
          (storew ,flag-tn ,result-tn 0 ,lowtag))
        ,@body)))
 

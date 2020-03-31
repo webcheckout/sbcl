@@ -23,7 +23,7 @@
 #include "interr.h"
 #include "breakpoint.h"
 #include "thread.h"
-#include "pseudo-atomic.h"
+#include "getallocptr.h"
 #include "forwarding-ptr.h"
 #include "var-io.h"
 #include "code.h"
@@ -32,17 +32,9 @@
 #include "genesis/symbol.h"
 #include "genesis/vector.h"
 
-#define BREAKPOINT_INST 0xcc    /* INT3 */
-#define UD2_INST 0x0b0f         /* UD2 */
-
-#ifndef LISP_FEATURE_UD2_BREAKPOINTS
+#define INT3_INST 0xcc
+#define UD2_INST 0x0b0f
 #define BREAKPOINT_WIDTH 1
-#else
-#define BREAKPOINT_WIDTH 2
-#endif
-
-void arch_init(void)
-{}
 
 #ifndef LISP_FEATURE_WIN32
 os_vm_address_t
@@ -63,13 +55,15 @@ arch_get_bad_addr(int sig, siginfo_t *code, os_context_t *context)
 int *
 context_eflags_addr(os_context_t *context)
 {
-#if defined __linux__ || defined __sun
+#if defined __linux__
     /* KLUDGE: As of kernel 2.2.14 on Red Hat 6.2, there's code in the
      * <sys/ucontext.h> file to define symbolic names for offsets into
      * gregs[], but it's conditional on __USE_GNU and not defined, so
      * we need to do this nasty absolute index magic number thing
      * instead. */
     return &context->uc_mcontext.gregs[16];
+#elif defined(LISP_FEATURE_SUNOS)
+    return &context->uc_mcontext.gregs[EFL];
 #elif defined(LISP_FEATURE_FREEBSD) || defined(__DragonFly__)
     return &context->uc_mcontext.mc_eflags;
 #elif defined __OpenBSD__
@@ -162,16 +156,8 @@ unsigned int
 arch_install_breakpoint(void *pc)
 {
     unsigned int result = *(unsigned int*)pc;
-
-#ifndef LISP_FEATURE_UD2_BREAKPOINTS
-    *(char*)pc = BREAKPOINT_INST;               /* x86 INT3       */
+    *(char*)pc = INT3_INST;
     *((char*)pc+1) = trap_Breakpoint;           /* Lisp trap code */
-#else
-    *(char*)pc = UD2_INST & 0xff;
-    *((char*)pc+1) = UD2_INST >> 8;
-    *((char*)pc+2) = trap_Breakpoint;
-#endif
-
     return result;
 }
 
@@ -180,9 +166,6 @@ arch_remove_breakpoint(void *pc, unsigned int orig_inst)
 {
     *((char *)pc) = orig_inst & 0xff;
     *((char *)pc + 1) = (orig_inst & 0xff00) >> 8;
-#if BREAKPOINT_WIDTH > 1
-    *((char *)pc + 2) = (orig_inst & 0xff0000) >> 16;
-#endif
 }
 
 /* When single stepping, single_stepping holds the original instruction
@@ -309,10 +292,7 @@ sigtrap_handler(int signal, siginfo_t *info, os_context_t *context)
 
 void
 sigill_handler(int signal, siginfo_t *siginfo, os_context_t *context) {
-    /* Triggering SIGTRAP using int3 is unreliable on OS X/x86, so
-     * we need to use illegal instructions for traps.
-     */
-#if defined(LISP_FEATURE_UD2_BREAKPOINTS) && !defined(LISP_FEATURE_MACH_EXCEPTION_HANDLER)
+#ifndef LISP_FEATURE_MACH_EXCEPTION_HANDLER
     if (*((unsigned short *)*os_context_pc_addr(context)) == UD2_INST) {
         *os_context_pc_addr(context) += 2;
         return sigtrap_handler(signal, siginfo, context);
@@ -402,10 +382,10 @@ gencgc_apply_code_fixups(struct code *old_code, struct code *new_code)
     }
 }
 
-#ifdef LISP_FEATURE_LINKAGE_TABLE
 void
-arch_write_linkage_table_entry(char *reloc_addr, void *target_addr, int datap)
+arch_write_linkage_table_entry(int index, void *target_addr, int datap)
 {
+    char *reloc_addr = (char*)LINKAGE_TABLE_SPACE_START + index * LINKAGE_TABLE_ENTRY_SIZE;
     if (datap) {
         *(unsigned long *)reloc_addr = (unsigned long)target_addr;
         return;
@@ -425,4 +405,3 @@ arch_write_linkage_table_entry(char *reloc_addr, void *target_addr, int datap)
     /* write a nop for good measure. */
     *reloc_addr = 0x90;
 }
-#endif

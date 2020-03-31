@@ -12,7 +12,6 @@
 .gdb_history
 output
 obj
-build-features.lisp-expr
 local-target-features.lisp-expr
 customize-target-features.*
 customize-backend-subfeatures.*
@@ -23,7 +22,6 @@ src/compiler/target
 src/runtime/Config
 src/runtime/TAGS
 src/runtime/genesis
-src/runtime/ldso-stubs.S
 src/runtime/openbsd-sigcontext.h
 src/runtime/sbcl
 src/runtime/sbcl.exe

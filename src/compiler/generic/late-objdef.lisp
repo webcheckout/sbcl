@@ -75,9 +75,9 @@
     (character "immediate")
     (sap "unboxed")
     (unbound-marker "immediate")
-    (weak-pointer "lose" "weak_pointer" "boxed")
+    (weak-pointer "weak_pointer" "weak_pointer" "boxed")
     (instance "instance" "lose" "short_boxed")
-    (fdefn ,(or #+(or sparc arm riscv) "boxed" "fdefn") "tiny_boxed")
+    (fdefn "fdefn")
 
     (no-tls-value-marker "immediate")
 
@@ -142,7 +142,7 @@
     (dolist (entry *scav/trans/size*)
       (when (string= (second entry) "unboxed")
         (setf bits (logior bits (ash 1 (ash (car entry) -2))))))
-    (format stream "static inline boolean unboxed_obj_widetag_p(unsigned char widetag) {~%")
+    (format stream "static inline boolean leaf_obj_widetag_p(unsigned char widetag) {~%")
     #+64-bit (format stream "  return (0x~XLU >> (widetag>>2)) & 1;" bits)
     #-64-bit (format stream "  int bit = widetag>>2;
   return (bit<32 ? 0x~XU >> bit : 0x~XU >> (bit-32)) & 1;"
@@ -211,7 +211,7 @@ static inline lispobj compute_lispobj(lispobj* base_addr) {
                               (if (= (mod i 4) 3) 0 31)
                               prefix (or x "lose") (< i (length contents))))
              (format stream "~%};~%")))
-      (write-table "sword_t (*scavtab[256])(lispobj *where, lispobj object)"
+      (write-table "sword_t (*const scavtab[256])(lispobj *where, lispobj object)"
                    "scav_" scavtab)
       (format stream "static void (*scav_ptr[4])(lispobj *where, lispobj object)~
  = {~{~%  (void(*)(lispobj*,lispobj))scav_~A_pointer~^,~}~%};~%"
@@ -225,3 +225,14 @@ static inline lispobj compute_lispobj(lispobj* base_addr) {
       (format stream "#undef size_pointer~%")
       (format stream "#undef size_unboxed~%")))
   (format stream "#endif~%"))
+
+;;; AVLNODE is primitive-object-like because it is needed by C code that looks up
+;;; entries in the tree of lisp threads.  But objdef doesn't have SB-XC:DEFSTRUCT
+;;; working, and I'm reluctant to create yet another 'something-thread' file to
+;;; put this in, not to mention that SB-THREAD is the wrong package anyway.
+(in-package "SB-THREAD")
+(sb-xc:defstruct (avlnode (:constructor avlnode (key data left right)))
+  (left  nil :read-only t)
+  (right nil :read-only t)
+  (key   0   :read-only t :type sb-vm:word)
+  data)

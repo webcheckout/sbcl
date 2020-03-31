@@ -36,7 +36,7 @@
                ((maybe-load (tn)
                   (once-only ((tn tn))
                     `(sc-case ,tn
-                       ((any-reg descriptor-reg zero null)
+                       ((any-reg descriptor-reg null)
                         ,tn)
                        (control-stack
                         (load-stack-tn temp ,tn)
@@ -51,7 +51,8 @@
                        (inst clrrdi res csp-tn n-lowtag-bits)
                        (inst ori res res list-pointer-lowtag)
                        (inst addi csp-tn csp-tn alloc))
-                     (allocation res alloc list-pointer-lowtag :temp-tn alloc-temp
+                     (allocation 'list alloc list-pointer-lowtag res
+                                 :temp-tn alloc-temp
                                  :flag-tn pa-flag))
                  (move ptr res)
                  (dotimes (i (1- cons-cells))
@@ -88,7 +89,7 @@
   (:translate make-fdefn)
   (:generator 37
     (with-fixed-allocation (result pa-flag temp fdefn-widetag fdefn-size)
-      (inst lr temp (make-fixup 'undefined-tramp :assembly-routine))
+      (inst addi temp null-tn (make-fixup 'undefined-tramp :asm-routine-nil-offset))
       (storew name result fdefn-name-slot other-pointer-lowtag)
       (storew null-tn result fdefn-fun-slot other-pointer-lowtag)
       (storew temp result fdefn-raw-addr-slot other-pointer-lowtag))))
@@ -112,8 +113,8 @@
               (inst ori result result fun-pointer-lowtag)
               (inst lr temp (logior (ash (1- size) n-widetag-bits) closure-widetag)))
             (progn
-              (allocation result (pad-data-block size)
-                          fun-pointer-lowtag :temp-tn temp :flag-tn pa-flag)
+              (allocation nil (pad-data-block size) fun-pointer-lowtag result
+                          :temp-tn temp :flag-tn pa-flag)
               (inst lr temp (logior (ash (1- size) n-widetag-bits) closure-widetag))))
         (storew temp result 0 fun-pointer-lowtag)
         (storew function result closure-fun-slot fun-pointer-lowtag)))))
@@ -145,7 +146,7 @@
   (:args)
   (:results (result :scs (any-reg)))
   (:generator 1
-    (inst lr result (make-fixup 'funcallable-instance-tramp :assembly-routine))))
+    (inst addi result null-tn (make-fixup 'funcallable-instance-tramp :asm-routine-nil-offset))))
 
 (define-vop (fixed-alloc)
   (:args)
@@ -163,8 +164,8 @@
 (define-vop (var-alloc)
   (:args (extra :scs (any-reg)))
   (:arg-types positive-fixnum)
-  (:info name words type lowtag)
-  (:ignore name #-gencgc temp)
+  (:info name words type lowtag stack-allocate-p)
+  (:ignore name #-gencgc temp stack-allocate-p)
   (:results (result :scs (descriptor-reg)))
   (:temporary (:scs (any-reg)) bytes)
   (:temporary (:scs (non-descriptor-reg)) header)
@@ -185,5 +186,5 @@
     (inst addi header header (+ (ash -2 n-widetag-bits) type))
     (inst clrrdi bytes bytes n-lowtag-bits) ; round down to even
     (pseudo-atomic (pa-flag)
-      (allocation result bytes lowtag :temp-tn temp :flag-tn pa-flag)
+      (allocation nil bytes lowtag result :temp-tn temp :flag-tn pa-flag)
       (storew header result 0 lowtag))))

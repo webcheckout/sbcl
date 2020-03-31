@@ -28,15 +28,21 @@
 #ifdef MEMORY_SANITIZER
 #include "genesis/symbol.h"
 #endif
+#include "genesis/ratio.h"
+#include "genesis/complex.h"
 	
 /* Minimize conditionalization for different OS naming schemes. */
-#if defined __linux__  || defined LISP_FEATURE_FREEBSD || defined __OpenBSD__ || defined __NetBSD__ || defined __sun || defined _WIN64 || defined __DragonFly__
+#if defined __linux__  || defined LISP_FEATURE_HAIKU || defined LISP_FEATURE_FREEBSD || \
+   defined __OpenBSD__ || defined __NetBSD__ || defined __sun || defined _WIN64 || defined __DragonFly__
 #define GNAME(var) var
 #else
 #define GNAME(var) _##var
 #endif
 
-#ifdef POSITION_INDEPENDENT_ASM
+// Produce position-independent code.
+// macOS does not like the general way we do this, so do something different.
+// I don't know about win32, so conservatively exclude that too.
+#if !defined LISP_FEATURE_DARWIN && !defined LISP_FEATURE_WIN32
 #define PIC_CALL(x) x@PLT
 #define LOAD_PIC_VAR(x,dest) mov GNAME(x)@GOTPCREL(%rip), dest ; mov (dest), dest
 #else
@@ -77,18 +83,9 @@
 #define SIZE(name)
 #endif
 
-/*
- * x86/darwin (as of MacOS X 10.4.5) doesn't reliably fire signal
- * handlers (SIGTRAP or Mach exception handlers) for 0xCC, wo we have
- * to use ud2 instead. ud2 is an undefined opcode, #x0b0f, or
- * 0F 0B in low-endian notation, that causes SIGILL to fire. We check
- * for this instruction in the SIGILL handler and if we see it, we
- * advance the EIP by two bytes to skip over ud2 instruction and
- * call sigtrap_handler. */
-#if defined(LISP_FEATURE_UD2_BREAKPOINTS)
-#define TRAP ud2
-#elif defined(LISP_FEATURE_INT4_BREAKPOINTS)
-#define TRAP .byte 0xCE /* due to illegality, assembler won't emit "into" */
+#ifdef LISP_FEATURE_INT4_BREAKPOINTS
+// assembler won't emit the invalid instruction INTO, so use .byte to encode
+#define TRAP .byte 0xCE
 #else
 #define TRAP int3
 #endif
@@ -127,6 +124,7 @@ GNAME(funcall1_switching_stack):
 	.align	align_16byte,0x90
 	.cfi_startproc
 GNAME(call_into_lisp_first_time):
+GNAME(lspmain): # so much easier to type 'b lspmain' in gdb
 	push	%rbp		# Save old frame pointer.
 	mov	%rsp,%rbp	# Establish new frame.
 #ifdef MEMORY_SANITIZER // Presumes GCC_TLS and SB_THREAD

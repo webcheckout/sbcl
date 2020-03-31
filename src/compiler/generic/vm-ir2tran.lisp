@@ -30,6 +30,10 @@
          (dd-slots (lvar-value defstruct-description)))
   #+(and :gencgc :c-stack-is-control-stack)
   t)
+#+(or x86 x86-64)
+(defoptimizer (%make-instance stack-allocate-result) ((n) node dx)
+  (declare (ignore n dx))
+  t)
 
 (defoptimizer ir2-convert-reffer ((object) node block name offset lowtag)
   (let* ((lvar (node-lvar node))
@@ -178,8 +182,12 @@
     (if (constant-lvar-p extra)
         (let ((words (+ (lvar-value extra) words)))
           (emit-fixed-alloc node block name words type lowtag result lvar))
-        (vop var-alloc node block (lvar-tn node block extra) name words
-             type lowtag result))
+        (let ((stack-allocate-p (and lvar (lvar-dynamic-extent lvar))))
+          (when stack-allocate-p
+            (vop current-stack-pointer node block
+                 (ir2-lvar-stack-pointer (lvar-info lvar))))
+          (vop var-alloc node block (lvar-tn node block extra) name words
+               type lowtag stack-allocate-p result)))
     (emit-inits node block name result lowtag inits args)
     (move-lvar-result node block locs lvar)))
 
@@ -323,7 +331,7 @@
      (member (lvar-value type)
              '#.(list (sb-vm:saetp-typecode (find-saetp 't))
                       (sb-vm:saetp-typecode (find-saetp 'fixnum))))
-     (or (eq dx :always-dynamic)
+     (or (eq dx 'truly-dynamic-extent)
          (zerop (policy node safety))
          ;; a vector object should fit in one page -- otherwise it might go past
          ;; stack guard pages.
@@ -386,7 +394,7 @@
 (progn
   (defoptimizer (%make-list stack-allocate-result) ((length element) node dx)
     (declare (ignore element))
-    (or (eq dx :always-dynamic)
+    (or (eq dx 'truly-dynamic-extent)
         (zerop (policy node safety))
         ;; At most one page (this is more paranoid than %listify-rest-args).
         ;; Really what you want to do is decrement the stack pointer by one page
@@ -435,10 +443,5 @@
   (and (listp fun-name)
        (eq (car fun-name) 'setf)
        (member (cadr fun-name)
-               '(%code-debug-info
-                 %code-fixups
-                 %simple-fun-name
-                 %simple-fun-arglist
-                 %simple-fun-type
-                 %simple-fun-info))
+               '(%code-debug-info %code-fixups))
        t))

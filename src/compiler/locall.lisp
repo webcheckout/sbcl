@@ -195,13 +195,10 @@
           (declare (type index ,n-supplied)
                    (ignorable ,n-supplied))
           (cond
-            ,@(loop for previous-n = (1- min) then n
-                    for ((ep . n) . next) on used-eps
+            ,@(loop for ((ep . n) . next) on used-eps
                     collect
                     (cond (next
-                           `(,(if (= (1+ previous-n) n)
-                                  `(eql ,n-supplied ,n)
-                                  `(<= ,n-supplied ,n))
+                           `((eq ,n-supplied ,n)
                              (%funcall ,ep ,@(subseq temps 0 n))))
                           (more
                            (with-unique-names (n-context n-count)
@@ -366,37 +363,22 @@
   (declare (type component component))
   (aver-live-component component)
   (loop
-    (let* ((new-functional (pop (component-new-functionals component)))
-           (functional (or new-functional
-                           (pop (component-reanalyze-functionals component)))))
-      (unless functional
+    (let* ((new (pop (component-new-functionals component)))
+           (fun (or new (pop (component-reanalyze-functionals component)))))
+      (unless fun
         (return))
-      (let ((kind (functional-kind functional)))
-        (cond ((or (functional-somewhat-letlike-p functional)
-                   (memq kind '(:deleted :zombie)))
-               (values)) ; nothing to do
-              ((and (null (leaf-refs functional)) (eq kind nil)
-                    (not (functional-entry-fun functional)))
-               (delete-functional functional))
+      (let ((kind (functional-kind fun)))
+        (cond ((or (functional-somewhat-letlike-p fun)
+                   (memq kind '(:deleted :zombie))))
+              ((and (null (leaf-refs fun)) (eq kind nil)
+                    (not (functional-entry-fun fun)))
+               (delete-functional fun))
               (t
-               ;; Fix/check FUNCTIONAL's relationship to COMPONENT-LAMDBAS.
-               (cond ((not (lambda-p functional))
-                      ;; Since FUNCTIONAL isn't a LAMBDA, this doesn't
-                      ;; apply: no-op.
-                      (values))
-                     (new-functional ; FUNCTIONAL came from
-                                     ; NEW-FUNCTIONALS, hence is new.
-                      ;; FUNCTIONAL becomes part of COMPONENT-LAMBDAS now.
-                      (aver (not (member functional
-                                         (component-lambdas component))))
-                      (push functional (component-lambdas component)))
-                     (t ; FUNCTIONAL is old.
-                      ;; FUNCTIONAL should be in COMPONENT-LAMBDAS already.
-                      (aver (member functional (component-lambdas
-                                                component)))))
-               (locall-analyze-fun-1 functional)
-               (when (lambda-p functional)
-                 (maybe-let-convert functional component)))))))
+               (when (and new (lambda-p fun))
+                 (push fun (component-lambdas component)))
+               (locall-analyze-fun-1 fun)
+               (when (lambda-p fun)
+                 (maybe-let-convert fun component)))))))
   (values))
 
 (defun locall-analyze-clambdas-until-done (clambdas)
@@ -422,22 +404,23 @@
 ;;; reference.
 (defun maybe-expand-local-inline (original-functional ref call)
   (if (and (policy call
-                   (and (>= speed space)
-                        (>= speed compilation-speed)))
+               (and (>= speed space)
+                    (>= speed compilation-speed)))
            (not (eq (functional-kind (node-home-lambda call)) :external))
-           (inline-expansion-ok call))
+           (inline-expansion-ok call original-functional))
       (let* ((end (component-last-block (node-component call)))
              (pred (block-prev end)))
         (multiple-value-bind (losing-local-object converted-lambda)
             (catch 'locall-already-let-converted
               (with-ir1-environment-from-node call
-                (let ((*lexenv* (functional-lexenv original-functional)))
+                (let ((*inline-expansions*
+                        (register-inline-expansion original-functional call))
+                      (*lexenv* (functional-lexenv original-functional)))
                   (values nil
                           (ir1-convert-lambda
                            (functional-inline-expansion original-functional)
                            :debug-name (debug-name 'local-inline
-                                                   (leaf-debug-name
-                                                    original-functional)))))))
+                                                   (leaf-%source-name original-functional)))))))
           (cond (losing-local-object
                  (if (functional-p losing-local-object)
                      (let ((*compiler-error-context* call))
@@ -501,11 +484,14 @@
                      original-fun))
             (*compiler-error-context* call))
 
-        (when (and (eq (functional-inlinep fun) :inline)
+        (when (and (eq (functional-inlinep fun) 'inline)
                    (rest (leaf-refs original-fun))
                    ;; Some REFs are already unused bot not yet deleted,
-                   ;; avoid unneccessary inlining
-                   (> (count-if #'node-lvar (leaf-refs original-fun)) 1))
+                   ;; avoid unnecessary inlining
+                   (> (count-if #'node-lvar (leaf-refs original-fun)) 1)
+                   ;; Don't inline if the function is not going to be
+                   ;; let-converted.
+                   (let-convertable-p call fun))
           (setq fun (maybe-expand-local-inline fun ref call)))
 
         (aver (member (functional-kind fun)
@@ -518,6 +504,15 @@
                (convert-hairy-call ref call fun))))))
 
   (values))
+
+(defun let-convertable-p (call fun)
+  (cond ((mv-combination-p call)
+         (and (looks-like-an-mv-bind fun)
+              (not (functional-entry-fun fun))))
+        ((lambda-p fun)
+         t)
+        (t ;; Hairy
+         t)))
 
 ;;; Attempt to convert a multiple-value call. The only interesting
 ;;; case is a call to a function that LOOKS-LIKE-AN-MV-BIND, has
@@ -577,7 +572,8 @@
   (with-ir1-environment-from-node node
     (transform-call node lambda
                     (or (combination-fun-source-name node nil)
-                        default-name))))
+                        default-name)
+                    nil)))
 
 (defun warn-invalid-local-call (node count &rest warn-arguments)
   (declare (notinline warn)) ; See COMPILER-WARN for rationale
@@ -1004,6 +1000,10 @@
 ;;; Handle the value semantics of LET conversion. Delete FUN's return
 ;;; node, and change the control flow to transfer to NEXT-BLOCK
 ;;; instead. Move all the uses of the result lvar to CALL's lvar.
+;;;
+;;; We also intersect the derived type of the CALL with the derived
+;;; type of all the dummy continuation's uses. This serves mainly to
+;;; propagate TRULY-THE through LETs.
 (defun move-return-uses (fun call next-block)
   (declare (type clambda fun) (type basic-combination call)
            (type cblock next-block))
@@ -1124,8 +1124,8 @@
 ;;; Actually do LET conversion. We call subfunctions to do most of the
 ;;; work. We do REOPTIMIZE-LVAR on the args and CALL's lvar so that
 ;;; LET-specific IR1 optimizations get a chance. We blow away any
-;;; entry for the function in *FREE-FUNS* so that nobody will create
-;;; new references to it.
+;;; entry for the function in (FREE-FUNS *IR1-NAMSPACE*) so that nobody
+;;; will create new references to it.
 (defun let-convert (fun call)
   (declare (type clambda fun) (type basic-combination call))
   (let* ((next-block (insert-let-body fun call))
@@ -1160,18 +1160,18 @@
   ;;
   ;; A functional that is already inline-expanded in this componsne definitely
   ;; deserves let-conversion -- and in case of main entry points for inline
-  ;; expanded optional dispatch, the main-etry isn't explicitly marked :INLINE
+  ;; expanded optional dispatch, the main-etry isn't explicitly marked INLINE
   ;; even if the function really is.
   (when (and (leaf-has-source-name-p clambda)
              (not (functional-inline-expanded clambda)))
     ;; ANSI requires that explicit NOTINLINE be respected.
-    (or (eq (lambda-inlinep clambda) :notinline)
+    (or (eq (lambda-inlinep clambda) 'notinline)
         ;; If (= LET-CONVERSION 0) we can guess that inlining
         ;; generally won't be appreciated, but if the user
         ;; specifically requests inlining, that takes precedence over
         ;; our general guess.
         (and (policy clambda (= let-conversion 0))
-             (not (eq (lambda-inlinep clambda) :inline))))))
+             (not (eq (lambda-inlinep clambda) 'inline))))))
 
 ;;; We also don't convert calls to named functions which appear in the
 ;;; initial component, delaying this until optimization. This

@@ -201,7 +201,7 @@
          ;; FIXME: remind me what convention we used for 64bitizing
          ;; stuff?  -- CSR, 2003-08-27
          ,@(when restore-fixnum-mask
-             `((inst clrrwi r temp (1- n-lowtag-bits))))))
+             `((inst clrrwi r temp n-fixnum-tag-bits)))))
      (define-vop (,(symbolicate "FAST-" translate "/SIGNED=>SIGNED")
                   fast-signed-binop)
        (:translate ,translate)
@@ -1164,7 +1164,6 @@
   (:generator 1
     (inst srawi digit fixnum n-fixnum-tag-bits)))
 
-
 (define-vop (bignum-floor)
   (:translate sb-bignum:%bigfloor)
   (:policy :fast-safe)
@@ -1200,24 +1199,6 @@
         (inst or quo quo temp)
         (maybe-subtract)))
     (inst not quo quo)))
-
-#|
-
-(define-vop (bignum-floor)
-  (:translate sb-bignum:%bigfloor)
-  (:policy :fast-safe)
-  (:args (div-high :scs (unsigned-reg) :target rem)
-         (div-low :scs (unsigned-reg) :target quo)
-         (divisor :scs (unsigned-reg)))
-  (:arg-types unsigned-num unsigned-num unsigned-num)
-  (:results (quo :scs (unsigned-reg) :from (:argument 1))
-            (rem :scs (unsigned-reg) :from (:argument 0)))
-  (:result-types unsigned-num unsigned-num)
-  (:generator 300
-    (inst mtmq div-low)
-    (inst div quo div-high divisor)
-    (inst mfmq rem)))
-|#
 
 (define-vop (signify-digit)
   (:translate sb-bignum:%fixnum-digit-with-correct-sign)

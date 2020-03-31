@@ -835,7 +835,11 @@
                 (if (fixnump lra)
                     (let ((fp (frame-pointer up-frame)))
                       (values lra
-                              (stack-ref fp (1+ lra-save-offset))))
+                              (let ((code (stack-ref fp (1+ lra-save-offset))))
+                                code
+                                #+ppc64
+                                (%make-lisp-obj (logior (ash code n-fixnum-tag-bits)
+                                                        other-pointer-lowtag)))))
                     (values (get-header-data lra)
                             (lra-code-header lra)))
               (if code
@@ -933,13 +937,13 @@
             #+alpha (* 2 n))))
     (sb-alien:sap-alien context-pointer (* os-context-t))))
 
-;;; On SB-DYNAMIC-CORE symbols which come from the runtime go through
+;;; With :LINKAGE-TABLE symbols which come from the runtime go through
 ;;; an indirection table, but the debugger needs to know the actual
 ;;; address.
 (defun static-foreign-symbol-address (name)
-  #+sb-dynamic-core
+  #+linkage-table
   (find-dynamic-foreign-symbol-address name)
-  #-sb-dynamic-core
+  #-linkage-table
   (foreign-symbol-address name))
 
 (defun catch-runaway-unwind (block)
@@ -1139,15 +1143,21 @@ register."
                    (t
                     nil)))))
     (dolist (boxed-reg-offset sb-vm::boxed-regs
-             ;; If we can't actually pair the PC then we presume that
-             ;; we're in an assembly-routine and that reg_CODE is, in
-             ;; fact, the right thing to use...  And that it will do
-             ;; no harm to return it here anyway even if it isn't.
-             (normalize-candidate
-              (boxed-context-register context sb-vm::code-offset)))
+                              ;; If we can't actually pair the PC then we presume that
+                              ;; we're in an assembly-routine and that reg_CODE is, in
+                              ;; fact, the right thing to use...  And that it will do
+                              ;; no harm to return it here anyway even if it isn't.
+                              (normalize-candidate
+                               #+ppc64
+                               (let ((code (context-register context sb-vm::code-offset)))
+                                 (%make-lisp-obj (if (logtest sb-vm:lowtag-mask code)
+                                                     code
+                                                     (logior code sb-vm:other-pointer-lowtag))))
+                               #-ppc64
+                               (boxed-context-register context sb-vm::code-offset)))
       (let ((candidate
-             (normalize-candidate
-              (boxed-context-register context boxed-reg-offset))))
+              (normalize-candidate
+               (boxed-context-register context boxed-reg-offset))))
         (when (and (not (symbolp candidate)) ;; NIL or :UNDEFINED-FUNCTION
                    (nth-value 1 (context-code-pc-offset context candidate)))
           (return candidate))))))
@@ -1155,37 +1165,31 @@ register."
 ;;;; frame utilities
 
 (defun compiled-debug-fun-from-pc (debug-info pc &optional escaped)
-  (let* ((fun-map (sb-c::compiled-debug-info-fun-map debug-info))
-         (len (length fun-map)))
-    (declare (type simple-vector fun-map))
-    (if (= len 1)
-        (svref fun-map 0)
-        (let* ((i 1)
-               (first-elsewhere-pc (sb-c::compiled-debug-fun-elsewhere-pc
-                                    (svref fun-map 0)))
+  (let* ((fun-map (sb-c::compiled-debug-info-fun-map debug-info)))
+    (if (sb-c::compiled-debug-fun-next fun-map)
+        (let* ((first-elsewhere-pc (sb-c::compiled-debug-fun-elsewhere-pc fun-map))
                (elsewhere-p
                  (if escaped ;; See the comment below
                      (>= pc first-elsewhere-pc)
                      (> pc first-elsewhere-pc))))
-          (declare (type index i))
-          (loop
-           (when (or (= i len)
-                     (let ((next-pc (if elsewhere-p
-                                        (sb-c::compiled-debug-fun-elsewhere-pc
-                                         (svref fun-map (1+ i)))
-                                        (svref fun-map i))))
-                       (if escaped
-                           (< pc next-pc)
-                           ;; Non-escaped frame means that this frame calls something.
-                           ;; And the PC points to where something should return.
-                           ;; The return adress may be in the next
-                           ;; function, e.g. in local tail calls the
-                           ;; function will be entered just after the
-                           ;; CALL.
-                           ;; See debug.impure.lisp/:local-tail-call for a test-case
-                           (<= pc next-pc))))
-             (return (svref fun-map (1- i))))
-           (incf i 2))))))
+          (loop for fun = fun-map then next
+                for next = (sb-c::compiled-debug-fun-next fun)
+                when (or (not next)
+                         (let ((next-pc (if elsewhere-p
+                                            (sb-c::compiled-debug-fun-elsewhere-pc next)
+                                            (sb-c::compiled-debug-fun-offset next))))
+                           (if escaped
+                               (< pc next-pc)
+                               ;; Non-escaped frame means that this frame calls something.
+                               ;; And the PC points to where something should return.
+                               ;; The return adress may be in the next
+                               ;; function, e.g. in local tail calls the
+                               ;; function will be entered just after the
+                               ;; CALL.
+                               ;; See debug.impure.lisp/:local-tail-call for a test-case
+                               (<= pc next-pc))))
+                return fun))
+        fun-map)))
 
 ;;; This returns a COMPILED-DEBUG-FUN for COMPONENT and PC. We fetch the
 ;;; SB-C::DEBUG-INFO and run down its FUN-MAP to get a
@@ -1194,8 +1198,10 @@ register."
 ;;; SB-C::COMPILED-DEBUG-FUN.
 (defun debug-fun-from-pc (component pc &optional (escaped t))
   (let ((info (%code-debug-info component)))
-    (cond
-      ((consp info)
+    (etypecase info
+      (sb-c::compiled-debug-info
+       (make-compiled-debug-fun (compiled-debug-fun-from-pc info pc escaped) component))
+      (cons ; interrupted in an assembler routine
        (let ((routine (dohash ((name pc-range) (car info))
                         (when (<= (car pc-range) pc (cadr pc-range))
                           (return name)))))
@@ -1205,10 +1211,10 @@ register."
                                                       sb-vm::undefined-alien-tramp))
                                       "undefined function")
                                      (routine)))))
-     ((eq info :bpt-lra)
-      (make-bogus-debug-fun "function end breakpoint"))
-     (t
-      (make-compiled-debug-fun (compiled-debug-fun-from-pc info pc escaped) component)))))
+      (closure ; interrupted in an immobile code trampoline
+       (make-bogus-debug-fun "closure-calling trampoline"))
+      ((eql :bpt-lra)
+       (make-bogus-debug-fun "function end breakpoint")))))
 
 ;;; This returns a code-location for the COMPILED-DEBUG-FUN,
 ;;; DEBUG-FUN, and the pc into its code vector. If we stopped at a
@@ -1239,8 +1245,11 @@ register."
                (sap-ref-lispobj catch (* slot n-word-bytes)))
              #-(or x86 x86-64)
              (catch-entry-offset ()
-               (let ((lra (catch-ref catch-block-entry-pc-slot))
-                     (component (catch-ref catch-block-code-slot)))
+               (let* ((lra (catch-ref catch-block-entry-pc-slot))
+                      (component (catch-ref catch-block-code-slot))
+                      #+ppc64
+                      (component (%make-lisp-obj (logior (ash component n-fixnum-tag-bits)
+                                                         other-pointer-lowtag))))
                  (* (- (1+ (get-header-data lra))
                        (code-header-words component))
                     n-word-bytes)))
@@ -1424,13 +1433,14 @@ register."
   (let ((simple-fun (%fun-fun fun)))
     (let* ((name (%simple-fun-name simple-fun))
            (component (fun-code-header simple-fun))
-           (res (find-if
-                 (lambda (x)
-                   (and (sb-c::compiled-debug-fun-p x)
-                        (eq (sb-c::compiled-debug-fun-name x) name)
-                        (eq (sb-c::compiled-debug-fun-kind x) nil)))
-                 (sb-c::compiled-debug-info-fun-map
-                  (%code-debug-info component)))))
+           (res (loop for fmap-entry = (sb-c::compiled-debug-info-fun-map
+                                        (%code-debug-info component))
+                      then next
+                      for next = (sb-c::compiled-debug-fun-next fmap-entry)
+                      when (and (eq (sb-c::compiled-debug-fun-name fmap-entry) name)
+                                (eq (sb-c::compiled-debug-fun-kind fmap-entry) nil))
+                      return fmap-entry
+                      while next)))
       (if res
           (make-compiled-debug-fun res component)
           ;; KLUDGE: comment from CMU CL:
@@ -1708,7 +1718,10 @@ register."
 (defun parse-debug-blocks (debug-fun)
   (etypecase debug-fun
     (compiled-debug-fun
-     (parse-compiled-debug-blocks debug-fun))
+     (let ((parsed (parse-compiled-debug-blocks debug-fun)))
+       (if (equalp parsed #())
+           (debug-signal 'no-debug-blocks :debug-fun debug-fun)
+           parsed)))
     (bogus-debug-fun
      (debug-signal 'no-debug-blocks :debug-fun debug-fun))))
 
@@ -1733,7 +1746,9 @@ register."
            (last-pc 0)
            result-blocks
            (block (make-compiled-debug-block))
-           locations)
+           locations
+           prev-live
+           prev-form-number)
       (flet ((new-block ()
                (when locations
                  (setf (compiled-debug-block-code-locations block)
@@ -1749,17 +1764,27 @@ register."
            (return))
          (let* ((flags (aref+ blocks i))
                 (kind (svref sb-c::+compiled-code-location-kinds+
-                             (ldb (byte 4 0) flags)))
+                             (ldb (byte 3 0) flags)))
                 (pc (+ last-pc
                        (sb-c:read-var-integerf blocks i)))
+                (equal-live (logtest sb-c::compiled-code-location-equal-live flags))
                 (form-number
-                  (if (logtest sb-c::compiled-code-location-zero-form-number flags)
-                      0
-                      (sb-c:read-var-integerf blocks i)))
+                  (cond ((logtest sb-c::compiled-code-location-zero-form-number flags)
+                         0)
+                        ((and equal-live
+                              (logtest sb-c::compiled-code-location-live flags))
+                         prev-form-number)
+                        (t
+                         (setf prev-form-number
+                               (sb-c:read-var-integerf blocks i)))))
                 (live-set
-                  (if (logtest sb-c::compiled-code-location-live flags)
-                      (sb-c:read-packed-bit-vector live-set-len blocks i)
-                      (make-array (* live-set-len 8) :element-type 'bit)))
+                  (cond (equal-live
+                         prev-live)
+                        ((logtest sb-c::compiled-code-location-live flags)
+                         (setf prev-live
+                               (sb-c:read-packed-bit-vector live-set-len blocks i)))
+                        (t
+                         (make-array (* live-set-len 8) :element-type 'bit))))
                 (step-info
                   (if (logtest sb-c::compiled-code-location-stepping flags)
                       (sb-c:read-var-string blocks i)
@@ -1849,12 +1874,12 @@ register."
                                ((logtest sb-c::compiled-debug-var-same-name-p flags)
                                 prev-name)
                                (t (geti))))
+                 ;; Keep the condition in sync with DUMP-1-VAR
+                 (large-fixnums (>= (integer-length sb-xc:most-positive-fixnum) 62))
                  (sc+offset (if deleted 0
-                                #-64-bit (geti)
-                                #+64-bit (ldb (byte 27 8) flags)))
+                                (if large-fixnums (ldb (byte 27 8) flags) (geti))))
                  (save-sc+offset (and save
-                                      #-64-bit (geti)
-                                      #+64-bit (ldb (byte 27 35) flags)))
+                                      (if large-fixnums (ldb (byte 27 35) flags) (geti))))
                  (indirect-sc+offset (and indirect-p
                                           (geti))))
             (aver (not (and args-minimal (not minimal))))
@@ -3459,7 +3484,7 @@ register."
 (defun make-bpt-lra (real-lra)
   (declare (type #-(or x86 x86-64) lra #+(or x86 x86-64) system-area-pointer real-lra))
   (macrolet ((symbol-addr (name)
-               ;; "static" is not really correct if #+sb-dynamic-core
+               ;; "static" is not really correct if #+linkage-table
                `(static-foreign-symbol-address ,name))
              (trap-offset ()
                `(- (symbol-addr "fun_end_breakpoint_trap") src-start)))
@@ -3470,7 +3495,7 @@ register."
                                  src-start)))
            (code-object
             (sb-c:allocate-code-object
-             nil
+             nil 0
              ;; For non-x86: a single boxed constant holds the true LRA.
              ;; For x86[-64]: one boxed constant holds the code object to which
              ;; to return, and one holds the displacement into that object.
@@ -3584,16 +3609,17 @@ register."
   (let* ((callee
            ;; FIXME: this could handle static calls, but needs some
            ;; help from the backends
+          (make-lisp-obj
            (cond #+immobile-space
                  ((eql (sap-ref-8 (context-pc context) 0) #xB8) ; MOV EAX,imm
+                  ;; Construct a properly tagged FDEFN given the value
+                  ;; that machine code references it by for purposes
+                  ;; of the ensuing CALL instruction.
                   ;; FIXME: this ought to go in {target}-vm.lisp as
                   ;; something like GET-FDEFN-FOR-SINGLE-STEP
-                  (let ((jmp-target (sap-ref-32 (context-pc context) 1)))
-                    (make-lisp-obj
-                     (+ jmp-target (- (ash word-shift fdefn-raw-addr-slot))
-                        other-pointer-lowtag))))
-                 (t (make-lisp-obj
-                     (context-register context callee-register-offset)))))
+                  (+ (sap-ref-32 (context-pc context) 1) -2 other-pointer-lowtag))
+                 (t
+                  (context-register context callee-register-offset)))))
          (step-info (single-step-info-from-context context)))
     ;; If there was not enough debug information available, there's no
     ;; sense in signaling the condition.
@@ -3648,11 +3674,10 @@ register."
         (cond
          #+immobile-code
          ((fdefn-p callee) ; as above, should be in {target}-vm.lisp
-          ;; Don't store the FDEFN in RAX, but the address of the raw_addr slot.
+          ;; Store into RAX the necessary value for issuing a CALL to the JMP
+          ;; opcode in the FDEFN header.
           (setf (context-register context callee-register-offset)
-                (+ (get-lisp-obj-address new-callee)
-                   (- other-pointer-lowtag)
-                   (ash word-shift fdefn-raw-addr-slot)))
+                (sb-vm::fdefn-entry-address new-callee))
           ;; And skip over the MOV EAX, imm instruction.
           (sb-vm::incf-context-pc context 5))
          (t

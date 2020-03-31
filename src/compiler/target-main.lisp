@@ -42,13 +42,13 @@
                   (*source-info* (or source-info
                                   (make-lisp-source-info
                                    form :parent *source-info*)))
-                  (*toplevel-lambdas* ())
-                  (*block-compile* nil)
                   (*allow-instrumenting* nil)
-                  (*compiler-coverage-metadata* nil)
-                  (*msan-unpoison*
-                   (and (member :msan *features*)
-                        (find-dynamic-foreign-symbol-address "__msan_unpoison")))
+                  (*compilation*
+                   (make-compilation
+                    :msan-unpoison
+                    (and (member :msan *features*)
+                         (find-dynamic-foreign-symbol-address "__msan_unpoison"))
+                    :block-compile nil))
                   (*current-path* nil)
                   (*last-message-count* (list* 0 nil nil))
                   (*last-error-context* nil)

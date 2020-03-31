@@ -70,12 +70,8 @@
 #include "interr.h"
 #endif
 
-#ifdef SBCL_PREFIX
-char *sbcl_home = SBCL_PREFIX"/lib/sbcl/";
-#else
 static char libpath[] = "../lib/sbcl";
-char *sbcl_home;
-#endif
+char *runtime_home;
 
 #ifdef LISP_FEATURE_HPUX
 extern void *return_from_lisp_stub;
@@ -90,7 +86,7 @@ sigint_handler(int __attribute__((unused)) signal,
                siginfo_t __attribute__((unused)) *info,
                os_context_t *context)
 {
-    lose("\nSIGINT hit at 0x%08lX\n",
+    lose("\nSIGINT hit at 0x%08lX",
          (unsigned long) *os_context_pc_addr(context));
 }
 
@@ -100,7 +96,7 @@ void
 sigint_init(void)
 {
     SHOW("entering sigint_init()");
-    install_handler(SIGINT, sigint_handler, 1);
+    install_handler(SIGINT, sigint_handler, 0, 1);
     SHOW("leaving sigint_init()");
 }
 
@@ -113,7 +109,7 @@ successful_malloc(size_t size)
 {
     void* result = malloc(size);
     if (0 == result) {
-        lose("malloc failure\n");
+        lose("malloc failure");
     } else {
         return result;
     }
@@ -223,15 +219,7 @@ SBCL is free software, provided as is, with absolutely no warranty.\n\
 It is mostly in the public domain; some portions are provided under\n\
 BSD-style licenses.  See the CREDITS and COPYING files in the\n\
 distribution for more information.\n\
-"
-#ifdef LISP_FEATURE_WIN32
-"\n\
-WARNING: the Windows port is fragile, particularly for multithreaded\n\
-code.  Unfortunately, the development team currently lacks the time\n\
-and resources this platform demands.\n\
-"
-#endif
-, SBCL_VERSION_STRING);
+", SBCL_VERSION_STRING);
 }
 
 /* Look for a core file to load, first in the directory named by the
@@ -244,21 +232,38 @@ search_for_core ()
     char *lookhere;
     char *stem = "/sbcl.core";
     char *core;
+    struct stat filename_stat;
 
-    if (!(env_sbcl_home && *env_sbcl_home))
-      env_sbcl_home = sbcl_home;
+    if (!(env_sbcl_home && *env_sbcl_home) ||
+        stat(env_sbcl_home, &filename_stat))
+        env_sbcl_home = runtime_home;
     lookhere = (char *) calloc(strlen(env_sbcl_home) +
+                               strlen(libpath) +
                                strlen(stem) +
                                1,
                                sizeof(char));
-    sprintf(lookhere, "%s%s", env_sbcl_home, stem);
+    sprintf(lookhere, "%s%s%s", env_sbcl_home, libpath, stem);
     core = copied_existing_filename_or_null(lookhere);
 
-    if (!core) {
-        lose("can't find core file at %s\n", lookhere);
+    if (core) {
+        free(lookhere);
+    } else {
+        free(lookhere);
+        core = copied_existing_filename_or_null ("sbcl.core");
+        if (!core) {
+            lookhere = (char *) calloc(strlen(env_sbcl_home) +
+                                       strlen(stem) +
+                                       1,
+                                       sizeof(char));
+            sprintf(lookhere, "%s%s", env_sbcl_home, stem);
+            core = copied_existing_filename_or_null (lookhere);
+            if (core) {
+                free(lookhere);
+            } else {
+                lose("Can't find core file relative to %s", env_sbcl_home);
+            }
+        }
     }
-
-    free(lookhere);
 
     return core;
 }
@@ -372,49 +377,6 @@ char *saved_runtime_path = NULL;
 void pthreads_win32_init();
 #endif
 
-static void print_locale_variable(const char *name)
-{
-  char *value = getenv(name);
-
-  if (value) {
-    fprintf(stderr, "\n  %s=%s", name, value);
-  }
-}
-
-static void setup_locale()
-{
-  if(setlocale(LC_ALL, "") == NULL) {
-#ifndef LISP_FEATURE_WIN32
-
-    fprintf(stderr, "WARNING: Setting locale failed.\n");
-    fprintf(stderr, "  Check the following variables for correct values:");
-
-    if (setlocale(LC_CTYPE, "") == NULL) {
-      print_locale_variable("LC_ALL");
-      print_locale_variable("LC_CTYPE");
-      print_locale_variable("LANG");
-    }
-
-    if (setlocale(LC_MESSAGES, "") == NULL) {
-      print_locale_variable("LC_MESSAGES");
-    }
-    if (setlocale(LC_COLLATE, "") == NULL) {
-      print_locale_variable("LC_COLLATE");
-    }
-    if (setlocale(LC_MONETARY, "") == NULL) {
-      print_locale_variable("LC_MONETARY");
-    }
-    if (setlocale(LC_NUMERIC, "") == NULL) {
-      print_locale_variable("LC_NUMERIC");
-    }
-    if (setlocale(LC_TIME, "") == NULL) {
-      print_locale_variable("LC_TIME");
-    }
-    fprintf(stderr, "\n");
-
-#endif
-  }
-}
 static void print_environment(int argc, char *argv[])
 {
     int n = 0;
@@ -461,7 +423,8 @@ sbcl_main(int argc, char *argv[], char *envp[])
 
     lispobj initial_function;
     int merge_core_pages = -1;
-    struct memsize_options memsize_options = {0, 0, 0};
+    struct memsize_options memsize_options;
+    memsize_options.present_in_core = 0;
 
     boolean have_hardwired_spaces = os_preinit(argv, envp);
 #if defined(LISP_FEATURE_WIN32) && defined(LISP_FEATURE_SB_THREAD)
@@ -480,6 +443,39 @@ sbcl_main(int argc, char *argv[], char *envp[])
      * which also populates runtime_options if the core has runtime
      * options */
     runtime_path = os_get_runtime_executable_path(0);
+
+    /* Set 'runtime_home' to
+     * "<here>" based on how this executable was invoked. */
+    {
+        char *exename = argv[0]; // Use as-it, not truenameified
+        char slashchar =
+#ifdef LISP_FEATURE_WIN32
+          '\\';
+#else
+          '/';
+#endif
+
+        char *slash = strrchr(exename, slashchar);
+        if (!slash) {
+            if (runtime_path) {
+                exename = runtime_path;
+            } else if (saved_runtime_path) {
+                exename = saved_runtime_path;
+            }
+            slash = strrchr(exename, slashchar);
+        }
+
+        if (!slash) {
+            runtime_home = libpath;
+        } else {
+            int prefixlen = slash - exename + 1; // keep the slash in the prefix
+            runtime_home = successful_malloc(prefixlen + 1);
+            memcpy(runtime_home, exename, prefixlen);
+            runtime_home[prefixlen] = 0;
+
+        }
+    }
+
     if (runtime_path || saved_runtime_path) {
         os_vm_offset_t offset = search_for_embedded_core(
             runtime_path ? runtime_path : saved_runtime_path,
@@ -488,12 +484,10 @@ sbcl_main(int argc, char *argv[], char *envp[])
             embedded_core_offset = offset;
             core = (runtime_path ? runtime_path :
                     copied_string(saved_runtime_path));
-        } else {
-            if (runtime_path)
-                free(runtime_path);
+        } else if (runtime_path) {
+            free(runtime_path);
         }
     }
-
 
     /* Parse our part of the command line (aka "runtime options"),
      * stripping out those options that we handle. */
@@ -522,11 +516,11 @@ sbcl_main(int argc, char *argv[], char *envp[])
                 ++argi;
             } else if (0 == strcmp(arg, "--core")) {
                 if (core) {
-                    lose("more than one core file specified\n");
+                    lose("more than one core file specified");
                 } else {
                     ++argi;
                     if (argi >= argc) {
-                        lose("missing filename for --core argument\n");
+                        lose("missing filename for --core argument");
                     }
                     core = copied_string(argv[argi]);
                     ++argi;
@@ -621,7 +615,7 @@ sbcl_main(int argc, char *argv[], char *envp[])
                  * error. */
                 if (!end_runtime_options &&
                     0 == strcmp(arg, "--end-runtime-options")) {
-                    lose("bad runtime option \"%s\"\n", argi0);
+                    lose("bad runtime option \"%s\"", argi0);
                 }
                 sbcl_argv[argj++] = arg;
             }
@@ -637,47 +631,22 @@ sbcl_main(int argc, char *argv[], char *envp[])
 #endif
     thread_control_stack_size &= ~(sword_t)(CONTROL_STACK_ALIGNMENT_BYTES-1);
 
-    /* KLUDGE: os_vm_page_size is set by os_init(), and on some
-     * systems (e.g. Alpha) arch_init() needs need os_vm_page_size, so
-     * it must follow os_init(). -- WHN 2000-01-26 */
     os_init(argv, envp);
     if (debug_environment_p) {
         print_environment(argc, argv);
     }
     dyndebug_init();
+#ifdef LISP_FEATURE_ALPHA // When we remove Alpha, this #if can go away
+    /* KLUDGE: os_vm_page_size is set by os_init(), and on some
+     * systems (e.g. Alpha) arch_init() needs need os_vm_page_size, so
+     * it must follow os_init(). -- WHN 2000-01-26 */
     arch_init();
-    allocate_spaces(have_hardwired_spaces);
+#endif
+    // FIXME: if the 'have' flag is 0 and you've disabled disabling of ASLR
+    // then we haven't done an exec(), nor unmapped the mappings that were obtained
+    // already obtained (if any) so it is unhelpful to try again here.
+    allocate_lisp_dynamic_space(have_hardwired_spaces);
     gc_init();
-
-    setup_locale();
-
-    #ifndef SBCL_PREFIX
-    /* If built without SBCL_PREFIX defined, then set 'sbcl_home' to
-     * "<here>/../lib/sbcl/" based on how this executable was invoked. */
-    {
-        char *exename = argv[0]; // Use as-it, not truenameified
-        char *slash = strrchr(exename, '/');
-        if (!slash) {
-            sbcl_home = libpath;
-        } else {
-            int prefixlen = slash - exename + 1; // keep the slash in the prefix
-            char *tail = exename + prefixlen - 4;
-            char *suffix = libpath;
-            sbcl_home = successful_malloc(prefixlen + sizeof libpath); // sizeof incl. nul
-            // Translate "{path/}bin/sbcl" => "{path/}lib/sbcl", otherwise
-            // "{path}/sbcl" => "{path}/../lib/sbcl" so that running "./sbcl" works
-            // if sitting in "bin".
-            if (prefixlen >= 4 && !strncmp(tail, "bin/", 4)
-                // chop "bin" only if a complete word: '/' or nothing to its left.
-                && (tail-1 < exename || tail[-1] == '/')) {
-                prefixlen -= 4; // remove "bin/"
-                suffix += 3; // don't append "../"
-            }
-            memcpy(sbcl_home, exename, prefixlen);
-            strcpy(sbcl_home+prefixlen, suffix);
-        }
-    }
-    #endif
 
     /* If no core file was specified, look for one. */
     if (!core) {
@@ -714,10 +683,10 @@ sbcl_main(int argc, char *argv[], char *envp[])
     initial_function = load_core_file(core, embedded_core_offset,
                                       merge_core_pages);
     if (initial_function == NIL) {
-        lose("couldn't find initial function\n");
+        lose("couldn't find initial function");
     }
 
-#if defined(SVR4) || defined(__linux__) || defined(__NetBSD__)
+#if defined(SVR4) || defined(__linux__) || defined(__NetBSD__) || defined(__HAIKU__)
     tzset();
 #endif
 
@@ -735,6 +704,7 @@ sbcl_main(int argc, char *argv[], char *envp[])
     write_protect_immobile_space();
 #endif
 #ifdef LISP_FEATURE_HPUX
+    // FIXME: obvious bitrot here. 23 isn't the offset to anything.
     /* -1 = CLOSURE_FUN_OFFSET, 23 = SIMPLE_FUN_CODE_OFFSET, we are
      * not in __ASSEMBLER__ so we cant reach them. */
     return_from_lisp_stub = (void *) ((char *)*((unsigned long *)
@@ -758,6 +728,6 @@ sbcl_main(int argc, char *argv[], char *envp[])
     FSHOW((stderr, "/funcalling initial_function=0x%lx\n",
           (unsigned long)initial_function));
     create_initial_thread(initial_function);
-    lose("unexpected return from initial thread in main()\n");
+    lose("unexpected return from initial thread in main()");
     return 0;
 }

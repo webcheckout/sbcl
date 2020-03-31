@@ -58,7 +58,7 @@ been specified on the command-line.")
          (%exit)))))
 
 (define-load-time-global *exit-lock* nil)
-(!define-thread-local *exit-in-process* nil)
+(define-thread-local *exit-in-process* nil)
 (declaim (type (or null real) *exit-timeout*))
 (defvar *exit-timeout* 60
   "Default amount of seconds, if any, EXIT should wait for other
@@ -583,22 +583,16 @@ that provides the REPL for the system. Assumes that *STANDARD-INPUT* and
       ;; Each REPL in a multithreaded world should have bindings of
       ;; most CL specials (most critically *PACKAGE*).
       (with-rebound-io-syntax
-          (handler-bind ((step-condition 'invoke-stepper))
-            (loop
-               (/show0 "about to set up restarts in TOPLEVEL-REPL")
-               ;; CLHS recommends that there should always be an
-               ;; ABORT restart; we have this one here, and one per
-               ;; debugger level.
-               (with-simple-restart
-                   (abort "~@<Exit debugger, returning to top level.~@:>")
-                 (catch 'toplevel-catcher
-                   ;; In the event of a control-stack-exhausted-error, we
-                   ;; should have unwound enough stack by the time we get
-                   ;; here that this is now possible.
-                   #-win32
-                   (sb-kernel::reset-control-stack-guard-page)
-                   (funcall repl-fun noprint)
-                   (critically-unreachable "after REPL")))))))))
+        (loop
+         (/show0 "about to set up restarts in TOPLEVEL-REPL")
+         ;; CLHS recommends that there should always be an
+         ;; ABORT restart; we have this one here, and one per
+         ;; debugger level.
+         (with-simple-restart
+             (abort "~@<Exit debugger, returning to top level.~@:>")
+           (catch 'toplevel-catcher
+             (funcall repl-fun noprint)
+             (critically-unreachable "after REPL"))))))))
 
 ;;; Our default REPL prompt is the minimal traditional one.
 (defun repl-prompt-fun (stream)

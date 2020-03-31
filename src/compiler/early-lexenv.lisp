@@ -62,6 +62,7 @@
   (dependent-qualities 0
    :type (unsigned-byte #.(* (- max-policy-qualities n-policy-primary-qualities)
                              2))))
+(declaim (freeze-type policy))
 
 (defvar *handled-conditions* nil)
 (defvar *disabled-package-locks* nil)
@@ -70,8 +71,7 @@
 ;;; (This is also what shows up as an ENVIRONMENT value in macroexpansion.)
 #-sb-fluid (declaim (inline internal-make-lexenv)) ; only called in one place
 (defstruct (lexenv
-             (:include abstract-lexenv)
-             #-no-ansi-print-object
+            (:include abstract-lexenv)
              (:print-function
               (lambda (lexenv stream depth)
                 (if (null-lexenv-p lexenv)
@@ -81,7 +81,7 @@
              (:copier nil)
              (:constructor make-null-lexenv ())
              (:constructor make-almost-null-lexenv (%policy handled-conditions
-                                                    flushable))
+                                                    flushable lambda parent))
              (:constructor make-package-lock-lexenv
                            (disabled-package-locks %policy
                             &aux (handled-conditions nil)))

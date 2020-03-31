@@ -42,7 +42,9 @@
 #ifdef LISP_FEATURE_ANDROID
   #include <termios.h>
 #else
-  #include <sys/termios.h>
+# ifndef LISP_FEATURE_HAIKU
+#  include <sys/termios.h>
+# endif
   #include <langinfo.h>
 #endif
   #include <sys/time.h>
@@ -93,10 +95,36 @@ defconstant(char* lisp_name, unsigned long unix_number)
            lisp_name, unix_number, unix_number);
 }
 
+#ifdef __HAIKU__
+// Haiku defines negative error numbers. I don't think that's allowed for any
+// of the Posix-specified numbers such as ENOENT, as per
+// https://pubs.opengroup.org/onlinepubs/9699919799/basedefs/errno.h.html#tag_13_10
+// "The <errno.h> header shall define the following macros which shall expand to integer
+//  constant expressions with type int, distinct positive values (except as noted below) ...
+//  [ENOENT]" etc
+// But all the constants seem to be based off of INT_MIN.
+//    #define B_GENERAL_ERROR_BASE INT_MIN
+//    #define B_STORAGE_ERROR_BASE (B_GENERAL_ERROR_BASE + 0x6000)
+//    #define B_ENTRY_NOT_FOUND (B_STORAGE_ERROR_BASE + 3)
+//    #define B_TO_POSIX_ERROR(error) (error)
+//    #define ENOENT B_TO_POSIX_ERROR(B_ENTRY_NOT_FOUND)
+// The header correctly has errno as a signed int:
+//    extern int *_errnop(void);
+//    #define errno (*(_errnop()))
+// but printing those as though they were unsigned long causes them to get sign-extended
+// and show up as huge positive numbers.  So we have a platform-specific variant of
+// deferrno() which treats them as 'int' to preserve the negative sign, which has the right
+// behavior because the system calls do actually return 'int'.
+void deferrno(char* lisp_name, int unix_number)
+{
+    printf("(defconstant %s %d)\n", lisp_name, unix_number);
+}
+#else
 void deferrno(char* lisp_name, unsigned long unix_number)
 {
     defconstant(lisp_name, unix_number);
 }
+#endif
 
 void defsignal(char* lisp_name, unsigned long unix_number)
 {
@@ -223,9 +251,9 @@ main(int argc, char __attribute__((unused)) *argv[])
     deferrno("ewouldblock", EWOULDBLOCK);
     printf("\n");
 
-    deferrno("sc-nprocessors-onln", _SC_NPROCESSORS_ONLN);
+    defconstant("sc-nprocessors-onln", _SC_NPROCESSORS_ONLN);
 
-    printf(";;; for wait3(2) in run-program.lisp\n");
+    printf(";;; for waitpid() in run-program.lisp\n");
 #ifdef WCONTINUED
     defconstant("wcontinued", WCONTINUED);
 #else
@@ -238,42 +266,9 @@ main(int argc, char __attribute__((unused)) *argv[])
 
     printf(";;; various ioctl(2) flags\n");
     defconstant("tiocgpgrp",  TIOCGPGRP);
-    defconstant("tiocspgrp",  TIOCSPGRP);
-    defconstant("tiocgwinsz", TIOCGWINSZ);
-    defconstant("tiocswinsz", TIOCSWINSZ);
-    /* KLUDGE: These are referenced by old CMUCL-derived code, but
-     * Linux doesn't define them.
-     *
-     * I think these are the BSD names, but I don't know what the
-     * corresponding SysV/Linux names are. As a point of reference,
-     * CMUCL doesn't have these defined either (although the defining
-     * forms *do* exist in src/code/unix.lisp), so I don't feel nearly
-     * so bad about not hunting them down. Insight into renamed
-     * obscure ioctl(2) flags appreciated. --njf, 2002-08-26
-     *
-     * I note that the first one I grepped for, TIOCSIGSEND, is
-     * referenced in SBCL conditional on #+HPUX. Maybe the porters of
-     * Oxbridge know more about things like that? And even if they
-     * don't, one benefit of the Rhodes crusade to heal the worthy
-     * ports should be that afterwards, if we grep for something like
-     * this in CVS and it's not there, we can lightheartedly nuke it.
-     * -- WHN 2002-08-30 */
-    /*
-      defconstant("tiocsigsend", TIOCSIGSEND);
-      defconstant("tiocflush", TIOCFLUSH);
-      defconstant("tiocgetp", TIOCGETP);
-      defconstant("tiocsetp", TIOCSETP);
-      defconstant("tiocgetc", TIOCGETC);
-      defconstant("tiocsetc", TIOCSETC);
-      defconstant("tiocgltc", TIOCGLTC);
-      defconstant("tiocsltc", TIOCSLTC);
-    */
     printf("\n");
 
     printf(";;; signals\n");
-    defconstant("sig-dfl", (unsigned long)SIG_DFL);
-    defconstant("sig-ign", (unsigned long)SIG_IGN);
-
     defsignal("sigalrm", SIGALRM);
     defsignal("sigbus", SIGBUS);
     defsignal("sigchld", SIGCHLD);
@@ -285,8 +280,9 @@ main(int argc, char __attribute__((unused)) *argv[])
     defsignal("sighup", SIGHUP);
     defsignal("sigill", SIGILL);
     defsignal("sigint", SIGINT);
+#ifdef SIGIO
     defsignal("sigio", SIGIO);
-    defsignal("sigiot", SIGIOT);
+#endif
     defsignal("sigkill", SIGKILL);
     defsignal("sigpipe", SIGPIPE);
     defsignal("sigprof", SIGPROF);
@@ -308,9 +304,6 @@ main(int argc, char __attribute__((unused)) *argv[])
     defsignal("sigusr1", SIGUSR1);
     defsignal("sigusr2", SIGUSR2);
     defsignal("sigvtalrm", SIGVTALRM);
-#ifdef SIGWAITING
-    defsignal("sigwaiting", SIGWAITING);
-#endif
     defsignal("sigwinch", SIGWINCH);
 #ifdef SIGXCPU
     defsignal("sigxcpu", SIGXCPU);

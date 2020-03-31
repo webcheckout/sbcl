@@ -11,7 +11,7 @@
 
 (in-package "SB-VM")
 
-(define-vop (debug-cur-sp)
+(define-vop ()
   (:translate current-sp)
   (:policy :fast-safe)
   (:results (res :scs (sap-reg)))
@@ -19,7 +19,7 @@
   (:generator 1
     (move csp-tn res)))
 
-(define-vop (debug-cur-fp)
+(define-vop ()
   (:translate current-fp)
   (:policy :fast-safe)
   (:results (res :scs (sap-reg)))
@@ -27,7 +27,7 @@
   (:generator 1
     (move cfp-tn res)))
 
-(define-vop (read-control-stack)
+(define-vop ()
   (:translate stack-ref)
   (:policy :fast-safe)
   (:args (object :scs (sap-reg) :target sap)
@@ -40,18 +40,7 @@
     (inst addq object offset sap)
     (inst ldl result 0 sap)))
 
-(define-vop (read-control-stack-c)
-  (:translate stack-ref)
-  (:policy :fast-safe)
-  (:args (object :scs (sap-reg)))
-  (:info offset)
-  (:arg-types system-area-pointer (:constant (signed-byte 14)))
-  (:results (result :scs (descriptor-reg)))
-  (:result-types *)
-  (:generator 4
-    (inst ldl result (* offset n-word-bytes) object)))
-
-(define-vop (write-control-stack)
+(define-vop ()
   (:translate %set-stack-ref)
   (:policy :fast-safe)
   (:args (object :scs (sap-reg) :target sap)
@@ -65,20 +54,6 @@
     (inst addq object offset sap)
     (inst stl value 0 sap)
     (move value result)))
-
-(define-vop (write-control-stack-c)
-  (:translate %set-stack-ref)
-  (:policy :fast-safe)
-  (:args (sap :scs (sap-reg))
-         (value :scs (descriptor-reg) :target result))
-  (:info offset)
-  (:arg-types system-area-pointer (:constant (signed-byte 14)) *)
-  (:results (result :scs (descriptor-reg)))
-  (:result-types *)
-  (:generator 1
-    (inst stl value (* offset n-word-bytes) sap)
-    (move value result)))
-
 
 (define-vop (code-from-mumble)
   (:policy :fast-safe)

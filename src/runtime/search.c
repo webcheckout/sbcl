@@ -21,7 +21,7 @@
 #include "genesis/primitive-objects.h"
 #include "genesis/hash-table.h"
 #include "genesis/package.h"
-#include "pseudo-atomic.h" // for get_alloc_pointer()
+#include "getallocptr.h" // for get_alloc_pointer()
 
 lispobj *
 search_read_only_space(void *pointer)
@@ -41,6 +41,19 @@ search_static_space(void *pointer)
     if ((pointer < (void *)start) || (pointer >= (void *)end))
         return NULL;
     return gc_search_space(start, pointer);
+}
+
+lispobj *search_all_gc_spaces(void *pointer)
+{
+    lispobj *start;
+    if (((start = search_dynamic_space(pointer)) != NULL) ||
+#ifdef LISP_FEATURE_IMMOBILE_SPACE
+        ((start = search_immobile_space(pointer)) != NULL) ||
+#endif
+        ((start = search_static_space(pointer)) != NULL) ||
+        ((start = search_read_only_space(pointer)) != NULL))
+        return start;
+    return NULL;
 }
 
 static int __attribute__((unused)) strcmp_ucs4_ascii(uint32_t* a, unsigned char* b,
@@ -168,13 +181,17 @@ static lispobj* search_package_symbols(lispobj package, char* symbol_name,
     return 0;
 }
 
-lispobj* find_symbol(char* symbol_name, char* package_name, unsigned int* hint)
+lispobj sb_kernel_package() {
+    return SYMBOL(FDEFN(SUB_GC_FDEFN)->name)->package;
+}
+
+lispobj find_package(char* package_name)
 {
     // Use SB-KERNEL::SUB-GC to get a hold of the SB-KERNEL package,
     // which contains the symbol *PACKAGE-NAMES*.
     static unsigned int kernelpkg_hint;
-    lispobj kernel_package = SYMBOL(FDEFN(SUB_GC_FDEFN)->name)->package;
-    lispobj* package_names = search_package_symbols(kernel_package, "*PACKAGE-NAMES*",
+    lispobj* package_names = search_package_symbols(sb_kernel_package(),
+                                                    "*PACKAGE-NAMES*",
                                                     &kernelpkg_hint);
     if (!package_names)
         return 0;
@@ -196,11 +213,14 @@ lispobj* find_symbol(char* symbol_name, char* package_name, unsigned int* hint)
                 && string->length == make_fixnum(namelen)
                 && !memcmp(string->data, package_name, namelen)) {
                 element = cells->data[LFHASH_KEY_OFFSET+n+i];
-                if (listp(element))
-                    element = CONS(element)->car;
-                return search_package_symbols(element, symbol_name, hint);
+                return listp(element) ? CONS(element)->car : element;
             }
         }
     }
     return 0;
+}
+
+lispobj* find_symbol(char* symbol_name, lispobj package, unsigned int* hint)
+{
+    return package ? search_package_symbols(package, symbol_name, hint) : 0;
 }

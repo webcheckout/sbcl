@@ -126,6 +126,7 @@
 
 #+linux
 (!gencgc-space-setup #x50000000
+                     :read-only-space-size 0
                      :fixedobj-space-size #.(* 30 1024 1024)
                      :varyobj-space-size #.(* 130 1024 1024)
                      :dynamic-space-start #x1000000000)
@@ -135,9 +136,11 @@
 
 #-linux
 (!gencgc-space-setup #x20000000
+                     #-win32 :read-only-space-size #-win32 0
                      :dynamic-space-start #x1000000000
                      #+openbsd :dynamic-space-size #+openbsd #x1bcf0000)
 
+(defconstant linkage-table-growth-direction :up)
 (defconstant linkage-table-entry-size 16)
 
 
@@ -149,10 +152,14 @@
   fun-end-breakpoint-trap
   single-step-around-trap
   single-step-before-trap
+  undefined-function-trap
   invalid-arg-count-trap
   memory-fault-emulation-trap
   #+sb-safepoint global-safepoint-trap
   #+sb-safepoint csp-safepoint-trap
+  uninitialized-load-trap
+  ;; ERROR-TRAP has to be numerically highest.
+  ;; The various internal errors are numbered from here upward.
   error-trap)
 
 ;;;; static symbols
@@ -203,3 +210,14 @@
 
 #+sb-simd-pack
 (defglobal *simd-pack-element-types* '(integer single-float double-float))
+
+(defconstant undefined-fdefn-header
+  ;; This constant is constructed as follows: Take the INT opcode
+  ;; plus the undefined-fun trap byte, then the bytes of the 'disp' field
+  ;; of the JMP instruction that would overwrite the INT instruction.
+  ;;   INT3 <trap-code> = CC **
+  ;;   JMP [RIP+16]     = FF 25 10 00 00 00 00
+  ;; When assigning a function we'll change the first two bytes to 0xFF 0x25.
+  ;; The 'disp' field will aready be correct.
+  (logior (ash undefined-function-trap 8)
+          (+ #x100000 (or #+int4-breakpoints #xCE #xCC))))

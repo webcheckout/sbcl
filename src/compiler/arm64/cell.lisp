@@ -181,7 +181,7 @@
   (:result-types positive-fixnum)
   (:generator 2
     ;; The symbol-hash slot of NIL holds NIL because it is also the
-    ;; cdr slot, so we have to strip off the two low bits to make sure
+    ;; car slot, so we have to strip off the fixnum-tag-mask to make sure
     ;; it is a fixnum.  The lowtag selection magic that is required to
     ;; ensure this is explained in the comment in objdef.lisp
     (loadw temp symbol symbol-hash-slot other-pointer-lowtag)
@@ -258,7 +258,7 @@
   (:temporary (:scs (non-descriptor-reg)) type)
   (:results (result :scs (descriptor-reg)))
   (:generator 38
-    (inst add-sub lip function (- (* simple-fun-code-offset n-word-bytes)
+    (inst add-sub lip function (- (* simple-fun-insts-offset n-word-bytes)
                                   fun-pointer-lowtag))
     (load-type type function (- fun-pointer-lowtag))
     (inst cmp type simple-fun-widetag)
@@ -440,17 +440,15 @@
 
 ;;;; Instance hackery:
 
-(define-vop (instance-length)
+(define-vop ()
   (:policy :fast-safe)
   (:translate %instance-length)
   (:args (struct :scs (descriptor-reg)))
-  (:temporary (:scs (non-descriptor-reg)) temp)
   (:results (res :scs (unsigned-reg)))
   (:result-types positive-fixnum)
   (:generator 4
-    (loadw temp struct 0 instance-pointer-lowtag)
-    (inst ubfm res temp n-widetag-bits
-          (+ -1 (integer-length short-header-max-words) n-widetag-bits))))
+    (loadw res struct 0 instance-pointer-lowtag)
+    (inst lsr res res n-widetag-bits)))
 
 (define-full-reffer instance-index-ref * instance-slots-offset
   instance-pointer-lowtag (descriptor-reg any-reg) * %instance-ref)

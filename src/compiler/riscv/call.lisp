@@ -106,7 +106,7 @@
     (emit-label start-lab)
     ;; Allocate function header.
     (inst simple-fun-header-word)
-    (inst .skip (* (1- simple-fun-code-offset) n-word-bytes))
+    (inst .skip (* (1- simple-fun-insts-offset) n-word-bytes))
     (inst compute-code code-tn lip start-lab)))
 
 (define-vop (xep-setup-sp)
@@ -650,7 +650,7 @@
                       (inst beq stepping zero-tn STEP-DONE-LABEL)
                       ;; CONTEXT-PC will be pointing here when the
                       ;; interrupt is handled, not after the EBREAK.
-                      (note-this-location vop :step-before-vop)
+                      (note-this-location vop :internal-error)
                       (inst ebreak single-step-around-trap)
                       (inst byte (tn-offset callable-tn))
                       (emit-alignment 2)
@@ -996,8 +996,26 @@
           (inst subi nsp-tn nsp-tn (bytes-needed-for-non-descriptor-stack-frame))
           (move cur-nfp nsp-tn))))))
 
+(define-vop (more-arg-or-nil)
+  (:policy :fast-safe)
+  (:args (object :scs (descriptor-reg) :to (:result 1))
+         (count :scs (any-reg)))
+  (:temporary (:scs (any-reg)) index-temp)
+  (:info index)
+  (:results (value :scs (descriptor-reg any-reg)))
+  (:result-types *)
+  (:generator 3
+    (move value null-tn)
+    (cond ((zerop index)
+           (inst bge zero-tn count done))
+          (t
+           (inst li index-temp (fixnumize index))
+           (inst bge index-temp count done)))
+    (loadw value object index)
+    done))
+
 ;;; Turn more arg (context, count) into a list.
-(define-vop (listify-rest-args)
+(define-vop ()
   (:args (context-arg :target context :scs (descriptor-reg))
          (count-arg :target count :scs (any-reg)))
   (:arg-types * tagged-num)
@@ -1024,7 +1042,7 @@
       ;; We need to do this atomically.
       (pseudo-atomic (pa-flag)
         (inst slli temp count (1+ (- word-shift n-fixnum-tag-bits)))
-        (allocation dst temp list-pointer-lowtag
+        (allocation 'list temp list-pointer-lowtag dst
                     :flag-tn pa-flag
                     :stack-allocate-p dx-p)
         (move result dst)
@@ -1048,8 +1066,8 @@
         (inst bne count zero-tn loop)
 
         ;; NIL out the last cons.
-        (storew null-tn dst 1 list-pointer-lowtag)
-        (emit-label done)))))
+        (storew null-tn dst 1 list-pointer-lowtag))
+      (emit-label done))))
 
 ;;; Return the location and size of the more arg glob created by Copy-More-Arg.
 ;;; Supplied is the total number of arguments supplied (originally passed in
@@ -1061,7 +1079,7 @@
 ;;; supplied - fixed, and return a pointer that many words below the current
 ;;; stack top.
 ;;;
-(define-vop (more-arg-context)
+(define-vop ()
   (:policy :fast-safe)
   (:translate sb-c::%more-arg-context)
   (:args (supplied :scs (any-reg) :target temp))
@@ -1117,7 +1135,7 @@
     (inst beq stepping zero-tn DONE)
     ;; CONTEXT-PC will be pointing here when the interrupt is handled,
     ;; not after the EBREAK.
-    (note-this-location vop :step-before-vop)
+    (note-this-location vop :internal-error)
     ;; CALLEE-REGISTER-OFFSET isn't needed for before-traps, so we
     ;; can just use a bare SINGLE-STEP-BEFORE-TRAP as the code.
     (inst ebreak single-step-before-trap)

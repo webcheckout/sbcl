@@ -449,6 +449,14 @@
     `(lambda (e) (search '(a) '(b) :end1 e))
     ((0) 0)))
 
+(with-test (:name (search :type-derivation))
+  (checked-compile-and-assert
+   ()
+   `(lambda (a b)
+      (eql (search a (the (simple-vector 2) b) :from-end t) 2))
+   ((#() #(1 2)) t)
+   ((#(1) #(1 2)) nil)))
+
 (with-test (:name (count :no-consing)
             :skipped-on :interpreter)
   (let ((f (checked-compile
@@ -456,3 +464,64 @@
               (count 1 x)))))
     (ctu:assert-no-consing (funcall f #(1 2 3 4)))
     (ctu:assert-no-consing (funcall f '(1 2 3 4)))))
+
+(with-test (:name :hash-based-position)
+  (let* ((items '(a b c d d d h e f b g b))
+         (f (checked-compile
+             `(lambda (x) (position x ',items))))
+         (g (checked-compile
+             `(lambda (x) (position x ',items :from-end t)))))
+    (dolist (x items)
+      ;; opaque-identify prevents optimizing the POSITION call
+      (assert (= (funcall f x) (position x (opaque-identity items))))
+      (assert (= (funcall g x) (position x (opaque-identity items) :from-end t))))
+    (assert (not (funcall f 'blah)))
+    (assert (not (funcall g 'blah)))))
+
+(with-test (:name :hash-based-position-type-derivation)
+  ;; should neither crash nor warn about NIL being fed into ASH
+  (checked-compile '(lambda (x)
+                     (declare (type (member a b) x))
+                     (ash 1 (position x #(a b c d d e f))))))
+
+(with-test (:name :position-empty-seq)
+  (assert (not (funcall (checked-compile '(lambda (x) (position x #()))) 1))))
+
+(with-test (:name :hash-based-memq)
+  (let* ((f (checked-compile
+             '(lambda (x)
+               (if (member x '(:and :or :not and or not)) t nil))))
+         (consts (ctu:find-code-constants f :type 'vector)))
+    ;; Since there's no canonical order within a bin - we don't know
+    ;; whether bin 0 is {:AND,AND} or {AND,:AND} - this gets tricky to check.
+    ;; This is unfortunately a change-detector (if we alter SXHASH, or anything).
+    (assert (equalp (car consts) #(:and and :not not :or or 0 0)))))
+
+(with-test (:name :memq-empty-seq)
+  (assert (not (funcall (checked-compile '(lambda (x) (member x '()))) 1)))
+  (assert (not (funcall (checked-compile '(lambda (x) (sb-int:memq x '()))) 1))))
+
+(with-test (:name :adjoin-key-eq-comparable)
+  (checked-compile-and-assert
+      ()
+      `(lambda (x y)
+         (adjoin (list x) y :key 'car))
+      ((3d0 '((3d0))) '((3d0)) :test #'equal)))
+
+(with-test (:name :fill-transform-bounds-checks)
+  (checked-compile-and-assert
+      (:optimize :default)
+      `(lambda (item start end)
+         (fill (make-array 3 :element-type '(unsigned-byte 8)) item :start start :end end))
+    ((2 0 nil) #(2 2 2) :test #'equalp)
+    ((2 10 10)  (condition 'sb-kernel:bounding-indices-bad-error))
+    ((2 2 1)  (condition 'sb-kernel:bounding-indices-bad-error))
+    ((2 10 nil)  (condition 'sb-kernel:bounding-indices-bad-error))))
+
+(with-test (:name :fill-transform-derive-type)
+  (assert
+   (equal (sb-kernel:%simple-fun-type
+           (checked-compile
+            '(lambda (x)
+              (fill (the (simple-array (unsigned-byte 32) (*)) x) 0))))
+          '(FUNCTION (T) (VALUES (SIMPLE-ARRAY (UNSIGNED-BYTE 32) (*)) &OPTIONAL)))))

@@ -61,9 +61,10 @@
   (defreg l1 24) ; tagged temporary 1
   (defreg alloc 25) ; ALLOC pointer
   ;; 26 and 27 are used by the system kernel.
-  ;; 28 is the global pointer of our C runtime, and used for
-  ;; jump/branch relaxation in Lisp.
-  (defreg gp 28)
+  (defreg k0 26)
+  (defreg k1 27)
+  ;; 28 is the global pointer of our C runtime
+  (defreg gp-do-not-use 28)
   (defreg nsp 29) ; number (native) stack pointer
   ;; C frame pointer, or additional saved register.
   (defreg code 30) ; current function object
@@ -79,7 +80,6 @@
   (defregset *register-arg-offsets*
       a0 a1 a2 a3 a4 a5)
 
-  ;; OAOOM: Same as runtime/mips-lispregs.h
   (defregset boxed-regs
       a0 a1 a2 a3 a4 a5 fdefn lexenv
       nfp ocfp lra l0 l1 code)

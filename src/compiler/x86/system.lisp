@@ -121,10 +121,7 @@
   (:policy :fast-safe)
   (:generator 1
     (move res ptr)
-    ;; Mask the lowtag, and shift the whole address into a positive
-    ;; fixnum.
-    (inst and res (lognot lowtag-mask))
-    (inst shr res 1)))
+    (inst and res (lognot fixnum-tag-mask))))
 
 ;;;; allocation
 
@@ -215,7 +212,7 @@
     (inst lea result
           (make-ea :byte :base result
                    :disp (- fun-pointer-lowtag
-                            (* simple-fun-code-offset n-word-bytes))))))
+                            (* simple-fun-insts-offset n-word-bytes))))))
 
 ;;;; symbol frobbing
 
@@ -235,7 +232,7 @@
     (inst lea eax (make-ea :dword :base res :disp (- list-pointer-lowtag)))
     (emit-optimized-test-inst eax lowtag-mask)
     (inst cmov :e res
-          (make-ea-for-object-slot res cons-cdr-slot list-pointer-lowtag))))
+          (object-slot-ea res cons-cdr-slot list-pointer-lowtag))))
 (define-vop (symbol-plist)
   (:policy :fast-safe)
   (:translate symbol-plist)
@@ -404,7 +401,7 @@ number of CPU cycles elapsed as secondary value. EXPERIMENTAL."
   (:translate %data-dependency-barrier)
   (:generator 3))
 
-(define-vop (pause)
+(define-vop ()
   (:translate spin-loop-hint)
   (:policy :fast-safe)
   (:generator 0

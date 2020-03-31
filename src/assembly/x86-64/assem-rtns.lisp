@@ -33,7 +33,8 @@
      (:temp loop-index unsigned-reg r9-offset))
 
   ;; Pick off the cases where everything fits in register args.
-  (inst jrcxz ZERO-VALUES)
+  (inst test rcx rcx)
+  (inst jmp :z ZERO-VALUES)
   (inst cmp rcx (fixnumize 1))
   (inst jmp :e ONE-VALUE)
   (inst cmp rcx (fixnumize 2))
@@ -247,17 +248,10 @@
   (inst jmp :b undefined)
 
   (loadw length vector 1 other-pointer-lowtag)
-  (inst mov fun (ea (- 8 other-pointer-lowtag) vector length 4))
+  (inst mov fun (ea (- 8 other-pointer-lowtag) vector length
+                    (ash 1 (- word-shift n-fixnum-tag-bits))))
 
-  (let ((fdefn-raw-addr
-          (ea (- (* fdefn-raw-addr-slot n-word-bytes) other-pointer-lowtag)
-              fun)))
-    #+immobile-code
-    (progn
-      (inst lea vector fdefn-raw-addr)
-      (inst jmp vector))
-    #-immobile-code
-    (inst jmp fdefn-raw-addr))
+  (inst jmp (ea (- (* fdefn-raw-addr-slot n-word-bytes) other-pointer-lowtag) fun))
   UNDEFINED
   (inst jmp (make-fixup 'undefined-tramp :assembly-routine))
   NOT-CALLABLE
@@ -296,7 +290,7 @@
     (inst test catch catch)             ; check for NULL pointer
     (inst jmp :z error))
 
-  (inst cmp target (make-ea-for-object-slot catch catch-block-tag-slot 0))
+  (inst cmp target (object-slot-ea catch catch-block-tag-slot 0))
   (inst jmp :e EXIT)
 
   (loadw catch catch catch-block-previous-catch-slot)
@@ -335,7 +329,7 @@
   ;; Does *CURRENT-UNWIND-PROTECT-BLOCK* match the value stored in
   ;; argument's CURRENT-UWP-SLOT?
   (inst cmp uwp
-        (make-ea-for-object-slot block unwind-block-uwp-slot 0))
+        (object-slot-ea block unwind-block-uwp-slot 0))
   ;; If a match, return to conitext in arg block.
   (inst jmp :e DO-EXIT)
 
@@ -345,17 +339,25 @@
   (move block uwp)
   ;; Set next unwind protect context.
   (loadw uwp uwp unwind-block-uwp-slot)
-  (store-tl-symbol-value uwp *current-unwind-protect-block*)
 
   DO-EXIT
+
+  ;; Need to perform unbinding before unlinking the UWP so that if
+  ;; interrupted here it can still run the clean up form. While the
+  ;; cleanup form itself cannot be protected from interrupts (can't
+  ;; run it twice) one of the variables being unbound can be
+  ;; *interrupts-enabled*
+  (loadw where block unwind-block-bsp-slot)
+  (unbind-to-here where symbol value temp-reg-tn zero)
+
+  (store-tl-symbol-value uwp *current-unwind-protect-block*)
 
   (loadw rbp-tn block unwind-block-cfp-slot)
 
   (loadw uwp block unwind-block-current-catch-slot)
   (store-tl-symbol-value uwp *current-catch-block*)
 
-  (loadw where block unwind-block-bsp-slot)
-  (unbind-to-here where symbol value uwp zero)
+
   ;; Uwp-entry expects some things in known locations so that they can
   ;; be saved on the stack: the block in rdx-tn, start in rbx-tn, and
   ;; count in rcx-tn.
@@ -370,12 +372,8 @@
     ;; to stack, because we do do not give the register allocator access to it.
     ;; And call_into_lisp saves it as per convention, not that it matters,
     ;; because there's no way to get back into C code anyhow.
-    #+sb-dynamic-core
-    (progn
-      (inst mov thread-base-tn (ea (make-fixup "all_threads" :foreign-dataref)))
-      (inst mov thread-base-tn (ea thread-base-tn)))
-    #-sb-dynamic-core
-    (inst mov thread-base-tn (ea (make-fixup "all_threads" :foreign)))))
+    (inst mov thread-base-tn (ea (make-fixup "all_threads" :foreign-dataref)))
+    (inst mov thread-base-tn (ea thread-base-tn))))
 
 ;;; Perform a store to code, updating the GC page (card) protection bits.
 ;;; This is not a "good" implementation of soft card marking.

@@ -89,6 +89,7 @@
              (:copier nil))
   (contents nil :type vector   :read-only t)
   (keyfun   nil :type function :read-only t))
+(declaim (freeze-type priority-queue))
 
 (defmethod print-object ((object priority-queue) stream)
   (print-unreadable-object (object stream :type t :identity t)
@@ -144,6 +145,7 @@ future versions."
   (thread             nil :type (or sb-thread:thread boolean))
   (interrupt-function nil :type (or null function))
   (cancel-function    nil :type (or null function)))
+(declaim (freeze-type timer))
 
 (defmethod print-object ((timer timer) stream)
   (let ((name (%timer-name timer)))
@@ -368,15 +370,15 @@ triggers."
         (prog1
             (setf *waitable-timer-handle* (os-create-wtimer))
           (setf *timer-thread*
-                (sb-thread:make-thread
+                (sb-thread::make-ephemeral-thread
+                 "System timer watchdog thread"
                  (lambda ()
                    (loop while
-                        (or (zerop
-                             (os-wait-for-wtimer *waitable-timer-handle*))
-                            *waitable-timer-handle*)
-                        doing (run-expired-timers)))
-                 :ephemeral t
-                 :name "System timer watchdog thread")))))
+                         (or (zerop
+                              (os-wait-for-wtimer *waitable-timer-handle*))
+                             *waitable-timer-handle*)
+                         doing (run-expired-timers)))
+                 nil)))))
 
   (defun itimer-emulation-deinit ()
     (with-scheduler-lock ()

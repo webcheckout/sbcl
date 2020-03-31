@@ -23,15 +23,21 @@
 
 ;;; Instruction-like macros.
 
-(defmacro move (dst src &optional (always-emit-code-p nil))
-  "Move SRC into DST (unless they are location= and ALWAYS-EMIT-CODE-P
-is nil)."
+(defmacro move (dst src)
+  "Move SRC into DST unless they are location="
+  (once-only ((n-dst dst)
+              (n-src src))
+    `(unless (location= ,n-dst ,n-src)
+       (inst move ,n-dst ,n-src))))
+(defmacro emit-nop-or-move (dst src)
+  "Move SRC into DST, but if they are location= then emit a NOP"
   (once-only ((n-dst dst)
               (n-src src))
     `(if (location= ,n-dst ,n-src)
-         (when ,always-emit-code-p
-           (inst nop))
+         (inst nop)
          (inst move ,n-dst ,n-src))))
+(defmacro zeroize (reg)
+  `(inst move ,reg zero-tn))
 
 (defmacro def-mem-op (op inst shift load)
   `(defmacro ,op (object base &optional (offset 0) (lowtag 0))
@@ -79,10 +85,10 @@ byte-ordering issues."
 (defmacro lisp-jump (function lip)
   "Jump to the lisp function FUNCTION.  LIP is an interior-reg temporary."
   `(progn
-     (inst addu ,lip ,function (- (ash simple-fun-code-offset word-shift)
+     (inst addu ,lip ,function (- (ash simple-fun-insts-offset word-shift)
                                    fun-pointer-lowtag))
      (inst j ,lip)
-     (move code-tn ,function t)))
+     (emit-nop-or-move code-tn ,function)))
 
 (defmacro lisp-return (return-pc lip &key (offset 0) (frob-code t))
   "Return to RETURN-PC.  LIP is an interior-reg temporary."
@@ -91,7 +97,7 @@ byte-ordering issues."
            (- (* (1+ ,offset) n-word-bytes) other-pointer-lowtag))
      (inst j ,lip)
      ,(if frob-code
-          `(move code-tn ,return-pc t)
+          `(emit-nop-or-move code-tn ,return-pc)
           '(inst nop))))
 
 
@@ -156,7 +162,7 @@ placed inside the PSEUDO-ATOMIC, and presumably initializes the object."
          (pseudo-atomic (,flag-tn)
            (align-csp ,temp-tn)
            (inst or ,result-tn csp-tn ,lowtag)
-           (inst li ,temp-tn (logior (ash (1- ,size) n-widetag-bits) ,type-code))
+           (inst li ,temp-tn (compute-object-header ,size ,type-code))
            (inst addu csp-tn (pad-data-block ,size))
            (storew ,temp-tn ,result-tn 0 ,lowtag)
            ,@body)
@@ -166,7 +172,7 @@ placed inside the PSEUDO-ATOMIC, and presumably initializes the object."
            ;; we need to subtract the pseudo-atomic bit.
            (inst or ,result-tn alloc-tn ,lowtag)
            (unless (logbitp 0 ,lowtag) (inst subu ,result-tn 1))
-           (inst li ,temp-tn (logior (ash (1- ,size) n-widetag-bits) ,type-code))
+           (inst li ,temp-tn (compute-object-header ,size ,type-code))
            (storew ,temp-tn ,result-tn 0 ,lowtag)
            ,@body))))
 

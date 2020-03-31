@@ -193,7 +193,8 @@
                   ;; as dumpable literals.
                   (and (eq function 'sb-impl::%defun) (fopcompilable-p (fourth form)))
                   (member function '(sb-pcl::!trivial-defmethod
-                                     sb-kernel::%defstruct))
+                                     sb-kernel::%defstruct
+                                     sb-thread:make-mutex))
                   ;; allow DEF{CONSTANT,PARAMETER} only if the value form is ok
                   (and (member function '(%defconstant sb-impl::%defparameter))
                        (fopcompilable-p (third form)))
@@ -417,7 +418,7 @@
                            (loop for (arg . next) on args
                              do (fopcompile arg path
                                             (if next nil for-value-p)))))
-                      ((setq #+sb-xc-host sb-fasl::setq-no-questions-asked)
+                      ((setq)
                        (if (and for-value-p (endp args))
                            (fopcompile nil path t)
                            (loop for (name value . next) on args by #'cddr

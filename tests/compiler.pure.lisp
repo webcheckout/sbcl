@@ -2880,7 +2880,7 @@
 (with-test (:name (compile :hairy-array-element-type-derivation))
   (checked-compile
    '(lambda (x)
-     (declare (type (and simple-string (satisfies array-has-fill-pointer-p)) x))
+     (declare (type (and simple-string (satisfies eval)) x))
      (array-element-type x))))
 
 (with-test (:name (compile &rest :derive-type 1))
@@ -3716,10 +3716,10 @@
 (with-test (:name :bug-316078)
   (let ((fun (checked-compile
               `(lambda (x)
-                 (declare (type (and simple-bit-vector (satisfies bar)) x)
+                 (declare (type (and simple-bit-vector (satisfies eval)) x)
                           (optimize speed))
                  (elt x 5)))))
-    (assert (not (ctu:find-named-callees fun)))
+    (assert (equal (ctu:find-named-callees fun) (list #'eval)))
     (assert (= 1 (funcall fun #*000001)))
     (assert (= 0 (funcall fun #*000010)))))
 
@@ -5238,19 +5238,19 @@
     ;; a vop by its name in a place that would otherwise be agnostic of the
     ;; backend were it not for my inability to test all platforms.
     (assert (< (approx-lines-of-assembly-code
-                '(simple-array * (*))) 25))
+                '(simple-array * (*))) (+ 25 #+sb-safepoint 2)))
     ;; this tested all possible widetags one at a time, e.g. in VECTOR-SAP
     (assert (< (approx-lines-of-assembly-code
-                '(sb-kernel:simple-unboxed-array (*))) 25))
+                '(sb-kernel:simple-unboxed-array (*))) (+ 25 #+sb-safepoint 2)))
     ;; This is actually a strange type but it's what ANSI-STREAM-READ-N-BYTES
     ;; declares as its buffer, which would choke in %BYTE-BLT if you gave it
     ;; (simple-array t (*)). But that's a different problem.
     (assert (< (approx-lines-of-assembly-code
-                '(or system-area-pointer (simple-array * (*)))) 29))
+                '(or system-area-pointer (simple-array * (*)))) (+ 29 #+sb-safepoint 2)))
     ;; And this was used by %BYTE-BLT which tested widetags one-at-a-time.
     (assert (< (approx-lines-of-assembly-code
                 '(or system-area-pointer (sb-kernel:simple-unboxed-array (*))))
-               29))))
+               (+ 29 #+sb-safepoint 2)))))
 
 (with-test (:name :local-argument-mismatch-error-string)
   (multiple-value-bind (fun failurep warnings)
@@ -6082,7 +6082,7 @@
                           '(2 4 3))
                  3)))
 
-(with-test (:name :usigned-word-float-conversion)
+(with-test (:name :unsigned-word-float-conversion)
   (assert (= (rational (funcall (checked-compile `(lambda (x)
                                                     (float (the sb-ext:word x) 1d0)))
                                 sb-ext:most-positive-word))
@@ -6456,3 +6456,23 @@
                 (type (eql -1) p2))
        (logandc1 p1 p2))
     ((-3 -1) 2)))
+
+;;; A user reported a potential compiler bug when SBCL consumed all its memory
+;;; while trying to compile a "trivial" wrapper macro similar to this one.
+;;; (because MACROLET is not FLET)
+(with-test (:name :macrolet-infinite-loop-detection)
+  (multiple-value-bind (fun warningsp errorp)
+      (compile nil
+               '(lambda (x)
+                  (macrolet ((complicated-fun (&rest keys)
+                               `(complicated-fun :a 1 ,@keys)))
+                    (complicated-fun :x 9))))
+    (assert (and fun warningsp errorp))))
+
+;;; This SAP+ call overflowed the size of an immediate on MIPS.
+;;; 'bit-vector.impure.lisp' exposed this bug where it computes
+;;;   (sb-sys:sap+ first sb-c:+backend-page-bytes+)
+;;; which is not the ideal place to fail, considering that
+;;; pointer arithmetic is not what's being tested.
+(with-test (:name :sap+-immediate)
+  (compile nil '(lambda (x) (sb-sys:sap+ x 65536))))

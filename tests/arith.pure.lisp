@@ -821,3 +821,16 @@
     (((1- (ash 1 32))) 32)
     (((1- (ash 1 48))) 48)
     (((1- (ash 1 54))) 54)))
+
+(with-test (:name :complex-rational-eql)
+  ;; ensure no funny business with constant sharing so that we're forced
+  ;; to do the most general form or EQL on two (complex rational)s
+  (eql (read-from-string "#c(1/2 1/3)") (read-from-string "#c(1/2 1/3)")))
+
+(with-test (:name :gcd-derive-type)
+  (checked-compile-and-assert
+   ()
+   '(lambda (a)
+     (declare (type (integer -142 -29) a))
+     (eql (gcd (setq a -29) a) 1))
+   ((-33) nil)))

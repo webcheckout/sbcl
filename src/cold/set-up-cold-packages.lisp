@@ -148,6 +148,8 @@
   (name (error "missing PACKAGE-DATA-NAME datum"))
   ;; a doc string
   (doc (error "missing PACKAGE-DOC datum"))
+  ;; a list of string designators for shadowing symbols
+  shadow
   ;; a tree containing names for exported symbols which'll be set up at package
   ;; creation time, and NILs, which are ignored. (This is a tree in order to
   ;; allow constructs like '("ENOSPC" #+LINUX ("EDQUOT" "EISNAM" "ENAVAIL"
@@ -190,6 +192,12 @@
     "COERCE" "EXP" "EXPT" "LOG" "SIGNUM" "IMAGPART" "REALPART"
     "ZEROP" "ABS" "SIGNUM" "FLOAT-SIGN"
     "CEILING" "FLOOR" "ROUND" "TRUNCATE" "MOD" "REM"
+    ;; We always want irrational functions to use target floats.
+    "ACOS" "ACOSH" "ASIN" "ASINH" "ATAN" "ATANH"  "CIS" "CONJUGATE"
+    "COS" "COSH"  "FCEILING" "FFLOOR" "FROUND" "FTRUNCATE"
+    "PHASE" "RATIONALIZE" "SIN" "SINH" "SQRT" "TAN" "TANH"
+    ;;
+    "SXHASH" ; must package-qualify if you mean CL:SXHASH
     ;;
     "BYTE" "BYTE-POSITION" "BYTE-SIZE"
     "DPB" "LDB" "LDB-TEST"
@@ -210,7 +218,14 @@
 ;;;   (* 50 (hash-table-rehash-threshold (make-hash-table)))
 ;;; because we are not intercepting '*.
 (defparameter *dual-personality-math-symbols*
-  '("+" "-" "*" "/" "=" "/=" "<" "<=" ">" ">=" "MIN" "MAX"))
+  '("+" "-" "*" "/" "=" "/=" "<" "<=" ">" ">=" "MIN" "MAX"
+    ;; We've gotten along quite well without an alter-ego for FIXNUM,
+    ;; but now some s-expressions mentioning the type FIXNUM are fed
+    ;; to the host for evaluation, and a type-checking host (such as we are)
+    ;; croaks if an argument exceeds the host's notion of fixnum.
+    ;; Get around it by changing those uses of fixnum to SB-XC:FIXNUM.
+    "FIXNUM"
+    ))
 
 ;;; When playing such tricky package games, it's best to have the symbols that
 ;;; are visible by default, i.e. XC-STRICT-CL:NAME, have no definition,
@@ -222,11 +237,6 @@
 ;;; see by default, so that using them by accident fails.
 (defparameter *undefineds*
   '("SYMBOL-PACKAGE"
-    ;; Irrational functions are never used in the cross-compiler (yet).
-    ;; Prove that by making them undefined.
-    "ACOS" "ACOSH" "ASIN" "ASINH" "ATAN" "ATANH"  "CIS" "CONJUGATE"
-    "COS" "COSH"  "FCEILING" "FFLOOR" "FROUND" "FTRUNCATE"
-    "PHASE" "RATIONALIZE" "SIN" "SINH" "SQRT" "TAN" "TANH"
     ;; Float decoding: don't want to see these used either.
     "DECODE-FLOAT" "INTEGER-DECODE-FLOAT"
     "FLOAT-DIGITS" "FLOAT-PRECISION" "FLOAT-RADIX"
@@ -382,8 +392,16 @@
 
 (defun create-target-packages (package-data-list)
   (labels ((flatten (tree)
-             (mapcan (lambda (x) (if (listp x) (flatten x) (list x)))
-                     tree)))
+             (let ((result (mapcan (lambda (x) (if (listp x) (flatten x) (list x)))
+                                   tree)))
+               (when (< (length (remove-duplicates result :test 'equal))
+                        (length result))
+                 (error "Duplicates in package-data-list: ~a~%"
+                        (mapcon (lambda (x)
+                                  (when (member (car x) (cdr x) :test 'equal)
+                                    (list (car x))))
+                                result)))
+               result)))
 
     (hide-host-packages)
 
@@ -392,6 +410,9 @@
     (dolist (package-data package-data-list)
       (let* ((name (package-data-name package-data))
              (package (make-package name :use nil)))
+        ;; Walk the tree of shadowing names
+        (dolist (string (flatten (package-data-shadow package-data)))
+          (shadow string package))
         ;; Walk the tree of exported names, exporting each name.
         (dolist (string (flatten (package-data-export package-data)))
           (export (intern string package) package))))
@@ -489,3 +510,34 @@
             (list (make-package-data :name asm-package
                                      :use (list* "CL" *asm-package-use-list*)
                                      :doc nil)))))
+
+;;; Not all things shown by this are actually unused. Some get removed
+;;; by the tree-shaker as intended.
+#+nil
+(defun show-unused-exports (&aux nonexistent uninteresting)
+  (dolist (entry (with-open-file (f "package-data-list.lisp-expr") (read f)))
+    (let ((pkg (find-package (package-data-name entry))))
+      (dolist (string (mapcan (lambda (x) (if (stringp x) (list x) x))
+                              (package-data-export entry)))
+        (unless (or (string= string "!" :end1 1) (string= string "*!" :end1 2))
+          (let ((s (find-symbol string pkg)))
+            (cond ((not s)
+                   (push (cons pkg string) nonexistent))
+                  ((and (not (boundp s))
+                        (not (sb-kernel:symbol-info s))
+                        (not (gethash s sb-c::*backend-parsed-vops*)))
+                   (push s uninteresting))))))))
+  (format t "~&Nonexistent:~%")
+  (dolist (x nonexistent)
+    (format t "  ~a ~a~%" (package-name (car x)) (cdr x)))
+  (format t "~&Possibly uninteresting:~%")
+  ;; FIXME: prints some things that it shouldn't as "uninteresting"
+  ;; including but not limited to:
+  ;;   - alien struct slot names
+  ;;   - catch tag names (e.g. 'TOPLEVEL-CATCHER)
+  ;;   - declarations
+  ;;   - restart names
+  ;;   - object-not-<type>-error
+  ;;   - markers such as SB-SYS:MACRO (in lexenvs)
+  (dolist (x uninteresting)
+    (format t "  ~s~%" x)))

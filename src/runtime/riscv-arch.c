@@ -23,11 +23,6 @@
 #include "interr.h"
 #include "breakpoint.h"
 
-void arch_init(void)
-{
-    return;
-}
-
 os_vm_address_t
 arch_get_bad_addr(int signam, siginfo_t *siginfo, os_context_t *context)
 {
@@ -106,7 +101,7 @@ arch_handle_breakpoint(os_context_t *context)
 void
 arch_handle_fun_end_breakpoint(os_context_t *context)
 {
-    *os_context_pc_addr(context) = (int) handle_fun_end_breakpoint(context);
+    *os_context_pc_addr(context) = (long) handle_fun_end_breakpoint(context);
 }
 
 void
@@ -128,7 +123,7 @@ sigtrap_handler(int signal, siginfo_t *info, os_context_t *context)
     u32 trap_instruction = *((u32 *)*os_context_pc_addr(context));
 
     if (trap_instruction != 0x100073) {
-        lose("Unrecognized trap instruction %08lx in sigtrap_handler()",
+        lose("Unrecognized trap instruction %08x in sigtrap_handler()",
              trap_instruction);
     }
 
@@ -147,60 +142,11 @@ arch_install_interrupt_handlers(void)
     undoably_install_low_level_interrupt_handler(SIGTRAP, sigtrap_handler);
 }
 
-#ifdef LISP_FEATURE_LINKAGE_TABLE
-
-/* Linkage tables
- *
- * Linkage entry size is 8 or 20, because we need 2 instructions for the 32-bit case and we need 3 instructions and an 8 byte address in the 64-bit case.
- */
-
-#define LINKAGE_TEMP_REG reg_NL7
-
-void arch_write_linkage_table_entry(char *reloc_addr, void *target_addr, int datap)
+/* Linkage table */
+void arch_write_linkage_table_entry(int index, void *target_addr, int datap)
 {
-    if (datap) {
-      *(unsigned long *)reloc_addr = (unsigned long)target_addr;
-      return;
-    }
-    int* inst_ptr;
-    unsigned inst;
-
-    inst_ptr = (int*) reloc_addr;
-
-#ifndef LISP_FEATURE_64_BIT
-    /*
-      lui   reg, %hi(address)
-      jr    reg, %lo(address)
-    */
-    unsigned int addr = (unsigned int)target_addr;
-    unsigned int hi = ((addr + 0x800) >> 12);
-    int lo = addr - (hi << 12);
-
-    inst = 0x37 | LINKAGE_TEMP_REG << 7 | hi << 12;
-    *inst_ptr++ = inst;
-
-    inst = 0x67 | LINKAGE_TEMP_REG << 15 | lo << 20;
-    *inst_ptr++ = inst;
-#else
-    /*
-      auipc reg, 0
-      load reg, 12(reg)
-      jr  reg
-      address
-    */
-
-    inst = 0x17 | LINKAGE_TEMP_REG << 7;
-    *inst_ptr++ = inst;
-
-    inst = 0x3 | LINKAGE_TEMP_REG << 7 | WORD_SHIFT << 12 | LINKAGE_TEMP_REG << 15 | 12 << 20;
-    *inst_ptr++ = inst;
-
-    inst = 0x67 | LINKAGE_TEMP_REG << 15;
-    *inst_ptr++ = inst;
-
-    *(unsigned long *)inst_ptr++ = (unsigned long)target_addr;
-#endif
-
-    os_flush_icache((os_vm_address_t) reloc_addr, (char*) inst_ptr - reloc_addr);
+    // allocate successive entries downward
+    char *reloc_addr =
+        (char*)LINKAGE_TABLE_SPACE_END - (index + 1) * LINKAGE_TABLE_ENTRY_SIZE;
+    *(uword_t*)reloc_addr = (uword_t)target_addr;
 }
-#endif

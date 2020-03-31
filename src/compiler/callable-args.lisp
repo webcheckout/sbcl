@@ -170,7 +170,7 @@
                                (leaf-type leaf))
                               ((:defined :defined-here)
                                (if (or (and (defined-fun-p leaf)
-                                            (eq (defined-fun-inlinep leaf) :notinline))
+                                            (eq (defined-fun-inlinep leaf) 'notinline))
                                        declared-only
                                        (and defined-here
                                             (eq (leaf-where-from leaf) :defined))
@@ -200,7 +200,9 @@
                            lvar-type)))
          (fun-name (cond ((or (fun-type-p lvar-type)
                               (functional-p leaf))
-                          (cond ((constant-lvar-p lvar)
+                          (cond ((or (constant-lvar-p lvar)
+                                     ;; A constant may fail some checks in constant-lvar-p
+                                     (constant-p leaf))
                                  (let ((value (lvar-value lvar)))
                                    (etypecase value
                                      #-sb-xc-host

@@ -11,9 +11,6 @@
 
 (in-package "SB-IMPL")
 
-(defun pointer-hash (key)
-  (pointer-hash key))
-
 ;;; the depthoid explored when calculating hash values
 ;;;
 ;;; "Depthoid" here is a sort of mixture of what Common Lisp ordinarily calls
@@ -71,6 +68,17 @@
          (xy (logand (+ (* x mul) y) sb-xc:most-positive-fixnum)))
     (logand (logxor xor xy (ash xy -5)) sb-xc:most-positive-fixnum)))
 
+;;; Same as above, but don't mask computations to n-positive-fixnum-bits.
+(declaim (inline word-mix))
+(defun word-mix (x y)
+  (declare (optimize (speed 3)))
+  (declare (type word x y))
+  (declare (muffle-conditions compiler-note))
+  (let* ((mul (logand 3622009729038463111 most-positive-word))
+         (xor (logand 608948948376289905 most-positive-word))
+         (xy (logand (+ (* x mul) y) most-positive-word)))
+    (logand (logxor xor xy (ash xy -5)) most-positive-word)))
+
 ;; Return a number that increments by 1 for each word-pair allocation,
 ;; barring complications such as exhaustion of the current page.
 ;; The result is guaranteed to be a positive fixnum.
@@ -81,8 +89,13 @@
   ;; dynamic-space-free-pointer increments only when a page is full.
   ;; Using boxed_region directly is finer-grained.
   #+(and (not sb-thread) gencgc)
-  (ash (extern-alien "gc_alloc_region" unsigned-long)
-       (- (1+ sb-vm:word-shift)))
+  (progn #+(or arm arm64 riscv x86 x86-64 ppc ppc64) ; new way: alloc_region is in static space
+         (ash (sb-sys:sap-ref-word (sb-sys:int-sap sb-vm:static-space-start)
+                                   (* 2 sb-vm:n-word-bytes))
+              (- (1+ sb-vm:word-shift)))
+         #-(or arm arm64 riscv x86 x86-64 ppc ppc64) ; old way: alloc_region is in C data
+         (ash (extern-alien "gc_alloc_region" unsigned-long)
+              (- (1+ sb-vm:word-shift))))
   ;; threads imply gencgc. use the per-thread alloc region pointer
   #+sb-thread
   (ash (sap-int (sb-vm::current-thread-offset-sap
@@ -102,66 +115,6 @@
           mask))
 
 
-;;;; hashing strings
-;;;;
-;;;; Note that this operation is used in compiler symbol table
-;;;; lookups, so we'd like it to be fast.
-;;;;
-;;;; As of 2004-03-10, we implement the one-at-a-time algorithm
-;;;; designed by Bob Jenkins (see
-;;;; <http://burtleburtle.net/bob/hash/doobs.html> for some more
-;;;; information).
-
-(declaim (inline %sxhash-simple-substring))
-(defun %sxhash-simple-substring (string start end)
-  ;; FIXME: As in MIX above, we wouldn't need (SAFETY 0) here if the
-  ;; cross-compiler were smarter about ASH, but we need it for
-  ;; sbcl-0.5.0m.  (probably no longer true?  We might need SAFETY 0
-  ;; to elide some type checks, but then again if this is inlined in
-  ;; all the critical places, we might not -- CSR, 2004-03-10)
-  (declare (optimize (speed 3) (safety 0)))
-  (macrolet ((guts ()
-               `(loop for i of-type index from start below end do
-                  (set-result (+ result (char-code (aref string i))))
-                  (set-result (+ result (ash result 10)))
-                  (set-result (logxor result (ash result -6)))))
-             (set-result (form)
-               `(setf result (ldb (byte #.sb-vm:n-word-bits 0) ,form))))
-    (let ((result 238625159)) ; (logandc2 most-positive-fixnum (sxhash #\S)) on 32 bits
-      (declare (type word result))
-      ;; Avoid accessing elements of a (simple-array nil (*)).
-      ;; The expansion of STRING-DISPATCH involves ETYPECASE,
-      ;; so we can't simply omit one case. Therefore that macro
-      ;; is unusable here.
-      (typecase string
-        (simple-base-string (guts))
-        ((simple-array character (*)) (guts)))
-      (set-result (+ result (ash result 3)))
-      (set-result (logxor result (ash result -11)))
-      (set-result (logxor result (ash result 15)))
-      (logand result sb-xc:most-positive-fixnum))))
-;;; test:
-;;;   (let ((ht (make-hash-table :test 'equal)))
-;;;     (do-all-symbols (symbol)
-;;;       (let* ((string (symbol-name symbol))
-;;;           (hash (%sxhash-substring string)))
-;;;      (if (gethash hash ht)
-;;;          (unless (string= (gethash hash ht) string)
-;;;            (format t "collision: ~S ~S~%" string (gethash hash ht)))
-;;;          (setf (gethash hash ht) string))))
-;;;     (format t "final count=~W~%" (hash-table-count ht)))
-
-(defun %sxhash-simple-string (x)
-  (declare (optimize speed))
-  (declare (type simple-string x))
-  ;; KLUDGE: this FLET is a workaround (suggested by APD) for presence
-  ;; of let conversion in the cross compiler, which otherwise causes
-  ;; strongly suboptimal register allocation.
-  (flet ((trick (x)
-           (%sxhash-simple-substring x 0 (length x))))
-    (declare (notinline trick))
-    (trick x)))
-
 ;;; This is an out-of-line callable entrypoint that the compiler can
 ;;; transform SXHASH into when hashing a non-simple string.
 (defun %sxhash-string (x)
@@ -179,7 +132,7 @@
 ;;;; the SXHASH function
 
 ;; simple cases
-(declaim (ftype (sfunction (integer) hash) sxhash-bignum))
+(declaim (ftype (sfunction (integer) hash-code) sxhash-bignum))
 
 (defun new-instance-hash-code ()
   ;; ANSI SXHASH wants us to make a good-faith effort to produce
@@ -256,6 +209,49 @@
    #-compact-instance-header
    (sb-pcl::standard-funcallable-instance-hash-code fin)))
 
+(declaim (inline integer-sxhash))
+(defun integer-sxhash (x)
+  (if (fixnump x) (sxhash (truly-the fixnum x)) (sb-bignum:sxhash-bignum x)))
+
+(defun number-sxhash (x)
+  (declare (optimize (sb-c::verify-arg-count 0) speed))
+  (labels ((hash-ratio (x)
+             (let ((result 127810327))
+               (declare (type fixnum result))
+               (mixf result (integer-sxhash (numerator x)))
+               (mixf result (integer-sxhash (denominator x)))
+               result))
+           (hash-rational (x)
+             (if (ratiop x)
+                 (hash-ratio x)
+                 (integer-sxhash x))))
+    (macrolet ((hash-complex-float (type)
+                 `(let ((result 535698211))
+                    (declare (type fixnum result))
+                    (mixf result (sxhash (truly-the ,type (realpart x))))
+                    (mixf result (sxhash (truly-the ,type (imagpart x))))
+                    result)))
+      (typecase x
+        (fixnum (sxhash x)) ; (Should be picked off by main SXHASH)
+        (integer (sb-bignum:sxhash-bignum x))
+        (single-float (sxhash x)) ; through DEFTRANSFORM
+        (double-float (sxhash x)) ; through DEFTRANSFORM
+        #+long-float (long-float (error "stub: no LONG-FLOAT"))
+        (ratio (hash-ratio x))
+        #+long-float
+        ((complex long-float) (hash-complex-float long-float))
+        ((complex double-float) (hash-complex-float double-float))
+        ((complex single-float) (hash-complex-float single-float))
+        ((complex rational)
+         (let ((result 535698211))
+           (declare (type fixnum result))
+           (mixf result (hash-rational (imagpart x)))
+           (mixf result (hash-rational (realpart x)))
+           result))
+        (t 0)))))
+
+(clear-info :function :inlinep 'integer-sxhash)
+
 (defun sxhash (x)
   ;; profiling SXHASH is hard, but we might as well try to make it go
   ;; fast, in case it is the bottleneck somewhere.  -- CSR, 2003-03-14
@@ -281,46 +277,7 @@
   ;; we could do away with the question of order if only we had jump tables.
   ;; (Also, could somebody perhaps explain how these magic numbers were chosen?)
   (declare (optimize speed))
-  (labels ((sxhash-number (x)
-             (macrolet ((hash-complex-float ()
-                          `(let ((result 535698211))
-                             (declare (type fixnum result))
-                             (mixf result (sxhash (realpart x)))
-                             (mixf result (sxhash (imagpart x)))
-                             result)))
-               (etypecase x
-                 ;; FIXNUM is handled in the outer typecase, but we also see it
-                 ;; in SXHASH-NUMBER because of RATIONAL and (COMPLEX RATIONAL).
-                 (fixnum (sxhash x))    ; through DEFTRANSFORM
-                 (integer (sb-bignum:sxhash-bignum x))
-                 (single-float (sxhash x)) ; through DEFTRANSFORM
-                 (double-float (sxhash x)) ; through DEFTRANSFORM
-                 #+long-float (long-float (error "stub: no LONG-FLOAT"))
-                 (ratio (let ((result 127810327))
-                          (declare (type fixnum result))
-                          (mixf result (sxhash-number (numerator x)))
-                          (mixf result (sxhash-number (denominator x)))
-                          result))
-                 #+long-float
-                 ((complex long-float)
-                  (hash-complex-float))
-                 ((complex double-float)
-                  (hash-complex-float))
-                 ((complex single-float)
-                  (hash-complex-float))
-                 ((complex rational)
-                  (let ((result 535698211)
-                        (realpart (realpart x))
-                        (imagpart (imagpart x)))
-                    (declare (type fixnum result))
-                    (mixf result (if (fixnump imagpart)
-                                     (sxhash imagpart)
-                                     (sxhash-number imagpart)))
-                    (mixf result (if (fixnump realpart)
-                                     (sxhash realpart)
-                                     (sxhash-number realpart)))
-                    result)))))
-           (sxhash-recurse (x depthoid)
+  (labels ((sxhash-recurse (x depthoid)
              (declare (type index depthoid))
              (typecase x
                ;; we test for LIST here, rather than CONS, because the
@@ -339,8 +296,8 @@
                (symbol (sxhash x)) ; through DEFTRANSFORM
                (fixnum (sxhash x)) ; through DEFTRANSFORM
                (instance
-                (typecase x
-                  (pathname
+                (case (layout-flags (%instance-layout x))
+                  (#.(logior +pathname-layout-flag+ +structure-layout-flag+)
                    ;; Pathnames are EQUAL if all the components are EQUAL, so
                    ;; we hash all of the components of a pathname together.
                    (let ((hash (sxhash-recurse (pathname-host x) depthoid)))
@@ -354,22 +311,14 @@
                                                       nil
                                                       version)
                                                   depthoid)))))
-                  (layout
-                   ;; LAYOUTs have an easily-accesible hash value: we
-                   ;; might as well use it.  It's not actually uniform
-                   ;; over the space of hash values (it excludes 0 and
-                   ;; some of the larger numbers) but it's better than
-                   ;; simply returning the same value for all LAYOUT
-                   ;; objects, as the next branch would do.
-                   (layout-clos-hash x))
-                  (structure-object
-                   (logxor 422371266
-                           ;; FIXME: why not (LAYOUT-CLOS-HASH ...) ?
-                           (sxhash      ; through DEFTRANSFORM
-                            (classoid-name
-                             (layout-classoid (%instance-layout x))))))
-                  (condition (!condition-hash x))
-                  (t (std-instance-hash x))))
+                  (#.+structure-layout-flag+
+                   (typecase x
+                     (layout (layout-clos-hash x))
+                     (t (logxor 422371266
+                                (layout-clos-hash (%instance-layout x))))))
+                  (#.+condition-layout-flag+ (!condition-hash x))
+                  (#.+pcl-object-layout-flag+ (std-instance-hash x))
+                  (t 0))) ; can't get here
                (array
                 (typecase x
                   ;; If we could do something smart for widetag-based jump tables,
@@ -396,7 +345,7 @@
                ;; Maybe the NUMBERP emitter could be informed that X can't be a fixnum,
                ;; because writing this case as (OR BIGNUM RATIO FLOAT COMPLEX)
                ;; produces far worse code.
-               (number (sxhash-number x))
+               (number (number-sxhash x))
                (character
                 (logxor 72185131
                         (sxhash (char-code x)))) ; through DEFTRANSFORM
@@ -556,12 +505,8 @@
                             ((float-infinity-p key)
                              ;; {single,double}-float infinities are EQUALP
                              (if (minusp key)
-                                 (load-time-value
-                                  (sxhash (symbol-value 'sb-ext:single-float-negative-infinity))
-                                  t)
-                                 (load-time-value
-                                  (sxhash (symbol-value 'sb-ext:single-float-positive-infinity))
-                                  t)))
+                                 (sxhash sb-ext:single-float-negative-infinity)
+                                 (sxhash sb-ext:single-float-positive-infinity)))
                             (t
                              (multiple-value-bind (q r) (floor key)
                                (if (zerop (the ,type r))

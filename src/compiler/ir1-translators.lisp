@@ -1027,9 +1027,17 @@ care."
 ;;; THE with some options for the CAST
 (def-ir1-translator the* (((value-type &key context silent-conflict
                                        derive-type-only
-                                       truly) form)
+                                       truly
+                                       source-form
+                                       use-annotations)
+                           form)
                           start next result)
-  (let ((value-type (values-specifier-type value-type)))
+  (let ((value-type (if (ctype-p value-type)
+                        value-type
+                        (values-specifier-type value-type)))
+        (*current-path* (if source-form
+                            (ensure-source-path source-form)
+                            *current-path*)))
     (cond (derive-type-only
            ;; For something where we really know the type and need no mismatch checking,
            ;; e.g. structure accessors
@@ -1050,6 +1058,13 @@ care."
                                          (t
                                           new-uses))
                                    value-type)))))
+          (use-annotations
+           (ir1-convert start next result form)
+           (when result
+             (add-annotation result
+                             (make-lvar-type-annotation :type value-type
+                                                        :source-path *current-path*
+                                                        :context context))))
           (t
            (let* ((policy (lexenv-policy *lexenv*))
                   (cast (the-in-policy value-type form (if truly
@@ -1068,6 +1083,13 @@ care."
           do (add-annotation
               result
               annotation))))
+
+(def-ir1-translator with-source-form ((source-form form)
+                                      start next result)
+  (let ((*current-path* (if source-form
+                            (ensure-source-path source-form)
+                            *current-path*)))
+    (ir1-convert start next result form)))
 
 (def-ir1-translator bound-cast ((array bound index) start next result)
   (let ((check-bound-tran (make-ctran))
@@ -1091,7 +1113,7 @@ care."
                                   :derived derived
                                   :array array
                                   :bound bound)))
-      (push cast (lvar-dependent-casts array))
+      (push cast (lvar-dependent-nodes array))
       (link-node-to-previous-ctran cast index-ctran)
       (setf (lvar-dest index-lvar) cast)
       (use-continuation cast next result))))
@@ -1104,7 +1126,11 @@ care."
       (info :function :macro-function 'the*)
       (lambda (whole env)
         (declare (ignore env))
-        `(the ,(caadr whole) ,@(cddr whole))))
+        `(the ,(caadr whole) ,@(cddr whole)))
+      (info :function :macro-function 'with-source-form)
+      (lambda (whole env)
+        (declare (ignore env))
+                `(progn ,@(cddr whole))))
 
 ;;;; SETQ
 
@@ -1300,10 +1326,7 @@ due to normal completion or a non-local exit such as THROW)."
      `(flet ((,cleanup-fun ()
                ,@cleanup
                (values)))
-        ;; FIXME: If we ever get DYNAMIC-EXTENT working, then
-        ;; ,CLEANUP-FUN should probably be declared DYNAMIC-EXTENT,
-        ;; and something can be done to make %ESCAPE-FUN have
-        ;; dynamic extent too.
+        ;; FIXME: Maybe %ESCAPE-FUN could dynamic extent too.
         (declare (dynamic-extent #',cleanup-fun))
         (block ,drop-thru-tag
           (multiple-value-bind (,next ,start ,count)

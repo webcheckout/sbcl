@@ -387,16 +387,16 @@ corresponds to NAME, or NIL if there is none."
   ;;
   ;; Signal an error at compile-time, since it's needed for the
   ;; runtime to start up
-  #-(or android linux openbsd freebsd netbsd sunos darwin hpux dragonfly)
+  #-(or android linux openbsd freebsd netbsd sunos darwin hpux dragonfly haiku)
   #.(error "POSIX-GETCWD is not implemented.")
   (or
-   #+(or linux openbsd freebsd netbsd sunos darwin hpux dragonfly)
+   #+(or linux openbsd freebsd netbsd sunos darwin hpux dragonfly haiku)
    (newcharstar-string (alien-funcall (extern-alien "getcwd"
                                                     (function (* char)
                                                               (* char)
                                                               size-t))
                                       nil
-                                      #+(or linux openbsd freebsd netbsd darwin dragonfly) 0
+                                      #+(or linux openbsd freebsd netbsd darwin dragonfly haiku) 0
                                       #+(or sunos hpux) 1025))
    #+android
    (with-alien ((ptr (array char #.path-max)))
@@ -1051,36 +1051,18 @@ avoiding atexit(3) hooks, etc. Otherwise exit(2) is called."
 #-win32
 (progn
 
-  #-sb-fluid (declaim (inline get-time-of-day))
+  (declaim (inline get-time-of-day))
   (defun get-time-of-day ()
     "Return the number of seconds and microseconds since the beginning of
 the UNIX epoch (January 1st 1970.)"
-    #+(or darwin netbsd)
     (with-alien ((tv (struct timeval)))
-      ;; CLH: FIXME! This seems to be a MacOS bug, but on x86-64/darwin,
-      ;; gettimeofday occasionally fails. passing in a null pointer for the
-      ;; timezone struct seems to work around the problem. NS notes: Darwin
-      ;; manpage says the timezone is not used anymore in their implementation
-      ;; at all.
-      (syscall* ("sb_gettimeofday" (* (struct timeval))
-                                (* (struct timezone)))
+      (syscall* ("sb_gettimeofday" (* (struct timeval)))
                 (values (slot tv 'tv-sec)
                         (slot tv 'tv-usec))
-                (addr tv)
-                nil))
-    #-(or darwin netbsd)
-    (with-alien ((tv (struct timeval))
-                 (tz (struct timezone)))
-      (syscall* ("sb_gettimeofday" (* (struct timeval))
-                                (* (struct timezone)))
-                (values (slot tv 'tv-sec)
-                        (slot tv 'tv-usec))
-                (addr tv)
-                (addr tz))))
+                (addr tv))))
 
   (declaim (inline system-internal-run-time
                    system-real-time-values))
-
   (defun system-real-time-values ()
     (multiple-value-bind (sec usec) (get-time-of-day)
       (declare (type unsigned-byte sec) (type (unsigned-byte 31) usec))
@@ -1216,13 +1198,3 @@ the UNIX epoch (January 1st 1970.)"
   (alien-funcall
    (extern-alien "sb_dirent_name" (function c-string system-area-pointer))
    ent))
-
-;;;; A magic constant for wait3().
-;;;;
-;;;; FIXME: This used to be defined in run-program.lisp as
-;;;; (defconstant wait-wstopped #-svr4 #o177 #+svr4 wait-wuntraced)
-;;;; According to some of the man pages, the #o177 is part of the API
-;;;; for wait3(); that said, under SunOS there is a WSTOPPED thing in
-;;;; the headers that may or may not be the same thing. To be
-;;;; investigated. -- CSR, 2002-03-25
-(defconstant wstopped #o177)

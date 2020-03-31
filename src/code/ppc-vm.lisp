@@ -5,11 +5,12 @@
 #-sb-xc-host
 (defun machine-type ()
   "Returns a string describing the type of the local machine."
-  "PowerPC")
+  #-64-bit "PowerPC"
+  #+64-bit "PowerPC64")
 
 ;;;; FIXUP-CODE-OBJECT
 
-(defconstant-eqx +fixup-kinds+ #(:absolute :b :ba :ha :l) #'equalp)
+(defconstant-eqx +fixup-kinds+ #(:absolute :absolute64 :b :ba :ha :l) #'equalp)
 (!with-bigvec-or-sap
 (defun fixup-code-object (code offset fixup kind flavor)
   (declare (type index offset))
@@ -19,7 +20,10 @@
   (let ((sap (code-instructions code)))
     (ecase kind
        (:absolute
-        (setf (sap-ref-32 sap offset) fixup))
+        ;; There is an implicit addend currently stored in the fixup location.
+        (incf (sap-ref-32 sap offset) fixup))
+       (:absolute64
+        (incf (sap-ref-64 sap offset) fixup))
        (:b
         (error "Can't deal with CALL fixups, yet."))
        (:ba
@@ -101,8 +105,11 @@
          (op (ldb (byte 16 16) bad-inst))
          (regnum (ldb (byte 5 0) op)))
     (declare (type system-area-pointer pc))
-    (cond ((= op (logior (ash 3 10) (ash 6 5)))
-           (let ((trap-number (sap-ref-8 pc 3)))
+    (cond ((= op #+64-bit
+                 (logior (ash 2 10) (ash 1 5) null-offset) ;; TDI LGT,$NULL
+                 #-64-bit
+                 (logior (ash 3 10) (ash 6 5))) ;; twllei r0
+           (let ((trap-number (ldb (byte 8 0) bad-inst)))
              (sb-kernel::decode-internal-error-args (sap+ pc 4) trap-number)))
           ((and (= (ldb (byte 6 10) op) 3) ;; twi
                 (or (= regnum #.(sc+offset-offset arg-count-sc))

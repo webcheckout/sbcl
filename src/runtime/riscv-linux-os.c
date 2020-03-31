@@ -37,7 +37,6 @@
 #include <errno.h>
 
 #include "validate.h"
-size_t os_vm_page_size;
 
 int
 arch_os_thread_init(struct thread *thread)
@@ -72,7 +71,7 @@ os_context_pc_addr(os_context_t *context)
 os_context_register_t *
 os_context_lr_addr(os_context_t *context)
 {
-    return os_context_register_addr(context, reg_LR);
+    return os_context_register_addr(context, reg_LIP);
 }
 
 sigset_t *
@@ -100,3 +99,10 @@ os_flush_icache(os_vm_address_t address, os_vm_size_t length)
         = (os_vm_address_t)(((uintptr_t) address) + length);
     __riscv_flush_icache(address, end_address, 0);
 }
+
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
+int _stat(const char *pathname, struct stat *sb) {return stat(pathname, sb); }
+int _lstat(const char *pathname, struct stat *sb) { return lstat(pathname, sb); }
+int _fstat(int fd, struct stat *sb) { return fstat(fd, sb); }

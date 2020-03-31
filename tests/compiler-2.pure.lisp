@@ -32,8 +32,10 @@
   (checked-compile '(lambda (x)
                       (ash 1 (position x #(a b c ))))
                    :allow-style-warnings t)
+  ;; The sequence must contain a mixture of symbols and non-symbols
+  ;; to call %FIND-POSITION. If only symbols, it makes no calls.
   (let ((f (checked-compile '(lambda (x)
-                              (position x '(a b c d e f g h i j k l m))))))
+                              (position x '(1 2 3 a b c 4 5 6 d e f g))))))
     ;; test should be EQ, not EQL
     (assert (or (find (symbol-function 'eq)
                       (ctu:find-code-constants f :type 'sb-kernel:simple-fun))
@@ -206,23 +208,24 @@
                   :skipped-on (not (and :x86-64 :immobile-space)))
   (let ((addr-of-pathname-layout
          (write-to-string
-          (sb-kernel:get-lisp-obj-address (sb-kernel:find-layout 'pathname))
+          (sb-kernel:get-lisp-obj-address
+           (sb-kernel:find-layout 'hash-table))
           :base 16 :radix t))
         (count 0))
     ;; The constant should appear in two CMP instructions
     (dolist (line (split-string
                    (with-output-to-string (s)
                      (let ((sb-disassem:*disassem-location-column-width* 0))
-                       (disassemble 'pathnamep :stream s)))
+                       (disassemble 'hash-table-p :stream s)))
                    #\newline))
       (when (and (search "CMP" line) (search addr-of-pathname-layout line))
         (incf count)))
     (assert (= count 2))))
 
-(with-test (:name :linkage-table-bogosity :skipped-on (not :sb-dynamic-core))
+;; Whoever deals with the Alpha and/or HPPA ports can make this test pass for them
+(with-test (:name :linkage-table-bogosity)
   (let ((strings (map 'list (lambda (x) (if (consp x) (car x) x))
-                      #+sb-dynamic-core sb-vm::+required-foreign-symbols+
-                      #-sb-dynamic-core '())))
+                      sb-vm::+required-foreign-symbols+)))
     (assert (= (length (remove-duplicates strings :test 'string=))
                (length strings)))))
 
@@ -2290,4 +2293,541 @@
       `(lambda (a)
          (let ((v4 (the (or (single-float (1.0) (3.0)) (single-float 4.0 5.0)) a)))
            (incf v4 1.0)))
-    ((4.0) 5.0)))
+      ((4.0) 5.0)))
+
+(with-test (:name :derive-array-rank-negation)
+  (checked-compile-and-assert
+   ()
+   `(lambda (a)
+      (declare ((not (simple-array * (* *))) a))
+      (eql (array-rank a) 2))
+   (((make-array '(2 2) :adjustable t)) t))
+  (checked-compile-and-assert
+   ()
+   `(lambda (a)
+      (declare ((not (simple-array fixnum (* *))) a))
+      (eql (array-rank a) 2))
+   (((make-array '(2 2))) t))
+  (checked-compile-and-assert
+   ()
+   `(lambda (a)
+      (declare ((not (and (array * (* *)) (not simple-array))) a))
+      (eql (array-rank a) 2))
+   (((make-array '(2 2))) t)))
+
+(with-test (:name :derive-array-rank-negation.2)
+  (assert
+   (equal (sb-kernel:%simple-fun-type
+           (checked-compile
+            '(lambda (x)
+              (declare ((and simple-array
+                         (not (simple-array * (* *))))
+                        x))
+              (eql (array-rank x) 2))))
+          '(function ((and simple-array (not (simple-array * (* *)))))
+            (values null &optional)))))
+
+(with-test (:name :known-fun-no-fdefn)
+  (assert (not (ctu:find-named-callees
+                (checked-compile
+                 '(lambda () #'+))))))
+
+(with-test (:name :double-float-p-weakening)
+  (checked-compile-and-assert
+   (:optimize '(:speed 3 :safety 1))
+   '(lambda (x)
+     (declare (double-float x))
+     x)
+   ((0.0) (condition 'type-error))
+      ((1d0) 1d0)))
+
+(declaim (inline inline-fun-arg-mismatch))
+(defun inline-fun-arg-mismatch (x)
+  (declare (optimize (debug 0)))
+  x)
+
+(with-test (:name :inline-fun-arg-mismatch)
+  (checked-compile-and-assert
+      (:allow-warnings '(or sb-int:local-argument-mismatch
+                         #+interpreter simple-warning)) ;; why?
+      '(lambda ()
+        (multiple-value-call #'inline-fun-arg-mismatch 1 2))
+    (() (condition 'program-error))))
+
+(with-test (:name :principal-lvar-ref-use-loop)
+  (checked-compile-and-assert ()
+   '(lambda (vector)
+     (labels ((f (count)
+                (when (< (aref vector 0) count)
+                  (f count))))))
+   ((1) nil)))
+
+(with-test (:name (:mv-call :more-arg))
+  (checked-compile-and-assert
+   ()
+   '(lambda (&rest rest)
+     (multiple-value-bind (a b c) (values-list rest)
+       (declare (ignore c))
+       (list a b)))
+   ((1 3) '(1 3) :test #'equal)))
+
+(with-test (:name (:mv-call :more-arg-unused)
+            ;; needs SB-VM::MORE-ARG-OR-NIL VOP
+            :broken-on (not (or :x86-64 :x86 :ppc :arm :arm64 :riscv)))
+  (checked-compile-and-assert
+   ()
+   '(lambda (&rest rest)
+     (multiple-value-bind (a b) (values-list rest)
+       (list a b)))
+   (() '(nil nil) :test #'equal)
+   ((1) '(1 nil) :test #'equal)
+   ((1 3) '(1 3) :test #'equal)))
+
+(with-test (:name :truncate-deriver-on-number-type)
+  (checked-compile-and-assert
+   ()
+   '(lambda (i)
+     (truncate
+      (labels ((f (&optional (o i))
+                 (declare (ignore o))
+                 (complex 0 0)))
+        (declare (dynamic-extent (function f)))
+        (the integer
+             (multiple-value-call #'f (values))))
+      3))
+   ((0) (values 0 0))))
+
+(with-test (:name :signum-type-deriver)
+  (checked-compile-and-assert
+   ()
+   '(lambda (n)
+     (typep (signum n) 'complex))
+   ((#C(1 2)) t)
+   ((1d0) nil)
+   ((10) nil)))
+
+(with-test (:name :array-header-p-derivation)
+  (checked-compile-and-assert
+   ()
+   '(lambda (q)
+     (and (typep q '(not simple-array))
+      (sb-kernel:array-header-p q)))
+   ((10) nil)
+   (((make-array 10 :adjustable t)) t)))
+
+(with-test (:name :phase-type-derivation)
+  (checked-compile-and-assert
+   ()
+   '(lambda (x)
+     (= (phase (the (integer -1 0) x))
+      (coerce pi 'single-float)))
+   ((-1) t)
+   ((0) nil)))
+
+(with-test (:name :maybe-negate-check-fun-type)
+  (checked-compile-and-assert
+   ()
+   '(lambda (m)
+     (declare ((or (function (number)) (eql #.#'symbolp)) m))
+     (the (member 3/4 4/5 1/2 #.#'symbolp) m))
+   ((#'symbolp) #'symbolp)))
+
+(with-test (:name :lvar-fun-type-on-literal-funs)
+  (checked-compile-and-assert
+   ()
+   `(lambda (p)
+      (declare (type (or null string) p))
+      (locally (declare (optimize (space 0)))
+        (stable-sort p ,#'string<)))
+   (((copy-seq "acb")) "abc" :test #'equal)))
+
+(with-test (:name :equal-to-eql)
+  (let ((f (checked-compile
+            `(lambda (x y)
+               (equal (the hash-table x) y)))))
+    (assert (not (ctu:find-code-constants f :type 'sb-kernel:fdefn))))
+  (let ((f (checked-compile
+            `(lambda (x y)
+               (equalp (the function x) y)))))
+    (assert (not (ctu:find-code-constants f :type 'sb-kernel:fdefn)))))
+
+(with-test (:name :multiway-branch-duplicate-case)
+  (let ((f (checked-compile '(lambda (b)
+                              (case b
+                                ((1 2) :good)
+                                ((3 2) :bad)))
+                            :allow-style-warnings t)))
+    (assert (eq (funcall f 2) :good))))
+
+(with-test (:name :symbol-case-as-jump-table
+                  :skipped-on (not (or :x86 :x86-64)))
+  ;; Assert that a prototypical example of (CASE symbol ...)
+  ;; was converted to a jump table.
+  (let ((c (sb-kernel:fun-code-header #'sb-debug::parse-trace-options)))
+    (assert (>= (sb-kernel:code-jump-table-words c) 17))))
+
+(with-test (:name :modular-arith-type-derivers)
+  (let ((f (checked-compile
+            `(lambda (x)
+               (declare ((and fixnum
+                              unsigned-byte) x)
+                        (optimize speed))
+               (rem x 10)))))
+        (assert (not (ctu:find-code-constants f :type 'bignum)))))
+
+(with-test (:name :deduplicated-fdefns :fails-on (not :64-bit))
+  (flet ((scan-range (c start end)
+           (let (dup-fdefns names)
+             (loop for i from start below end
+                   do (let ((obj (sb-kernel:code-header-ref c i)))
+                        (when (sb-kernel:fdefn-p obj)
+                          (let ((name (sb-kernel:fdefn-name obj)))
+                            (when (member name names)
+                              (push obj dup-fdefns))
+                            (push name names)))))
+             (assert (not dup-fdefns)))))
+    (dolist (c (sb-vm::list-allocated-objects :all :type sb-vm:code-header-widetag))
+      (let* ((start (+ sb-vm:code-constants-offset
+                       (* (sb-kernel:code-n-entries c)
+                          sb-vm:code-slots-per-simple-fun)))
+             (end (+ start (sb-kernel:code-n-named-calls c))))
+        ;; Within each subset of FDEFNs there should be no duplicates
+        ;; by name. But there could be an fdefn that is in the union of
+        ;; the ranges twice, if used for named call and a global ref.
+        (scan-range c start end)
+        (scan-range c end (sb-kernel:code-header-words c))))))
+
+(with-test (:name :map-all-lvar-dests)
+  (checked-compile-and-assert
+   ()
+   `(lambda (&key (pred (constantly 44)))
+      (declare (type function pred))
+      (funcall pred))
+   (() 44)))
+
+(with-test (:name (:lvar-fun-name :constant-leaf-not-constant-lvar-p))
+  (assert (nth-value 1
+                     (checked-compile
+                      `(lambda ()
+                         (funcall
+                          (the (function (t) t)
+                               ,(checked-compile '(lambda ())))))
+                      :allow-warnings t
+                      :allow-style-warnings t))))
+
+(with-test (:name (:%logbitp :signed-and-unsigned))
+  (checked-compile-and-assert
+      ()
+      `(lambda (p2)
+         (declare (type (integer ,(expt -2 (1- sb-vm:n-word-bits))
+                                 ,(1- (expt 2 sb-vm:n-word-bits))) p2))
+         (logbitp 26 p2))
+    ((3) nil)
+    (((ash 1 26)) t)))
+
+(with-test (:name :vop-return-constant-boxing)
+  (checked-compile
+   `(lambda (x)
+      (declare (optimize speed))
+      (setf (aref (the (simple-array double-float (*)) x) 0)
+            10d0))
+   :allow-notes nil)
+  (checked-compile
+   `(lambda (x)
+      (declare (optimize speed))
+      (setf (aref (the (simple-array sb-vm:word (*)) x) 0)
+            (1- (expt 2 sb-vm:n-word-bits))))
+   :allow-notes nil)
+  (checked-compile
+   `(lambda (x y)
+      (declare (optimize speed))
+      (setf (svref y 0)
+            (setf (aref (the (simple-array double-float (*)) x) 0)
+                  10d0)))
+   :allow-notes nil)
+  (checked-compile
+   `(lambda (f a)
+      (declare (optimize speed))
+      (funcall (the function f)
+               1 2 3 4 5 6 7 8 9 10
+               (setf (aref (the (simple-array double-float (*)) a) 0)
+                     10d0)))
+   :allow-notes nil))
+
+(with-test (:name :make-constant-tn-force-boxed)
+  (checked-compile-and-assert
+   ()
+   `(lambda (c)
+      (declare (type character c))
+      (list 1 1 1 1 1 1 1 1 1 1 1 (the (eql #\() c)))
+   ((#\() '(1 1 1 1 1 1 1 1 1 1 1 #\() :test #'equal)))
+
+(with-test (:name :jump-over-move-coercion
+            :serial t
+            :skipped-on :interpreter)
+  (let ((f (checked-compile
+            '(lambda (number)
+              (declare ((or fixnum double-float single-float) number))
+              (cond ((typep number 'double-float)
+                     number)
+                    ((typep number 'single-float)
+                     (coerce number 'double-float))
+                    ((typep number 'fixnum)
+                     (coerce number 'double-float)))))))
+    (ctu:assert-no-consing (funcall f 1d0)))
+  (let ((f (checked-compile
+            '(lambda (v number)
+              (declare ((or fixnum double-float single-float) number))
+              (setf (svref v 0)
+               (cond ((typep number 'double-float)
+                      number)
+                     ((typep number 'single-float)
+                      (coerce number 'double-float))
+                     ((typep number 'fixnum)
+                      (coerce number 'double-float))))))))
+    (let ((v (vector 0)))
+      (ctu:assert-no-consing (funcall f v 1d0)))))
+
+(with-test (:name :jump-over-move-coercion-match-type)
+  (checked-compile-and-assert
+      ()
+      `(lambda (a b)
+         (declare (type (or sb-vm:word sb-vm:signed-word) a))
+         (declare (type (and fixnum unsigned-byte) b))
+         (lognand (max 0 a) b))
+    (((expt 2 (1- sb-vm:n-word-bits)) #xFFFFFF) -1)
+    (((1- (expt 2 (1- sb-vm:n-word-bits))) #xFFFFFF) -16777216)))
+
+#+#.(cl:if (cl:gethash 'sb-c:multiway-branch-if-eq sb-c::*backend-template-names*)
+           '(:and)
+           '(:or))
+(with-test (:name :typecase-to-case-preserves-type)
+  (let ((f (checked-compile
+            '(lambda (x)
+              ;; This illustrates another possible improvement-
+              ;; there are not actually 6 different slot indices
+              ;; that we might load. Some of them are the same
+              (typecase x
+                (sb-pretty:pprint-dispatch-table (sb-pretty::pp-dispatch-entries x))
+                (sb-impl::comma (sb-impl::comma-expr x))
+                (sb-vm:primitive-object (sb-vm:primitive-object-slots x))
+                (sb-kernel:defstruct-description (sb-kernel::dd-name x))
+                (sb-kernel:lexenv (sb-c::lexenv-vars x))
+                (broadcast-stream (broadcast-stream-streams x))
+                (t :none))))))
+    ;; There should be no #<layout> referenced directly from the code header.
+    ;; There is of course a vector of layouts in there to compare against.
+    (assert (not (ctu:find-code-constants f :type 'sb-kernel:layout)))
+    ;; The function had better work.
+    (assert (eq (funcall f 'wat) :none))
+    (assert (equal (funcall f (make-broadcast-stream *error-output*))
+                   (list *error-output*)))))
+
+
+(with-test (:name :=-interval-derivation-and-complex)
+  (checked-compile-and-assert
+      ()
+      `(lambda (p1)
+         (declare ((complex (integer -1 -1)) p1))
+         (= -1 p1))
+    ((#C(-1 -1)) nil)))
+
+(with-test (:name :cmov-move-hoisting)
+  (checked-compile-and-assert
+      ()
+      `(lambda (p)
+         (declare ((or (eql 0.0)
+                       sb-vm:word) p))
+         (if (> p 51250)
+             p
+             1))
+    ((0.0) 1)
+      ((#1=(1- (expt 2 sb-vm:n-word-bits))) #1#))
+  (checked-compile-and-assert
+   ()
+   `(lambda (p)
+      (declare (type (member 4801112936349103672 -9474680540642044437) p))
+      (max 0 p -1.0))
+   ((4801112936349103672) 4801112936349103672)
+   ((-9474680540642044437) 0)))
+
+(with-test (:name :logior-derive-type-widening-tail-set-types)
+  (checked-compile-and-assert
+      ()
+      `(lambda (a b c)
+         (labels ((q (x y)
+                    (let ((* (lambda () x y)))
+                      (the integer a)))
+                  (p ()
+                    (logior (apply #'q (list a b))
+                            (if b
+                                (return-from p (q b c))
+                                1))))
+           (if c
+               0.0
+               (p))))
+    ((44 nil nil) 45)
+    ((3 2 1) 0.0)
+    ((30 2 nil) 30)))
+
+(with-test (:name :if-eq-optimization-consistency)
+  (let ((sb-c::*check-consistency* t))
+    (checked-compile-and-assert
+     ()
+     `(lambda ()
+        (eval (and (if (eval 0) (eval 0) (eval 0)) t)))
+     (() t))))
+
+(with-test (:name :make-array-half-finished-transform)
+  (checked-compile-and-assert
+      (:allow-warnings t)
+      `(lambda ()
+         (make-array 6 :fill-pointer 33))
+    (() (condition '(not program-error)))))
+
+(with-test (:name :nested-if+let)
+  (checked-compile-and-assert
+      ()
+      `(lambda ()
+         (let (x)
+           (when x
+             (setq x 1))
+           (let ((y (if x
+                        t
+                        nil)))
+             (if y
+                 y
+                 (let ((x x))
+                   x)))))
+      (() nil)))
+
+(with-test (:name :let-var-immediately-used-p-deleted-lambda)
+  (checked-compile-and-assert
+   ()
+   `(lambda (c)
+      (if (and nil
+               (or
+                (zerop (count (unwind-protect 1) '(1)))
+                c))
+          1
+          0))
+   ((2) 0)))
+
+(with-test (:name :dce-local-functions)
+  (checked-compile-and-assert
+      ()
+      `(lambda ()
+         (block out
+           (labels ((mmm (z vars)
+                      (when vars
+                        (mmm z vars))))
+             (mmm 1 (progn
+                      (dotimes (a 1) (return-from out 10))
+                      (dotimes (b 3) (catch 'b))))
+             (dotimes (c 3) (catch 'c)))))
+    (() 10)))
+
+(with-test (:name :dce-more-often)
+  (checked-compile-and-assert
+      ()
+      `(lambda (a)
+         (+ 1
+            (if t
+                0
+                (progn
+                  (tagbody
+                   p
+                     (tagbody
+                        (let ((a (lambda () (go o))))
+                          (declare (special a)))
+                      o)
+                     (when (< a 1)
+                       (go p)))
+                  2))))
+    ((1) 1)))
+
+(with-test (:name :ir1-optimize-constant-fold-before-giving-up)
+  (checked-compile-and-assert
+      ()
+      `(lambda (a)
+         (+ 2 (- (let ((sum 0))
+                   (declare (type fixnum sum))
+                   (block nil
+                     (tagbody
+                      next
+                        (cond ((>= sum '0)
+                               (go end))
+                              (a
+                               (ceiling 1 (unwind-protect 0))
+                               (incf sum)))
+                        (go next)
+                      end))
+                   sum))))
+    ((1) 2)))
+
+(with-test (:name :position-case-otherwise)
+  (checked-compile-and-assert
+      ()
+      `(lambda (x)
+         (position x '(a otherwise b t nil)))
+    (('a) 0)
+    (('otherwise) 1)
+    ((nil) 4)
+    ((t) 3)))
+
+(with-test (:name :unreachable-component-propagate-let-args)
+  (checked-compile-and-assert
+      ()
+      `(lambda ()
+         (let ((p 0))
+           (flet ((f (&key)
+                    (flet ((g (&optional
+                                 (z
+                                  (return-from f (+ (dotimes (i 0 0)) p))))
+                             p))))))
+           p))
+    (() 0)))
+
+(with-test (:name :dce-through-optional-dispatch)
+  (checked-compile-and-assert
+      ()
+      `(lambda (x)
+         (flet ((z (&optional a)
+                  (declare (ignore a))
+                  123))
+           (let ((z #'z))
+             (when x
+               (unless x
+                 (setf z 10)))
+                   (funcall z))))
+    ((nil) 123)
+    ((t) 123)))
+
+(with-test (:name :values-list+cons)
+  (assert
+   (equal (sb-kernel:%simple-fun-type
+           (checked-compile
+            `(lambda ()
+               (values-list (cons 1 nil)))))
+          '(function () (values (integer 1 1) &optional)))))
+
+(with-test (:name :xeps-and-inlining)
+  (checked-compile-and-assert
+   ()
+   `(lambda (args)
+      (flet ((fun () args))
+        (declare (inline fun))
+        (multiple-value-call #'fun (values-list args))
+        #'fun))))
+
+(with-test (:name :split-let-ctran-kind)
+  (checked-compile-and-assert
+   ()
+   `(lambda (a b)
+      (let ((a-n (null a))
+            (b-n (null b)))
+        (cond (b-n 1)
+              (a-n a)
+              (t a))))
+   ((nil nil) 1)
+   ((nil t) nil)))

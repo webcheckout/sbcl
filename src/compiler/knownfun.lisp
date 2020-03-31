@@ -255,8 +255,7 @@
       (let* ((sym (lvar-value lvar))
              (var (maybe-find-free-var sym))
              (local-type (when var
-                           (let ((*lexenv* (node-lexenv node)))
-                             (lexenv-find var type-restrictions))))
+                           (lexenv-find var type-restrictions :lexenv (node-lexenv node))))
              (global-type (info :variable :type sym)))
         (if local-type
             (type-intersection local-type global-type)
@@ -273,6 +272,11 @@
   (declare (type combination call))
   (let ((lvar (car (last (combination-args call)))))
     (when lvar (lvar-type lvar))))
+
+(defun result-type-nth-arg (n)
+  (lambda (call)
+    (let ((lvar (nth n (combination-args call))))
+      (when lvar (lvar-type lvar)))))
 
 ;;; Derive the result type according to the float contagion rules, but
 ;;; always return a float. This is used for irrational functions that

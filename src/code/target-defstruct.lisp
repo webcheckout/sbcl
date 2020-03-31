@@ -140,6 +140,21 @@
                 (t ; bignum - use LOGBITP to avoid consing more bignums
                  (copy-loop (logbitp i bitmap))))))
       res)))
+;;; Like above, but copy all slots (including the LAYOUT) as though boxed.
+;;; If the structure might contain raw slots and the GC is precise,
+;;; this won't ever be called.
+(defun %copy-instance (to from)
+  (declare (structure-object to from) (optimize (safety 0)))
+  (setf (%instance-layout to) (%instance-layout from))
+  (dotimes (i (%instance-length to) to)
+    (setf (%instance-ref to i) (%instance-ref from i))))
+;;; Like %COPY-INSTANCE, but layout was already assigned.
+;;; Similarly, will not be called if raw slots and precise GC.
+(defun %copy-instance-slots (to from)
+  (declare (structure-object to from) (optimize (safety 0)))
+  (loop for i from sb-vm:instance-data-start below (%instance-length to)
+        do (setf (%instance-ref to i) (%instance-ref from i)))
+  to)
 
 ;;; default PRINT-OBJECT method
 
@@ -157,7 +172,7 @@
 
 (defun %default-structure-pretty-print (structure stream name dd)
   (pprint-logical-block (stream nil :prefix "#S(" :suffix ")")
-    (prin1 name stream)
+    (write name :stream stream) ; escaped or not, according to printer controls
     (let ((remaining-slots (dd-slots dd)))
       (when remaining-slots
         (write-char #\space stream)
@@ -178,7 +193,7 @@
 (defun %default-structure-ugly-print (structure stream name dd)
   (descend-into (stream)
     (write-string "#S(" stream)
-    (prin1 name stream)
+    (write name :stream stream)
     (do ((index 0 (1+ index))
          (limit (or (and (not *print-readably*) *print-length*)
                     sb-xc:most-positive-fixnum))

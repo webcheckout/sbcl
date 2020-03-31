@@ -32,7 +32,7 @@
                                        lowtag-mask))))
     (inst andi ndescr ndescr (lognot lowtag-mask))
     (pseudo-atomic (pa-flag)
-      (allocation header ndescr other-pointer-lowtag :flag-tn pa-flag)
+      (allocation nil ndescr other-pointer-lowtag header :flag-tn pa-flag)
       ;; Now that we have the space allocated, compute the header
       ;; value.
       (inst slli ndescr rank (- n-widetag-bits n-fixnum-tag-bits))
@@ -58,7 +58,7 @@
                             lowtag-mask))
            (header-bits (logior (ash header-size n-widetag-bits) type)))
       (pseudo-atomic (pa-flag)
-        (allocation header bytes other-pointer-lowtag :flag-tn pa-flag)
+        (allocation nil bytes other-pointer-lowtag header :flag-tn pa-flag)
         (inst li pa-flag header-bits)
         (storew pa-flag header 0 other-pointer-lowtag)))
     (move result header)))
@@ -166,9 +166,9 @@
   (def-full-data-vector-frobs simple-vector * descriptor-reg any-reg)
 
   (def-partial-data-vector-frobs simple-base-string character 1 nil character-reg)
-  #-64-bit
+  #+(and sb-unicode (not 64-bit))
   (def-full-data-vector-frobs simple-character-string character character-reg)
-  #+64-bit
+  #+(and sb-unicode 64-bit)
   (def-partial-data-vector-frobs simple-character-string character
     4 nil character-reg)
 

@@ -25,24 +25,21 @@
 #include "interr.h"
 #include "breakpoint.h"
 #include "thread.h"
-#include "pseudo-atomic.h"
+#include "getallocptr.h"
 #include "unaligned.h"
+#include "search.h"
+#include "globals.h" // for asm_routines_start,end
 
 #include "genesis/static-symbols.h"
 #include "genesis/symbol.h"
+#include "forwarding-ptr.h"
+#include "core.h"
 
-
-#ifdef LISP_FEATURE_UD2_BREAKPOINTS
-#define UD2_INST 0x0b0f         /* UD2 */
-#define BREAKPOINT_WIDTH 2
-#else
-#ifdef LISP_FEATURE_INT4_BREAKPOINTS
-# define BREAKPOINT_INST 0xce    /* INTO */
-#else
-# define BREAKPOINT_INST 0xcc    /* INT3 */
-#endif
+#define INT3_INST 0xCC
+#define INTO_INST 0xCE
+#define UD2_INST 0x0b0f
 #define BREAKPOINT_WIDTH 1
-#endif
+
 unsigned int cpuid_fn1_ecx;
 int avx_supported = 0, avx2_supported = 0;
 
@@ -73,7 +70,11 @@ static void xgetbv(unsigned *eax, unsigned *edx)
             : "c" (0));
 }
 
-void arch_init(void)
+#define VECTOR_FILL_T "VECTOR-FILL/T"
+
+// Poke in a byte that changes an opcode to enable faster vector fill.
+// Using fixed offsets and bytes is no worse than what we do elsewhere.
+void tune_asm_routines_for_microarch(void)
 {
     unsigned int eax, ebx, ecx, edx;
 
@@ -93,17 +94,9 @@ void arch_init(void)
             }
         }
     }
-}
-
-#define VECTOR_FILL_T "VECTOR-FILL/T"
-
-// Poke in a byte that changes an opcode to enable faster vector fill.
-// Using fixed offsets and bytes is no worse than what we do elsewhere.
-void tune_asm_routines_for_microarch(void)
-{
+    SetSymbolValue(CPUID_FN1_ECX, (lispobj)make_fixnum(cpuid_fn1_ecx), 0);
     // I don't know if this works on Windows
 #ifndef _MSC_VER
-    unsigned int eax, ebx, ecx, edx;
     cpuid(0, 0, &eax, &ebx, &ecx, &edx);
     if (eax >= 7) {
         cpuid(7, 0, &eax, &ebx, &ecx, &edx);
@@ -143,15 +136,19 @@ arch_get_bad_addr(int __attribute__((unused)) sig,
 os_context_register_t *
 context_eflags_addr(os_context_t *context)
 {
-#if defined __linux__ || defined __sun
+#if defined __linux__
     /* KLUDGE: As of kernel 2.2.14 on Red Hat 6.2, there's code in the
      * <sys/ucontext.h> file to define symbolic names for offsets into
      * gregs[], but it's conditional on __USE_GNU and not defined, so
      * we need to do this nasty absolute index magic number thing
      * instead. */
     return (os_context_register_t*)&context->uc_mcontext.gregs[17];
+#elif defined LISP_FEATURE_SUNOS
+    return &context->uc_mcontext.gregs[REG_RFL];
 #elif defined LISP_FEATURE_FREEBSD || defined(__DragonFly__)
     return &context->uc_mcontext.mc_rflags;
+#elif defined __HAIKU__
+    return &context->uc_mcontext.rflags;
 #elif defined LISP_FEATURE_DARWIN
     return CONTEXT_ADDR_FROM_STEM(rflags);
 #elif defined __OpenBSD__
@@ -181,9 +178,12 @@ void arch_skip_instruction(os_context_t *context)
         case trap_Error:
         case trap_Cerror:
             skip_internal_error(context);
-
             break;
-
+        case trap_UninitializedLoad:
+            // Skip 1 byte. We can't encode that the internal_error_nargs is 1
+            // because it is not an SC+OFFSET that follows the trap code.
+            *os_context_pc_addr(context) += 1;
+            break;
         case trap_Breakpoint:           /* not tested */
         case trap_FunEndBreakpoint: /* not tested */
             break;
@@ -244,16 +244,12 @@ unsigned int
 arch_install_breakpoint(void *pc)
 {
     unsigned int result = *(unsigned int*)pc;
-
-#ifndef LISP_FEATURE_UD2_BREAKPOINTS
-    *(char*)pc = BREAKPOINT_INST;               /* x86 INT3       */
-    *((char*)pc+1) = trap_Breakpoint;           /* Lisp trap code */
+#ifdef LISP_FEATURE_INT4_BREAKPOINTS
+    *(char*)pc = INTO_INST;
 #else
-    *(char*)pc = UD2_INST & 0xff;
-    *((char*)pc+1) = UD2_INST >> 8;
-    *((char*)pc+2) = trap_Breakpoint;
+    *(char*)pc = INT3_INST;
 #endif
-
+    *((char*)pc+1) = trap_Breakpoint;           /* Lisp trap code */
     return result;
 }
 
@@ -262,9 +258,6 @@ arch_remove_breakpoint(void *pc, unsigned int orig_inst)
 {
     *((char *)pc) = orig_inst & 0xff;
     *((char *)pc + 1) = (orig_inst & 0xff00) >> 8;
-#if BREAKPOINT_WIDTH > 1
-    *((char *)pc + 2) = (orig_inst & 0xff0000) >> 16;
-#endif
 }
 
 /* When single stepping, single_stepping holds the original instruction
@@ -371,12 +364,27 @@ sigtrap_handler(int __attribute__((unused)) signal,
     access_control_stack_pointer(arch_os_get_current_thread()) =
         (lispobj *)*os_context_sp_addr(context);
 
-    /* On entry %eip points just after the INT3 byte and aims at the
+    /* On entry %rip points just after the INT3 byte and aims at the
      * 'kind' value (eg trap_Cerror). For error-trap and Cerror-trap a
      * number of bytes will follow, the first is the length of the byte
      * arguments to follow. */
     trap = *(unsigned char *)(*os_context_pc_addr(context));
-
+#ifdef LISP_FEATURE_IMMOBILE_SPACE
+    if (trap == trap_UndefinedFunction) {
+        // The interrupted PC pins this fdefn. Sigtrap is delivered on the ordinary stack,
+        // not the alternate stack.
+        // (FIXME: an interior pointer to an fdefn _should_ pin it, but doesn't)
+        lispobj* fdefn = (lispobj*)(*os_context_pc_addr(context) & ~LOWTAG_MASK);
+        if (fdefn && widetag_of(fdefn) == FDEFN_WIDETAG) {
+            // Return to undefined-tramp
+            *os_context_pc_addr(context) = (uword_t)((struct fdefn*)fdefn)->raw_addr;
+            // with RAX containing the FDEFN
+            *os_context_register_addr(context,reg_RAX) =
+                make_lispobj(fdefn, OTHER_POINTER_LOWTAG);
+            return;
+        }
+    }
+#endif
     handle_trap(context, trap);
 }
 
@@ -384,23 +392,21 @@ void
 sigill_handler(int __attribute__((unused)) signal,
                siginfo_t __attribute__((unused)) *siginfo,
                os_context_t *context) {
-    /* Triggering SIGTRAP using int3 is unreliable on OS X/x86, so
-     * we need to use illegal instructions for traps.
-     */
-#if defined(LISP_FEATURE_UD2_BREAKPOINTS) && !defined(LISP_FEATURE_MACH_EXCEPTION_HANDLER)
-    if (*((unsigned short *)*os_context_pc_addr(context)) == UD2_INST) {
+    unsigned char* pc = (void*)*os_context_pc_addr(context);
+#ifndef LISP_FEATURE_MACH_EXCEPTION_HANDLER
+    if (*(unsigned short *)pc == UD2_INST) {
         *os_context_pc_addr(context) += 2;
         return sigtrap_handler(signal, siginfo, context);
     }
-#elif defined(LISP_FEATURE_INT4_BREAKPOINTS) && !defined(LISP_FEATURE_MACH_EXCEPTION_HANDLER)
-    if (*((unsigned char *)*os_context_pc_addr(context)) == BREAKPOINT_INST) {
-        *os_context_pc_addr(context) += BREAKPOINT_WIDTH;
+    // Interrupt if overflow (INTO) raises SIGILL in 64-bit mode
+    if (*(unsigned char *)pc == INTO_INST) {
+        *os_context_pc_addr(context) += 1;
         return sigtrap_handler(signal, siginfo, context);
     }
 #endif
 
     fake_foreign_function_call(context);
-    lose("Unhandled SIGILL at %p.", (void*)*os_context_pc_addr(context));
+    lose("Unhandled SIGILL at %p.", pc);
 }
 
 #ifdef X86_64_SIGFPE_FIXUP
@@ -483,10 +489,10 @@ arch_install_interrupt_handlers()
     SHOW("returning from arch_install_interrupt_handlers()");
 }
 
-#ifdef LISP_FEATURE_LINKAGE_TABLE
 void
-arch_write_linkage_table_entry(char *reloc_addr, void *target_addr, int datap)
+arch_write_linkage_table_entry(int index, void *target_addr, int datap)
 {
+    char *reloc_addr = (char*)LINKAGE_TABLE_SPACE_START + index * LINKAGE_TABLE_ENTRY_SIZE;
     if (datap) {
         *(uword_t *)reloc_addr = (uword_t)target_addr;
         return;
@@ -497,7 +503,6 @@ arch_write_linkage_table_entry(char *reloc_addr, void *target_addr, int datap)
     reloc_addr[6] = 0x66; reloc_addr[7] = 0x90; /* 2-byte NOP */
     *(void**)(reloc_addr+8) = target_addr;
 }
-#endif
 
 /* These setup and check *both* the sse2 and x87 FPUs. While lisp code
    only uses the sse2 FPU, other code (such as libc) may use the x87 FPU.
@@ -553,7 +558,6 @@ arch_set_fp_modes(unsigned int mxcsr)
     asm ("ldmxcsr %0" : : "m" (temp));
 }
 
-#ifdef LISP_FEATURE_IMMOBILE_CODE
 /// Return the Lisp object that fdefn's raw_addr slot jumps to.
 /// This will either be:
 /// (1) a simple-fun,
@@ -562,22 +566,36 @@ arch_set_fp_modes(unsigned int mxcsr)
 /// (3) a code-component with no simple-fun within it, that makes
 ///     closures and other funcallable-instances look like simple-funs.
 /// If the fdefn jumps to the UNDEFINED-FDEFN routine, then return 0.
-lispobj virtual_fdefn_callee_lispobj(struct fdefn* fdefn, uword_t vaddr) {
-    unsigned char tagged_ptr_bias = ((unsigned char*)&fdefn->raw_addr)[7];
-    // If the pointer bias is 0, then this fdefn's raw_addr must
-    // point to an assembler routine entry point.
-    if (tagged_ptr_bias == 0)
-        return 0;
-    int32_t offs = UNALIGNED_LOAD32((char*)&fdefn->raw_addr + 1);
-    // Base the callee address off where the fdefn virtually is.
-    // Compensate for the offset of the raw_addr slot,
-    // and add 5 for the length of "JMP rel32" instruction.
-    return vaddr + offsetof(struct fdefn,raw_addr) + 5 + offs - tagged_ptr_bias;
-}
 lispobj fdefn_callee_lispobj(struct fdefn* fdefn) {
-  return virtual_fdefn_callee_lispobj(fdefn, (uword_t)fdefn);
+    lispobj* raw_addr = (lispobj*)fdefn->raw_addr;
+    if (!raw_addr || points_to_asm_code_p((lispobj)raw_addr))
+        // technically this should return the address of the code object
+        // containing asm routines, but it's fine to return 0.
+        return 0;
+    // If the object to which raw_addr points was already forwarded,
+    // this returns the "old" pointer, prior to forwarding, so that
+    // scavenging that pointer alters it. Otherwise scav_fdefn would not
+    // decide to rewrite the raw_addr slot of the fdefn.
+    // This logic is rather nasty, but I don't know what else to do.
+    lispobj word;
+    if (header_widetag(word = raw_addr[-2]) == SIMPLE_FUN_WIDETAG
+        || (word == 1 &&
+            widetag_of(native_pointer(forwarding_pointer_value(raw_addr-2)))
+            == SIMPLE_FUN_WIDETAG))
+        return make_lispobj(raw_addr - 2, FUN_POINTER_LOWTAG);
+    int widetag;
+    if ((widetag = header_widetag(word = raw_addr[-4])) == CODE_HEADER_WIDETAG
+        || (word == 1 &&
+            widetag_of(native_pointer(forwarding_pointer_value(raw_addr-4)))
+            == CODE_HEADER_WIDETAG))
+        return make_lispobj(raw_addr - 4, OTHER_POINTER_LOWTAG);
+    if (widetag == FUNCALLABLE_INSTANCE_WIDETAG
+        || (word == 1 &&
+            widetag_of(native_pointer(forwarding_pointer_value(raw_addr-4)))
+            == FUNCALLABLE_INSTANCE_WIDETAG))
+        return make_lispobj(raw_addr - 4, FUN_POINTER_LOWTAG);
+    lose("Unknown object in fdefn raw addr: %p", raw_addr);
 }
-#endif
 
 #include "genesis/vector.h"
 #define LOCK_PREFIX 0xF0
@@ -630,7 +648,7 @@ static boolean instrumentp(uword_t* sp, uword_t** pc, uword_t* old_word)
 
 // logical index 'index' in the metadata array stores the code component
 // and pc-offset relative to the component base address
-static void record_pc(uword_t* pc, unsigned int index, boolean sizedp)
+static void record_pc(char* pc, unsigned int index, boolean sizedp)
 {
     lispobj *code = component_ptr_from_pc(pc);
     if (!code) {
@@ -649,7 +667,7 @@ static void record_pc(uword_t* pc, unsigned int index, boolean sizedp)
         ensure_region_closed(code_region);
         int ret = thread_mutex_unlock(&free_pages_lock);
         gc_assert(ret == 0);
-        code = component_ptr_from_pc((lispobj*)pc);
+        code = component_ptr_from_pc(pc);
     }
 #endif
     struct vector* v = VECTOR(alloc_profile_data);
@@ -685,7 +703,7 @@ allocation_tracker_counted(uword_t* sp)
         if (!__sync_bool_compare_and_swap(pc, word_at_pc, new_inst))
             lose("alloc profiler failed to rewrite instruction @ %p", pc);
         if (index != 2)
-            record_pc(pc, index, 0);
+            record_pc((char*)pc, index, 0);
     }
     int __attribute__((unused)) ret = thread_mutex_unlock(&alloc_profiler_lock);
     gc_assert(ret == 0);
@@ -706,7 +724,7 @@ allocation_tracker_sized(uword_t* sp)
             (modrm & 0xC0) == 0xC0 && /* register-direct mode */
             ((modrm >> 3) & 0x7) == (modrm & 0x7)) { /* same register */
         } else {
-            lose("Can't decode instruction @ pc %p\n", pc);
+            lose("Can't decode instruction @ pc %p", pc);
         }
         // rewrite call into:
         //  LOCK INC QWORD PTR, [R11+n] ; opcode = 0xFF / 0
@@ -724,7 +742,7 @@ allocation_tracker_sized(uword_t* sp)
             !__sync_bool_compare_and_swap(pc,   word_at_pc,    new_inst1))
             lose("alloc profiler failed to rewrite instructions @ %p", pc);
         if (index != 0) // can't record a PC for the overflow counts
-            record_pc(pc, index, 1);
+            record_pc((char*)pc, index, 1);
     }
     int __attribute__((unused)) ret = thread_mutex_unlock(&alloc_profiler_lock);
     gc_assert(ret == 0);

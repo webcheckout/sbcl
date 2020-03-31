@@ -648,6 +648,10 @@ of specialized arrays is supported."
 ;;; the type information is available. Finally, for each of these
 ;;; routines also provide a slow path, taken for arrays that are not
 ;;; vectors or not simple.
+;;; FIXME: how is this not redundant with DEFINE-ARRAY-DISPATCH?
+;;; Which is to say, why did DEFINE-ARRAY-DISPATCH decide to do
+;;; something different instead of figuring out how to unify the ways
+;;; that we call an element of an array accessed by widetag?
 (macrolet ((def (name table-name)
              `(progn
                 (define-load-time-global ,table-name
@@ -1089,6 +1093,8 @@ of specialized arrays is supported."
 
 ;;;; fill pointer frobbing stuff
 
+(setf (info :function :predicate-truth-constraint 'array-has-fill-pointer-p)
+      '(and vector (not simple-array)))
 (declaim (inline array-has-fill-pointer-p))
 (defun array-has-fill-pointer-p (array)
   "Return T if the given ARRAY has a fill pointer, or NIL otherwise."
@@ -1790,16 +1796,21 @@ function to be removed without further warning."
 ;;; Finally, the DISPATCH-FOO macro is defined which does the actual
 ;;; dispatching when called. It expects arguments that match PARAMS.
 ;;;
-(defmacro sb-impl::!define-array-dispatch (dispatch-name params &body body)
+(defmacro sb-impl::!define-array-dispatch (style dispatch-name params &body body)
+  #-(or x86 x86-64) (setq style :call)
   (let ((table-name (symbolicate "%%" dispatch-name "-FUNS%%"))
         (error-name (symbolicate "HAIRY-" dispatch-name "-ERROR")))
+    (declare (ignorable table-name))
     `(progn
-       (eval-when (:compile-toplevel :load-toplevel :execute)
-         (defun ,error-name (&rest args)
-           (error 'type-error
-                  :datum (first args)
-                  :expected-type '(simple-array * (*)))))
-       (!define-load-time-global ,table-name ,(make-array (1+ widetag-mask)))
+       (defun ,error-name (,(first params) &rest rest)
+         (declare (ignore rest))
+         (error 'type-error
+                :datum ,(first params)
+                :expected-type '(simple-array * (*))))
+
+       ,@(ecase style
+    (:call
+     `((!define-load-time-global ,table-name ,(sb-xc:make-array (1+ widetag-mask)))
 
        ;; This SUBSTITUTE call happens ** after ** all the SETFs below it.
        ;; DEFGLOBAL's initial value is dumped by genesis as a vector filled
@@ -1810,7 +1821,7 @@ function to be removed without further warning."
        ;; However when it comes to actually executing the toplevel forms
        ;; that were compiled into thunks of target code to invoke,
        ;; all the known good entries must be preserved.
-       (substitute #',error-name 0 ,table-name)
+       (nsubstitute #',error-name 0 ,table-name)
 
        ,@(loop for info across *specialized-array-element-type-properties*
                for typecode = (saetp-typecode info)
@@ -1828,12 +1839,39 @@ function to be removed without further warning."
          (check-type (first args) symbol)
          (let ((tag (gensym "TAG")))
            `(funcall
-             (the function
+             (truly-the function
                (let ((,tag 0))
                  (when (%other-pointer-p ,(first args))
                    (setf ,tag (%other-pointer-widetag ,(first args))))
-                 (svref ,',table-name ,tag)))
-             ,@args))))))
+                 (svref (truly-the (simple-vector 256) (load-time-value ,',table-name t))
+                        ,tag)))
+             ,@args)))))
+    (:jump-table
+     (multiple-value-bind (body decls) (parse-body body nil)
+       `((declaim (inline ,dispatch-name))
+         (defun ,dispatch-name ,params
+           ,@decls
+           (case (if (%other-pointer-p ,(first params))
+                     (ash (%other-pointer-widetag ,(first params)) -2)
+                     0)
+             ;; All widetags have to be listed so that the jump table logic doesn't
+             ;; give up due to deciding that it's a waste of space. It could probably
+             ;; be based on the SPACE compilation policy. However, I would imagine that
+             ;; it is almost always a win to use 4x or 5x table words as cases
+             ;; given the amount of code that has to be emitted if not a table.
+             ;; This table has only 2.5x as many words as relevant (non-error) cases.
+             (,(loop for i below 64
+                     unless (find i *specialized-array-element-type-properties*
+                                  :key (lambda (x) (ash (saetp-typecode x) -2)))
+                       collect i)
+              (,error-name ,@params))
+             ,@(loop
+                   for info across *specialized-array-element-type-properties*
+                   collect `(,(ash (saetp-typecode info) -2)
+                             (let ((,(first params)
+                                    (truly-the (simple-array ,(saetp-specifier info) (*))
+                                               ,(first params))))
+                               ,@body))))))))))))
 
 (defun sb-kernel::check-array-shape (array dimensions)
   (when (let ((dimensions dimensions))
@@ -1858,15 +1896,24 @@ function to be removed without further warning."
                                      (initial-element nil element-p))
   (when (and element-p contents-p)
     (error "Can't specify both :INITIAL-ELEMENT and :INITIAL-CONTENTS"))
-  (let ((v (if contents-p
-               (make-array length :initial-contents initial-contents)
-               (make-array length :initial-element
-                           ;; 0 is the usual default, but NIL makes more sense
-                           ;; for weak vectors because it's the value assigned
-                           ;; when a pointer is broken by GC.
-                           (if element-p initial-element nil)))))
-    (set-header-data v vector-weak-subtype)
-    v))
+  ;; Explicitly compute a widetag with the weakness bit ORed in.
+  (let ((type (logior (ash vector-weak-subtype sb-vm:n-widetag-bits)
+                      sb-vm:simple-vector-widetag)))
+    ;; These allocation calls are the transforms of MAKE-ARRAY for a vector with
+    ;; the respective initializing keyword arg. This is badly OAOO-violating and
+    ;; almost makes me want to cry, but not quite enough for me to improve it.
+    (if contents-p
+        (let ((contents-length (length initial-contents)))
+          (if (= (truly-the index length) contents-length)
+              (replace (truly-the simple-vector (allocate-vector type length length))
+                       initial-contents)
+              (error "~S has ~D elements, vector length is ~D."
+                     :initial-contents contents-length length)))
+        (fill (truly-the simple-vector
+                         (allocate-vector type (truly-the index length) length))
+              ;; 0 is the usual default, but NIL makes more sense for weak vectors
+              ;; as it is the value assigned to broken hearts.
+              (if element-p initial-element nil)))))
 
 (defun weak-vector-p (x)
   (and (simple-vector-p x)

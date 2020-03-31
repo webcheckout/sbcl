@@ -44,7 +44,7 @@
 #include "interr.h"             /* for lose() */
 #include "alloc.h"
 #include "gc-internal.h"
-#include "pseudo-atomic.h"
+#include "getallocptr.h"
 #include "interrupt.h"
 #include "lispregs.h"
 
@@ -202,7 +202,8 @@ initial_thread_trampoline(struct thread *th)
     pthread_setspecific(lisp_thread, (void *)1);
 # endif
 #endif
-#if defined(THREADS_USING_GCSIGNAL) && (defined(LISP_FEATURE_PPC) || defined(LISP_FEATURE_ARM64))
+#if defined THREADS_USING_GCSIGNAL && \
+    (defined LISP_FEATURE_PPC || defined LISP_FEATURE_PPC64 || defined LISP_FEATURE_ARM64)
     /* SIG_STOP_FOR_GC defaults to blocked on PPC? */
     unblock_gc_signals(0,0);
 #endif
@@ -356,7 +357,7 @@ init_new_thread(struct thread *th,
 #endif
     if(arch_os_thread_init(th)==0) {
         /* FIXME: handle error */
-        lose("arch_os_thread_init failed\n");
+        lose("arch_os_thread_init failed");
     }
 
     th->os_thread=thread_self();
@@ -521,7 +522,7 @@ attach_os_thread(init_thread_data *scribble)
     block_deferrable_signals(&scribble->oldset);
 
 #ifndef LISP_FEATURE_SB_SAFEPOINT
-    /* initial-thread-function-trampoline doesn't like when the GC signal is blocked */
+    /* new-lisp-thread-trampoline doesn't like when the GC signal is blocked */
     /* FIXME: could be done using a single call to pthread_sigmask
        together with locking the deferrable signals above. */
     unblock_gc_signals(0, 0);
@@ -685,7 +686,7 @@ callback_wrapper_trampoline(
  */
 
 static struct thread *
-create_thread_struct(lispobj initial_function) {
+create_thread_struct(lispobj start_routine) {
 #if defined(LISP_FEATURE_SB_THREAD) || defined(LISP_FEATURE_WIN32)
     unsigned int i;
 #endif
@@ -698,7 +699,7 @@ create_thread_struct(lispobj initial_function) {
      * on the alignment passed from os_validate, since that might
      * assume the current (e.g. 4k) pagesize, while we calculate with
      * the biggest (e.g. 64k) pagesize allowed by the ABI. */
-    void *spaces = os_validate(IS_THREAD_STRUCT, NULL, THREAD_STRUCT_SIZE);
+    void *spaces = os_validate(MOVABLE|IS_THREAD_STRUCT, NULL, THREAD_STRUCT_SIZE);
     if(!spaces)
         return NULL;
     /* Aligning up is safe as THREAD_STRUCT_SIZE has
@@ -721,6 +722,9 @@ create_thread_struct(lispobj initial_function) {
     th->tls_size = dynamic_values_bytes;
 #endif
     uword_t* __attribute__((__unused__)) constants = (uword_t*)th;
+#if defined LISP_FEATURE_X86_64 && defined LISP_FEATURE_LINUX
+    constants[THREAD_MSAN_XOR_CONSTANT_SLOT] = 0x500000000000;
+#endif
 #ifdef LISP_FEATURE_GENCGC
 #ifdef THREAD_VARYOBJ_CARD_MARKS_SLOT
     extern unsigned int* varyobj_page_touched_bits;
@@ -842,28 +846,7 @@ create_thread_struct(lispobj initial_function) {
 #  define INITIALIZE_TLS(sym,val) SYMBOL(sym)->value = val
 #endif
 #include "genesis/thread-init.inc"
-#ifdef LISP_FEATURE_SB_THREAD
-    /* Each initial binding is a cons whose car is a symbol evaluated as if
-     * by SYMBOL-GLOBAL-VALUE (unsafely), and whose cdr is the target symbol.
-     * In particular, we will obligingly assign the unbound-marker.
-     * An atom implies NIL for the value. */
-    struct vector* tls_init = VECTOR(SYMBOL(THREAD_INITIAL_BINDINGS)->value);
-    for (i = 0; i < tls_init->length; i += make_fixnum(1)) {
-        lispobj binding = tls_init->data[fixnum_value(i)];
-        lispobj value = NIL;
-        if (listp(binding)) {
-            lispobj val_form = CONS(binding)->car;
-            value = fixnump(val_form) ? val_form : SYMBOL(val_form)->value;
-            binding = CONS(binding)->cdr;
-        }
-        struct symbol* sym = SYMBOL(binding);
-        write_TLS_index(tls_index_of(sym), value, th, sym);
-    }
-    /* If a symbol assigned above had a TLS index of 0, then it'll
-     * mess up th->no_tls_value_marker. Fail now if that happened. */
-    gc_assert(th->no_tls_value_marker == NO_TLS_VALUE_MARKER_WIDETAG);
-#endif
-    th->no_tls_value_marker=initial_function;
+    th->no_tls_value_marker = start_routine;
 
 #if defined(LISP_FEATURE_WIN32)
     for (i = 0; i<sizeof(th->private_events.events)/
@@ -883,7 +866,7 @@ void create_initial_thread(lispobj initial_function) {
 #endif
     if(th) {
         initial_thread_trampoline(th); /* no return */
-    } else lose("can't create initial thread\n");
+    } else lose("can't create initial thread");
 }
 
 #ifdef LISP_FEATURE_SB_THREAD
@@ -910,7 +893,7 @@ boolean create_os_thread(struct thread *th,os_thread_t *kid_tid)
     pthread_attr_t attr;
     if (pthread_attr_init(&attr) == 0) {
 
-    /* See perform_thread_post_mortem for at least one reason why this lock is neccessary */
+    /* See perform_thread_post_mortem for at least one reason why this lock is necessary */
         retcode = pthread_mutex_lock(&create_thread_lock);
         gc_assert(retcode == 0);
 
@@ -922,13 +905,19 @@ boolean create_os_thread(struct thread *th,os_thread_t *kid_tid)
             (retcode = pthread_create(kid_tid, &attr, new_thread_trampoline_switch_stack, th))
 #else
 
-# if defined(LISP_FEATURE_WIN32)
+# ifdef LISP_FEATURE_WIN32
             pthread_attr_setstacksize(&attr, thread_control_stack_size) ||
 # elif defined(LISP_FEATURE_C_STACK_IS_CONTROL_STACK)
             pthread_attr_setstack(&attr, th->control_stack_start, thread_control_stack_size) ||
 # else
             pthread_attr_setstack(&attr, th->alien_stack_start, ALIEN_STACK_SIZE) ||
 # endif
+# ifdef LISP_FEATURE_NETBSD
+            /* Even though the manpage says pthread_attr_setstack
+               would override the guard page, it's no longer true. */
+            pthread_attr_setguardsize(&attr, 0) ||
+# endif
+
             (retcode = pthread_create(kid_tid, &attr, new_thread_trampoline, th))
 #endif
             ) {
@@ -945,20 +934,20 @@ boolean create_os_thread(struct thread *th,os_thread_t *kid_tid)
     return success;
 }
 
-os_thread_t create_thread(lispobj initial_function) {
+os_thread_t create_thread(lispobj start_routine) {
     struct thread *th, *thread = arch_os_get_current_thread();
     os_thread_t kid_tid = 0;
 
     /* Must defend against async unwinds. */
     if (read_TLS(INTERRUPTS_ENABLED, thread) != NIL)
-        lose("create_thread is not safe when interrupts are enabled.\n");
+        lose("create_thread is not safe when interrupts are enabled.");
 
     /* Assuming that a fresh thread struct has no lisp objects in it,
      * linking it to all_threads can be left to the thread itself
-     * without fear of gc lossage. initial_function violates this
+     * without fear of gc lossage. 'start_routine' violates this
      * assumption and must stay pinned until the child starts up. */
-    th = create_thread_struct(initial_function);
-    if (th && !create_os_thread(th,&kid_tid)) {
+    th = create_thread_struct(start_routine);
+    if (th && !create_os_thread(th, &kid_tid)) {
         free_thread_struct(th);
         kid_tid = 0;
     }
@@ -1145,7 +1134,7 @@ kill_safely(os_thread_t os_thread, int signal)
             if (thread->os_thread == os_thread) {
                 int status = pthread_kill(os_thread, signal);
                 if (status)
-                    lose("kill_safely: pthread_kill failed with %d\n", status);
+                    lose("kill_safely: pthread_kill failed with %d", status);
 #if defined(LISP_FEATURE_WIN32) && defined(LISP_FEATURE_SB_THRUPTION)
                 wake_thread_win32(thread);
 #endif
@@ -1163,7 +1152,7 @@ kill_safely(os_thread_t os_thread, int signal)
 #else
         int status;
         if (os_thread != 0)
-            lose("kill_safely: who do you want to kill? %d?\n", os_thread);
+            lose("kill_safely: who do you want to kill? %d?", os_thread);
         /* Dubious (as in don't know why it works) workaround for the
          * signal sometimes not being generated on darwin. */
 #ifdef LISP_FEATURE_DARWIN
@@ -1179,7 +1168,7 @@ kill_safely(os_thread_t os_thread, int signal)
         if (status == 0) {
             return 0;
         } else {
-            lose("cannot raise signal %d, %d %s\n",
+            lose("cannot raise signal %d, %d %s",
                  signal, status, strerror(errno));
         }
 #endif

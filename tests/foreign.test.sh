@@ -14,6 +14,8 @@
 # absolutely no warranty. See the COPYING and CREDITS files for
 # more information.
 
+run_compiler=`pwd`/run-compiler.sh
+export TEST_BASEDIR=${TMPDIR:-/tmp}
 . ./expect.sh
 . ./subr.sh
 
@@ -30,7 +32,7 @@ PUNT=$EXIT_TEST_WIN
 
 build_so() (
   echo building $1.so
-  /bin/sh ../run-compiler.sh -sbcl-pic -sbcl-shared "$1.c" -o "$1.so"
+  /bin/sh ${run_compiler} -sbcl-pic -sbcl-shared "$1.c" -o "$1.so"
 )
 
 # We want to bail out in case any of these Unix programs fails.
@@ -131,6 +133,11 @@ echo 'int bar() { return 42; }' >> $TEST_FILESTEM-b.c
 build_so $TEST_FILESTEM-b
 
 echo 'int foo = 42;' > $TEST_FILESTEM-b2.c
+# Try not to produce two more-or-less physically identical '.so' files (modulo
+# some constants in the functions), so that the test will fail if we accidentally
+# call the new bar() at the old address - as might happen if the OS maps both '.so'
+# files at the same place - as a consequence of failing to update the linkage table.
+echo 'int somerandomfun(int x) { return x?-x:bar(); }' >> $TEST_FILESTEM-b2.c
 echo 'int bar() { return 13; }' >> $TEST_FILESTEM-b2.c
 build_so $TEST_FILESTEM-b2
 
@@ -260,7 +267,8 @@ cat > $TEST_FILESTEM.test.lisp <<EOF
   (note "/renamed back to originals")
 
   ;; test late resolution
-  #+linkage-table
+  (eval-when (:compile-toplevel :load-toplevel :execute)
+   (setq *features* (union *features* sb-impl:+internal-features+)))
   (progn
     (note "/starting linkage table tests")
     (define-alien-variable late-foo int)
@@ -314,7 +322,9 @@ test_save() {
     echo testing save $1
     x="$1"
     run_sbcl --load $TEST_FILESTEM.$1.fasl <<EOF
-#+linkage-table (save-lisp-and-die "$TEST_FILESTEM.$x.core")
+(eval-when (:compile-toplevel :load-toplevel :execute)
+ (setq *features* (union *features* sb-impl:+internal-features+)))
+(save-lisp-and-die "$TEST_FILESTEM.$x.core")
 (sb-ext:exit :code 22) ; catch this
 EOF
     check_status_maybe_lose "save $1" $? \
@@ -353,7 +363,7 @@ if [ -f $TEST_FILESTEM.fast.core ] ; then
               (invoke-restart cont)))
           (print :fell-through)
           (invoke-debugger condition)))
-   #+linkage-table (save-lisp-and-die "$TEST_FILESTEM.missing.core")
+   (save-lisp-and-die "$TEST_FILESTEM.missing.core")
    (sb-ext:exit :code 22) ; catch this
 EOF
     check_status_maybe_lose "saving-missing-so-core" $? \

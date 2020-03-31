@@ -36,10 +36,19 @@
 #include "gc.h"
 
 /* the way that we shut down the system on a fatal error */
+void lisp_backtrace(int frames);
 
 static void
 default_lossage_handler(void)
 {
+    static int backtrace_invoked = 0;
+    if (!backtrace_invoked) {
+        backtrace_invoked = 1;
+        // This may not be exactly the right condition for determining
+        // whether it might be possible to backtrace, but at least it prevents
+        // lose() from itself losing early in startup.
+        if (arch_os_get_current_thread()) lisp_backtrace(100);
+    }
     exit(1);
 }
 static void (*lossage_handler)(void) = default_lossage_handler;
@@ -48,7 +57,6 @@ static void (*lossage_handler)(void) = default_lossage_handler;
 static void
 configurable_lossage_handler()
 {
-    void lisp_backtrace(int frames);
 
     if (dyndebug_config.dyndebug_backtrace_when_lost) {
         fprintf(stderr, "lose: backtrace follows as requested\n");
@@ -180,18 +188,35 @@ char internal_error_nargs[] = INTERNAL_ERROR_NARGS;
 void skip_internal_error (os_context_t *context) {
     unsigned char *ptr = (unsigned char *)*os_context_pc_addr(context);
 #ifdef LISP_FEATURE_ARM64
+    // This code is broken. The program counter as received in *context
+    // points one instruction beyond the BRK opcode.
+    // I wrote a test vop that emits a cerror break thusly:
+    //
+    // ; 62C:       40A122D4         BRK #5386                       ; Cerror trap
+    // ; 630:       30               BYTE #X30                       ; R2
+    //
+    // and added a printf to see the instruction pointer here:
+    //   skip_internal_error: pc=0x1002441630
+    //
+    // which got a trap code of 0. This is due to the fact that DESCRIPTOR-REG
+    // is the lowest SC number, so the encoded SC+OFFSET of R2 is a small
+    // value, and therefore shifting right by 13 bits extracts a 0.
+    // Internal error number 0 has 0 arguments, so we skip nothing in the varint
+    // decoder loop, which is the right thing for the wrong reason.
     u32 trap_instruction = *(u32 *)ptr;
     unsigned char code = trap_instruction >> 13 & 0xFF;
     ptr += 4;
 #else
     unsigned char code = *ptr;
-    ptr++;
+    ptr++; // skip the byte indicating the kind of trap
 #endif
     if (code > sizeof(internal_error_nargs)) {
         printf("Unknown error code %d at %p\n", code, (void*)*os_context_pc_addr(context));
     }
-
-    ptr += internal_error_nargs[code];
+    int nargs = internal_error_nargs[code];
+    int nbytes = 0;
+    while (nargs--) read_var_integer(ptr, &nbytes);
+    ptr += nbytes;
     *((unsigned char **)os_context_pc_addr(context)) = ptr;
 }
 

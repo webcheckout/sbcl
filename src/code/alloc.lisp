@@ -12,34 +12,38 @@
 
 (in-package "SB-VM")
 
-#-sb-fluid (declaim (inline store-word))
-(defun store-word (word base &optional (offset 0) (lowtag 0))
-  (declare (type word word base offset)
-           (type (unsigned-byte #.n-lowtag-bits) lowtag))
-  (setf (sap-ref-word (int-sap base) (- (ash offset word-shift) lowtag)) word))
+(!define-load-time-global *allocator-mutex* (sb-thread:make-mutex :name "Allocator"))
 
 (defun allocate-static-vector (widetag length words)
   (declare (type (unsigned-byte #.n-widetag-bits) widetag)
            (type word words)
            (type index length))
-  ;; WITHOUT-GCING implies WITHOUT-INTERRUPTS
-  (or
-   (without-gcing
-     (let* ((pointer (sap-int *static-space-free-pointer*))
-            (vector (logior pointer other-pointer-lowtag))
-            (nbytes (pad-data-block (+ words vector-data-offset)))
-            (new-pointer (+ pointer nbytes)))
-       (when (> static-space-end new-pointer)
-         (store-word widetag
-                     vector 0 other-pointer-lowtag)
-         (store-word (fixnumize length)
-                     vector vector-length-slot other-pointer-lowtag)
-         (store-word 0 new-pointer)
-         (setf *static-space-free-pointer* (int-sap new-pointer))
-         (%make-lisp-obj vector))))
-   (error 'simple-storage-condition
-          :format-control "Not enough memory left in static space to ~
-                           allocate vector.")))
+  ;; This does not need WITHOUT-GCING, but it will be implicitly wrapped
+  ;; in WITHOUT-INTERRUPTS due to the default behavior of system mutexes,
+  ;; which is important so that we don't leave an inconsistent state.
+  ;; To think about why it is OK to leave GC enabled, consider that
+  ;; neither GC nor another thread will examine static space above the
+  ;; current value of *STATIC-SPACE-FREE-POINTER*.
+  (or (sb-thread::with-system-mutex (*allocator-mutex*)
+        (let* ((pointer *static-space-free-pointer*)
+               (nbytes (pad-data-block (+ words vector-data-offset)))
+               (new-pointer (sap+ pointer nbytes)))
+          (when (sap<= new-pointer (int-sap static-space-end))
+            ;; By storing the length prior to the widetag, the word at the old
+            ;; free pointer decodes as a cons instead of a 0-length vector.
+            ;; Not that it should matter, but it seems slightly better to change
+            ;; the new object atomically to a correctly-sized vector rather than
+            ;; a cons changing into the wrong vector into the right vector.
+            (setf (sap-ref-word pointer (ash vector-length-slot word-shift))
+                  (fixnumize length))
+            ;; then store the widetag
+            (setf (sap-ref-word pointer 0) widetag)
+            ;; then the new free pointer
+            (setf *static-space-free-pointer* new-pointer)
+            (%make-lisp-obj (logior (sap-int pointer) other-pointer-lowtag)))))
+      (error 'simple-storage-condition
+             :format-control
+             "Not enough room left in static space to allocate vector.")))
 
 #+immobile-space
 (progn
@@ -51,9 +55,6 @@
   system-area-pointer)
 (define-alien-variable ("fixedobj_free_pointer" *fixedobj-space-free-pointer*)
   system-area-pointer)
-
-(!define-load-time-global *immobile-space-mutex*
-    #.(sb-thread:make-mutex :name "Immobile space"))
 
 (eval-when (:compile-toplevel)
   (assert (eql code-boxed-size-slot 1))
@@ -277,7 +278,7 @@
   (setq n-bytes (align-up n-bytes (* 2 n-word-bytes)))
   ;; Can't allocate fewer than 4 words due to min hole size.
   (aver (>= n-bytes (* 4 n-word-bytes)))
-  (sb-thread::with-system-mutex (*immobile-space-mutex* :without-gcing t)
+  (sb-thread::with-system-mutex (*allocator-mutex* :without-gcing t)
    (unless (zerop varyobj-holes)
      ;; If deferred sweep needs to happen, do so now.
      ;; Concurrency could potentially be improved here: at most one thread
@@ -403,51 +404,6 @@
     (%set-symbol-package symbol nil)
     symbol))
 
-(defun alloc-immobile-fdefn ()
-  (or (and (= (alien-funcall (extern-alien "lisp_code_in_elf" (function int))) 1)
-           (allocate-immobile-obj (* fdefn-size n-word-bytes)
-                                  (logior (ash (1- fdefn-size) n-widetag-bits) ; word 0
-                                          fdefn-widetag)
-                                  0 other-pointer-lowtag nil)) ; word 1, lowtag, errorp
-      (values (%primitive alloc-immobile-fixedobj other-pointer-lowtag
-                          fdefn-size
-                          (logior (ash (1- fdefn-size) n-widetag-bits) ; word 0
-                                  fdefn-widetag)))))
-
-#+immobile-code
-(progn
-(defun alloc-immobile-gf ()
-  (values (%primitive alloc-immobile-fixedobj fun-pointer-lowtag 6 ; kludge
-                      (logior (ash 5 n-widetag-bits) funcallable-instance-widetag))))
-(defun make-immobile-gf (layout slot-vector)
-  (let ((gf (truly-the funcallable-instance (alloc-immobile-gf))))
-    ;; Set layout prior to writing raw slots
-    (setf (%funcallable-instance-layout gf) layout)
-    ;; just being pedantic - liveness is preserved by the stack reference,
-    ;; and address is fixed, by definition.
-    (with-pinned-objects (gf)
-      (let ((addr (logandc2 (get-lisp-obj-address gf) lowtag-mask)))
-        (setf (sap-ref-word (int-sap addr)
-                            (ash funcallable-instance-trampoline-slot word-shift))
-              (truly-the word (+ addr (ash 4 word-shift))))))
-    (%set-funcallable-instance-info gf 0 slot-vector)
-    (!set-fin-trampoline gf)
-    gf))
-
-(defun alloc-immobile-trampoline ()
-  (let ((obj (%primitive alloc-immobile-fixedobj other-pointer-lowtag 6
-                         ;; total word count
-                         (logior (ash 6 code-header-size-shift) code-header-widetag))))
-    (with-pinned-objects (obj)
-      (setf (sap-ref-word (int-sap (get-lisp-obj-address obj))
-                          (- (ash code-boxed-size-slot word-shift)
-                             other-pointer-lowtag))
-            ;; The 'fixups' slot permanently contains 0. Therefore we can say that
-            ;; there are only 3 boxed header words instead of the usual 4 words.
-            (* 3 n-word-bytes))) ; boxed size in bytes, untagged
-    obj))
-
-) ; end PROGN
 ) ; end PROGN
 
 (declaim (inline immobile-space-addr-p))
@@ -468,15 +424,15 @@
 ;;; 25 bits is the maximum unboxed size expressed in bytes,
 ;;; if n-word-bytes = 8 and almost the entire code object is unboxed
 ;;; which is, practically speaking, not really possible.
-(declaim (ftype (sfunction (t (unsigned-byte 22) (unsigned-byte 25))
+(declaim (ftype (sfunction (t (unsigned-byte 16) (unsigned-byte 22) (unsigned-byte 25))
                            code-component)
                 allocate-code-object))
 ;;; Allocate a code component with BOXED words in the header
 ;;; followed by UNBOXED bytes of raw data.
 ;;; BOXED must be the exact count of boxed words desired. No adjustments
 ;;; are made for alignment considerations or the fixed slots.
-(defun allocate-code-object (space boxed unboxed)
-  (declare (ignorable space))
+(defun allocate-code-object (space n-named-calls boxed unboxed)
+  (declare (ignorable space n-named-calls))
   (let* ((total-words
            (the (unsigned-byte 22) ; Enforce limit on total words as well
                 (align-up (+ boxed (ceiling unboxed n-word-bytes)) 2)))
@@ -510,19 +466,33 @@
            (%primitive var-alloc total-words 'alloc-code
                        ;; subtract 1 because var-alloc always adds 1 word
                        ;; for the header, which is not right for code objects.
-                       -1 code-header-widetag other-pointer-lowtag)))
-    ;; The 1st slot beyond the header stores the boxed header size in bytes
-    ;; as an untagged number, which has the same representation as a tagged
-    ;; value denoting a word count if WORD-SHIFT = N-FIXNUM-TAG-BITS.
-    ;; This slot is allowed to be 0 prior to writing any pointer descriptors
-    ;; into the object.
-    ;;
-    ;; If 64-bit words, assign a serial number unless the space is NIL.
-    ;; Use ATOMIC-INCF on the serialno to get automatic wraparound,
-    ;; and not because atomicity makes things deterministic, which it doesn't
-    ;; if there are several threads allocating code.
-    ;; TODO: this unnecessarily calls CODE-HEADER-SET if code cards use soft
-    ;; marking. Maybe pin the object and use (SETF SAP-REF-WORD) instead.
+                       -1 code-header-widetag other-pointer-lowtag nil)))
+
+    (with-pinned-objects (code)
+      (let ((sap (sap+ (int-sap (get-lisp-obj-address code))
+                       (- other-pointer-lowtag))))
+        ;; The immobile space allocator pre-zeroes, and also it needs a nonzero
+        ;; value in the boxed word count because otherwise it looks like
+        ;; an immobile space page filler. So don't do any more zeroing there.
+        ;; (Could dead immobile objects be converted to use FILLER-WIDETAG instead?)
+        (unless (immobile-space-obj-p code)
+          ;; Before writing the boxed word count, zeroize up to and including 1 word
+          ;; after the boxed header so that all point words can be safely read
+          ;; by GC and so the jump table count word is 0.
+          (loop for byte-index from (ash boxed word-shift) downto (ash 2 word-shift)
+                by n-word-bytes
+                do (setf (sap-ref-word sap byte-index) 0)))
+        ;; The 1st slot beyond the header stores the boxed header size in bytes
+        ;; as an untagged number, which has the same representation as a tagged
+        ;; value denoting a word count if WORD-SHIFT = N-FIXNUM-TAG-BITS.
+        ;; This boxed-size MUST be 0 prior to writing any pointers into the object
+        ;; because the boxed words will not necessarily have been pre-zeroed;
+        ;; scavenging them prior to zeroing them out would see wild pointers.
+        (setf (sap-ref-word sap (ash code-boxed-size-slot word-shift))
+              ;; For 32-bit words, we'll have to add another primitive-object slot.
+              ;; But so far nothing makes use of the n-named-calls value.
+              (logior #+64-bit (ash n-named-calls 32)
+                      (ash boxed word-shift)))))
 
     ;; FIXME: Sort out 64-bit and cheneygc.
     #+(and 64-bit cheneygc)
@@ -530,10 +500,4 @@
           (%make-lisp-obj
            (logior (ash total-words 32)
                    sb-vm:code-header-widetag)))
-    (setf (code-header-ref code code-boxed-size-slot)
-          (%make-lisp-obj
-           (logior (ash boxed word-shift)
-                   #+64-bit
-                   (logand (ash (atomic-incf sb-fasl::*code-serialno*) 32)
-                           most-positive-word))))
     code))

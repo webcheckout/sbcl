@@ -24,6 +24,7 @@
                        (:copier nil)
                        (:predicate opaque-box-p))
   value)
+(declaim (freeze-type opaque-box))
 
 ;;; ANSI limits on compilation
 (defconstant sb-xc:call-arguments-limit sb-xc:most-positive-fixnum
@@ -65,22 +66,17 @@
 ;;; have these meanings:
 ;;;     NIL     No declaration seen: do whatever you feel like, but don't
 ;;;             dump an inline expansion.
-;;; :NOTINLINE  NOTINLINE declaration seen: always do full function call.
-;;;    :INLINE  INLINE declaration seen: save expansion, expanding to it
+;;; NOTINLINE  NOTINLINE declaration seen: always do full function call.
+;;;    INLINE  INLINE declaration seen: save expansion, expanding to it
 ;;;             if policy favors.
-;;; :MAYBE-INLINE
+;;; MAYBE-INLINE
 ;;;             Retain expansion, but only use it opportunistically.
-;;;             :MAYBE-INLINE is quite different from :INLINE. As explained
+;;;             MAYBE-INLINE is quite different from INLINE. As explained
 ;;;             by APD on #lisp 2005-11-26: "MAYBE-INLINE lambda is
 ;;;             instantiated once per component, INLINE - for all
 ;;;             references (even under #'without FUNCALL)."
 (def!type inlinep ()
-  '(member :inline :maybe-inline :notinline nil))
-(defconstant-eqx +inlinep-translations+
-  '((inline . :inline)
-    (notinline . :notinline)
-    (maybe-inline . :maybe-inline))
-  #'equal)
+  '(member inline maybe-inline notinline nil))
 
 (defstruct (dxable-args (:constructor make-dxable-args (list))
                         (:predicate nil)
@@ -91,19 +87,29 @@
                           (:predicate nil)
                           (:copier nil))
   (expansion nil :read-only t))
+(declaim (freeze-type dxable-args))
 
-;;; *FREE-VARS* translates from the names of variables referenced
-;;; globally to the LEAF structures for them. *FREE-FUNS* is like
-;;; *FREE-VARS*, only it deals with function names.
-(defvar *free-vars*)
-(defvar *free-funs*)
-(declaim (type hash-table *free-vars* *free-funs*))
+(defstruct (ir1-namespace (:conc-name "") (:copier nil) (:predicate nil))
+  ;; FREE-VARS translates from the names of variables referenced
+  ;; globally to the LEAF structures for them.
+  (free-vars (make-hash-table :test 'eq) :read-only t :type hash-table)
+  ;; FREE-FUNS is like FREE-VARS, only it deals with function names.
+  (free-funs (make-hash-table :test 'equal) :read-only t :type hash-table)
+  ;; These hashtables translate from constants to the LEAFs that
+  ;; represent them.
+  ;; Table 1: one entry for each distinct constant (according to object identity)
+  (eq-constants (make-hash-table :test 'eq) :read-only t :type hash-table)
+  ;; Table 2: one hash-table entry per EQUAL constant,
+  ;; with the caveat that lookups must discriminate amongst constants that
+  ;; are EQUAL but not similar.  The value in the hash-table is a list of candidates
+  ;; (#<constant1> #<constant2> ... #<constantN>) such that CONSTANT-VALUE
+  ;; of each is EQUAL to the key for the hash-table entry, but dissimilar
+  ;; from each other. Notably, strings of different element types can't be similar.
+  (similar-constants (make-hash-table :test 'equal) :read-only t :type hash-table))
+(declaim (freeze-type ir1-namespace))
 
-;;; We use the same CONSTANT structure to represent all equal anonymous
-;;; constants. This hashtable translates from constants to the LEAFs that
-;;; represent them.
-(defvar *constants*)
-(declaim (type hash-table *constants*))
+(sb-impl::define-thread-local *ir1-namespace*)
+(declaim (type ir1-namespace *ir1-namespace*))
 
 ;;; *ALLOW-INSTRUMENTING* controls whether we should allow the
 ;;; insertion of instrumenting code (like a (CATCH ...)) around code
@@ -119,7 +125,11 @@
 (defvar *compiler-warning-count*)
 (defvar *compiler-style-warning-count*)
 (defvar *compiler-note-count*)
-(defvar *compiler-trace-output*)
+;;; Bind this to a stream to capture various internal debugging output.
+(defvar *compiler-trace-output* nil)
+;;; These are the default, but the list can also include
+;;; :pre-ir2-optimize and :symbolic-asm.
+(defvar *compile-trace-targets* '(:ir1 :ir2 :vop :symbolic-asm :disassemble))
 (defvar *constraint-universe*)
 (defvar *current-path*)
 (defvar *current-component*)
@@ -137,7 +147,6 @@
 (defvar *lambda-conversions*)
 (defvar *compile-object* nil)
 (defvar *location-context* nil)
-(defvar *msan-unpoison* nil)
 
 (defvar *stack-allocate-dynamic-extent* t
   "If true (the default), the compiler respects DYNAMIC-EXTENT declarations
@@ -151,7 +160,7 @@ the stack without triggering overflow protection.")
 ;;; Assigning a literal object enables genesis to dump and load it
 ;;; without need of a cold-init function.
 #-sb-xc-host
-(!define-load-time-global **world-lock** #.(sb-thread:make-mutex :name "World Lock"))
+(!define-load-time-global **world-lock** (sb-thread:make-mutex :name "World Lock"))
 
 #-sb-xc-host
 (define-load-time-global *static-linker-lock*
@@ -160,18 +169,6 @@ the stack without triggering overflow protection.")
 (defmacro with-world-lock (() &body body)
   #+sb-xc-host `(progn ,@body)
   #-sb-xc-host `(sb-thread:with-recursive-lock (**world-lock**) ,@body))
-
-;;; unique ID for the next object created (to let us track object
-;;; identity even across GC, useful for understanding weird compiler
-;;; bugs where something is supposed to be unique but is instead
-;;; exists as duplicate objects)
-#+sb-show
-(progn
-  (defvar *object-id-counter* 0)
-  (defun new-object-id ()
-    (prog1
-        *object-id-counter*
-      (incf *object-id-counter*))))
 
 ;;;; miscellaneous utilities
 
@@ -184,7 +181,6 @@ the stack without triggering overflow protection.")
        (!define-load-time-global *type-cache-nonce* 0))
 
 (defstruct (undefined-warning
-            #-no-ansi-print-object
             (:print-object (lambda (x s)
                              (print-unreadable-object (x s :type t)
                                (prin1 (undefined-warning-name x) s))))
@@ -199,6 +195,7 @@ the stack without triggering overflow protection.")
   ;; where this thing was used. Note that we only record the first
   ;; *UNDEFINED-WARNING-LIMIT* calls.
   (warnings () :type list))
+(declaim (freeze-type undefined-warning))
 
 ;;; Delete any undefined warnings for NAME and KIND. This is for the
 ;;; benefit of the compiler, but it's sometimes called from stuff like
@@ -241,10 +238,11 @@ the stack without triggering overflow protection.")
                 :format-arguments (list symbol)))
   (values))
 
-(defstruct (debug-name-marker (:print-function print-debug-name-marker)
-                              ;; make these satisfy SB-XC:INSTANCEP
-                              #+sb-xc-host (:include structure!object)
-                              (:copier nil)))
+;;; This is DEF!STRUCT so that when SB-C:DUMPABLE-LEAFLIKE-P invokes
+;;; SB-XC:TYPEP in make-host-2, it does not need need to signal PARSE-UNKNOWN
+;;; for each and every constant seen up until this structure gets defined.
+(def!struct (debug-name-marker (:print-function print-debug-name-marker)
+                               (:copier nil)))
 
 (defvar *debug-name-level* 4)
 (defvar *debug-name-length* 12)
@@ -349,6 +347,57 @@ the stack without triggering overflow protection.")
   (define-load-time-global *code-coverage-info*
     (list (make-hash-table :test 'equal :synchronized t)))
   (declaim (type (cons hash-table) *code-coverage-info*)))
+
+(deftype id-array ()
+  '(and (array t (*))
+        ;; Might as well be as specific as we can.
+        ;; Really it should be (satisfies array-has-fill-pointer-p)
+        ;; but that predicate is not total (errors on NIL).
+        ;; And who knows what the host considers "simple".
+        #-sb-xc-host (not simple-array)))
+
+(defstruct (compilation (:copier nil)
+                        (:predicate nil)
+                        (:conc-name ""))
+  (fun-names-in-this-file)
+  ;; for constant coalescing across code components, and/or for situations
+  ;; where SIMILARP does not do what you want.
+  (constant-cache)
+  (coverage-metadata nil :type (or (cons hash-table hash-table) null) :read-only t)
+  (msan-unpoison nil :read-only t)
+  (sset-counter 1 :type fixnum)
+  ;; if emitting a cfasl, the fasl stream to that
+  (compile-toplevel-object nil :read-only t)
+  ;; The current block compilation state.  These are initialized to
+  ;; the :Block-Compile and :Entry-Points arguments that COMPILE-FILE
+  ;; was called with.  Subsequent START-BLOCK or END-BLOCK
+  ;; declarations alter the values.
+  (block-compile nil :type (member nil t :specified))
+  (entry-points nil :type list)
+  ;; When block compiling, used by PROCESS-FORM to accumulate top
+  ;; level lambdas resulting from compiling subforms. (In reverse
+  ;; order.)
+  (toplevel-lambdas nil :type list)
+
+  ;; Bidrectional map between IR1/IR2/assembler abstractions and a corresponding
+  ;; small integer or string identifier. One direction could be done by adding
+  ;; the ID as slot to each object, but we want both directions.
+  ;; These could just as well be scoped by WITH-IR1-NAMESPACE, but
+  ;; since it's primarily a debugging tool, it's nicer to have
+  ;; a wider unique scope by ID.
+  (objmap-obj-to-id      (make-hash-table :test 'eq) :read-only t)
+  (objmap-id-to-node     nil :type (or null id-array)) ; number -> NODE
+  (objmap-id-to-comp     nil :type (or null id-array)) ; number -> COMPONENT
+  (objmap-id-to-leaf     nil :type (or null id-array)) ; number -> LEAF
+  (objmap-id-to-cont     nil :type (or null id-array)) ; number -> CTRAN or LVAR
+  (objmap-id-to-ir2block nil :type (or null id-array)) ; number -> IR2-BLOCK
+  (objmap-id-to-tn       nil :type (or null id-array)) ; number -> TN
+  (objmap-id-to-label    nil :type (or null id-array)) ; number -> LABEL
+  )
+(declaim (freeze-type compilation))
+
+(sb-impl::define-thread-local *compilation*)
+(declaim (type compilation *compilation*))
 
 (in-package "SB-ALIEN")
 

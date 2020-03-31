@@ -187,6 +187,22 @@
               (t
                (delay-ir1-transform node :constraint)
                'test-value)))))
+
+(deftransform %type-constraint ((x type) * * :node node)
+  (delay-ir1-transform node :constraint)
+  nil)
+
+(defoptimizer (%type-constraint constraint-propagate) ((x type) node gen)
+  (declare (ignore node))
+  (let ((var (ok-lvar-lambda-var x gen)))
+    (when var
+      (let ((type (lvar-value type)))
+        (list (list 'typep var
+                    (if (ctype-p type)
+                        type
+                        (handler-case (careful-specifier-type type)
+                          (t () nil)))
+                    nil))))))
 
 ;;;; standard type predicates, i.e. those defined in package COMMON-LISP,
 ;;;; plus at least one oddball (%INSTANCEP)
@@ -201,6 +217,8 @@
   ; (The ATOM predicate is handled separately as (NOT CONS).)
   (define-type-predicate bit-vector-p bit-vector)
   (define-type-predicate characterp character)
+  #+(and sb-unicode (or x86-64 arm64)) ;; others have a source-transform
+  (define-type-predicate base-char-p base-char)
   (define-type-predicate compiled-function-p compiled-function)
   (define-type-predicate complexp complex)
   (define-type-predicate complex-rational-p (complex rational))
@@ -244,8 +262,23 @@
 (deftransform consp ((x) ((not null)) * :important nil)
   '(listp x))
 
+;;; If X is known non-nil, then testing SYMBOLP can skip the "= NIL" part.
 (deftransform symbolp ((x) ((not null)) * :important nil)
   '(non-null-symbol-p x))
+(deftransform non-null-symbol-p ((object) (symbol) * :important nil)
+  `(not (eq object nil)))
+;;; CLHS: http://www.lispworks.com/documentation/HyperSpec/Body/t_symbol.htm#symbol
+;;;   "The consequences are undefined if an attempt is made to alter the home package
+;;;    of a symbol external in the COMMON-LISP package or the KEYWORD package."
+;;; Therefore, we can constant-fold if the symbol-package is one of those two.
+;;; Interestingly, we don't need any transform for (NOT SYMBOL)
+;;; because IR1-TRANSFORM-TYPE-PREDICATE knows that the intersection of the type
+;;; implied by KEYWORDP with any type that does not intersect SYMBOL is NIL.
+(deftransform keywordp ((x) ((constant-arg symbol)))
+  (let ((pkg (sb-xc:symbol-package (lvar-value x))))
+    (cond ((eq pkg *cl-package*) 'nil)
+          ((eq pkg *keyword-package*) 't)
+          (t (give-up-ir1-transform)))))
 
 ;;;; TYPEP source transform
 
@@ -325,10 +358,9 @@
                         ,(transform-numeric-bound-test n-imag type
                                                        base)))))))))
 
-;;; Do the source transformation for a test of a hairy type. AND,
-;;; SATISFIES and NOT are converted into the obvious code. We convert
-;;; unknown types to %TYPEP, emitting an efficiency note if
-;;; appropriate.
+;;; Do the source transformation for a test of a hairy type.
+;;; SATISFIES is converted into the obvious. Otherwise, we convert
+;;; to CACHED-TYPEP an possibly print an efficiency note.
 (defun source-transform-hairy-typep (object type)
   (declare (type hairy-type type))
   (let ((spec (hairy-type-specifier type)))
@@ -359,11 +391,7 @@
                                (not (fun-lexically-notinline-p name)))
                           `(,expansion ,object)
                           `(funcall (global-function ,name) ,object))
-                     t nil)))
-             ((not and)
-              `(,(first spec) ,@(mapcar (lambda (x)
-                                          `(typep ,object ',x))
-                                        (rest spec)))))))))
+                     t nil))))))))
 
 (defun source-transform-negation-typep (object type)
   (declare (type negation-type type))
@@ -786,6 +814,8 @@
        (delay-ir1-transform node :constraint)
        (transform-instance-typep class)))))
 
+;;; This transform contains more comments than code. I wish there were some way
+;;; to express it more simply.
 (defun transform-instance-typep (class)
   (let* ((name (classoid-name class))
           (layout (let ((res (info :type :compiler-layout name)))
@@ -898,6 +928,17 @@
                     #-(vop-translates sb-c::layout-depthoid-gt)
                     `(> (layout-depthoid ,n-layout) ,depthoid)))
               (aver (equal pred '(%instancep object)))
+              (case name
+                (structure-object
+                 (return-from transform-instance-typep
+                   `(and (%instancep object)
+                         (logtest (layout-%bits (%instance-layout object))
+                                  +structure-layout-flag+))))
+                (pathname
+                 (return-from transform-instance-typep
+                   `(and (%instancep object)
+                         (logtest (layout-%bits (%instance-layout object))
+                                  +pathname-layout-flag+)))))
               ;; For shallow hierarchies, we can avoid reading the 'inherits'
               ;; because the layout has the ancestor layouts directly in it.
               ;; Not even a depthoid check is needed.
@@ -1047,7 +1088,8 @@
   ;; weird roundabout way. -- WHN 2001-03-18
   (if (and (not env)
            (typep spec '(cons (eql quote) (cons t null))))
-      (source-transform-typep object (cadr spec))
+      (with-current-source-form (spec)
+        (source-transform-typep object (cadr spec)))
       (values nil t)))
 
 ;;;; coercion
@@ -1266,7 +1308,7 @@
         tval)))))
 
 (deftransform #+64-bit unsigned-byte-64-p #-64-bit unsigned-byte-32-p
-  ((value) (fixnum))
+  ((value) (fixnum) * :important nil)
   `(>= value 0))
 
 (deftransform %other-pointer-p ((object))

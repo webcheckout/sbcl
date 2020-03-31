@@ -129,6 +129,15 @@
   (let ((float (make-double-float (lvar-value hi) (lvar-value lo))))
     (if (float-nan-p float) (give-up-ir1-transform) float)))
 
+;;; I'd like to transition all the 64-bit backends to use the single-arg
+;;; %MAKE-DOUBLE-FLOAT constructor instead of the 2-arg MAKE-DOUBLE-FLOAT.
+;;; So we need a transform to fold constant calls for either.
+#+64-bit
+(deftransform %make-double-float ((bits) ((constant-arg t)))
+  "Conditional constant folding"
+  (let ((float (%make-double-float (lvar-value bits))))
+    (if (float-nan-p float) (give-up-ir1-transform) float)))
+
 ;;; On the face of it, these transforms are ridiculous because if we're going
 ;;; to express (MINUSP X) as (MINUSP (foo-FLOAT-BITS X)), then why not _always_
 ;;; transform MINUSP of a float into an integer comparison instead of a
@@ -220,45 +229,8 @@
 (defun set-bound (x open-p)
   (if (and x open-p) (list x) x))
 
-;;; What is the CROSS-FLOAT-INFINITY-KLUDGE?
-;;;
-;;; SBCL's own implementation of floating point supports floating
-;;; point infinities. Some of the old CMU CL :PROPAGATE-FLOAT-TYPE and
-;;; :PROPAGATE-FUN-TYPE code, like the DEFOPTIMIZERs below, uses this
-;;; floating point support. Thus, we have to avoid running it on the
-;;; cross-compilation host, since we're not guaranteed that the
-;;; cross-compilation host will support floating point infinities.
-;;;
-;;; If we wanted to live dangerously, we could conditionalize the code
-;;; with #+(OR SBCL SB-XC) instead. That way, if the cross-compilation
-;;; host happened to be SBCL, we'd be able to run the infinity-using
-;;; code. Pro:
-;;;   * SBCL itself gets built with more complete optimization.
-;;; Con:
-;;;   * You get a different SBCL depending on what your cross-compilation
-;;;     host is.
-;;; So far the pros and cons seem seem to be mostly academic, since
-;;; AFAIK (WHN 2001-08-28) the propagate-foo-type optimizations aren't
-;;; actually important in compiling SBCL itself. If this changes, then
-;;; we have to decide:
-;;;   * Go for simplicity, leaving things as they are.
-;;;   * Go for performance at the expense of conceptual clarity,
-;;;     using #+(OR SBCL SB-XC) and otherwise leaving the build
-;;;     process as is.
-;;;   * Go for performance at the expense of build time, using
-;;;     #+(OR SBCL SB-XC) and also making SBCL do not just
-;;;     make-host-1.sh and make-host-2.sh, but a third step
-;;;     make-host-3.sh where it builds itself under itself. (Such a
-;;;     3-step build process could also help with other things, e.g.
-;;;     using specialized arrays to represent debug information.)
-;;;   * Rewrite the code so that it doesn't depend on unportable
-;;;     floating point infinities.
-
 ;;; optimizers for SCALE-FLOAT. If the float has bounds, new bounds
 ;;; are computed for the result, if possible.
-#-sb-xc-host ; (See CROSS-FLOAT-INFINITY-KLUDGE.)
-(progn
-
 (defun scale-float-derive-type-aux (f ex same-arg)
   (declare (ignore same-arg))
   (flet ((scale-bound (x n)
@@ -267,8 +239,8 @@
            ;; zeros.
            (set-bound
             (handler-case
-             (scale-float (type-bound-number x) n)
-             (floating-point-overflow ()
+                (scale-float (type-bound-number x) n)
+              (floating-point-overflow ()
                 nil))
             (consp x))))
     (when (and (numeric-type-p f) (numeric-type-p ex))
@@ -279,13 +251,13 @@
             (new-lo nil)
             (new-hi nil))
         (when f-hi
-          (if (< (float-sign (type-bound-number f-hi)) $0.0)
+          (if (sb-xc:< (float-sign (type-bound-number f-hi)) $0.0)
               (when ex-lo
                 (setf new-hi (scale-bound f-hi ex-lo)))
               (when ex-hi
                 (setf new-hi (scale-bound f-hi ex-hi)))))
         (when f-lo
-          (if (< (float-sign (type-bound-number f-lo)) $0.0)
+          (if (sb-xc:< (float-sign (type-bound-number f-lo)) $0.0)
               (when ex-hi
                 (setf new-lo (scale-bound f-lo ex-hi)))
               (when ex-lo
@@ -314,13 +286,13 @@
               ;; When converting a number to a float, the limits are
               ;; the same.
               (let* ((lo (bound-func (lambda (x)
-                                       (if (< x ,most-negative)
+                                       (if (sb-xc:< x ,most-negative)
                                            ,most-negative
                                            (coerce x ',type)))
                                      (numeric-type-low num)
                                      nil))
                      (hi (bound-func (lambda (x)
-                                       (if (< ,most-positive x )
+                                       (if (sb-xc:< ,most-positive x )
                                            ,most-positive
                                            (coerce x ',type)))
                                      (numeric-type-high num)
@@ -336,7 +308,6 @@
         sb-xc:most-negative-single-float sb-xc:most-positive-single-float)
   (frob %double-float double-float
         sb-xc:most-negative-double-float sb-xc:most-positive-double-float))
-) ; PROGN
 
 ;;;; float contagion
 
@@ -478,35 +449,6 @@
   (frob =)
   (frob = t))
 
-;;;; irrational derive-type methods
-
-;;; Derive the result to be float for argument types in the
-;;; appropriate domain.
-#+sb-xc-host ; (See CROSS-FLOAT-INFINITY-KLUDGE.)
-(dolist (stuff '((asin (real $-1.0 $1.0))
-                 (acos (real $-1.0 $1.0))
-                 (acosh (real $1.0))
-                 (atanh (real $-1.0 $1.0))
-                 (sqrt (real $0.0))))
-  (destructuring-bind (name type) stuff
-    (let ((type (specifier-type type)))
-      (setf (fun-info-derive-type (fun-info-or-lose name))
-            (lambda (call)
-              (declare (type combination call))
-              (when (csubtypep (lvar-type
-                                (first (combination-args call)))
-                               type)
-                (specifier-type 'float)))))))
-
-#+sb-xc-host ; (See CROSS-FLOAT-INFINITY-KLUDGE.)
-(defoptimizer (log derive-type) ((x &optional y))
-  (when (and (csubtypep (lvar-type x)
-                        (specifier-type '(real $0.0)))
-             (or (null y)
-                 (csubtypep (lvar-type y)
-                            (specifier-type '(real $0.0)))))
-    (specifier-type 'float)))
-
 ;;;; irrational transforms
 
 (macrolet ((def (name prim rtype)
@@ -614,9 +556,6 @@
   (and (numeric-type-p type)
        (eq (numeric-type-complexp type) :real)))
 
-#-sb-xc-host ; (See CROSS-FLOAT-INFINITY-KLUDGE.)
-(progn
-
 ;;;; optimizers for elementary functions
 ;;;;
 ;;;; These optimizers compute the output range of the elementary
@@ -646,8 +585,6 @@
     (specifier-type `(or (,float-type ,(or lo '*) ,(or hi '*))
                          (complex ,float-type)))))
 
-) ; PROGN
-
 (eval-when (:compile-toplevel :execute)
   ;; So the problem with this hack is that it's actually broken.  If
   ;; the host does not have long floats, then setting *R-D-F-F* to
@@ -658,7 +595,6 @@
 ;;; Test whether the numeric-type ARG is within the domain specified by
 ;;; DOMAIN-LOW and DOMAIN-HIGH, consider negative and positive zero to
 ;;; be distinct.
-#-sb-xc-host  ; (See CROSS-FLOAT-INFINITY-KLUDGE.)
 (defun domain-subtypep (arg domain-low domain-high)
   (declare (type numeric-type arg)
            (type (or real null) domain-low domain-high))
@@ -690,11 +626,11 @@
            (fp-pos-zero-p (f)           ; Is F +0.0?
              (and (floatp f) (zerop f) (= (float-sign-bit f) 0))))
       (and (or (null domain-low)
-               (and arg-lo (>= arg-lo-val domain-low)
+               (and arg-lo (sb-xc:>= arg-lo-val domain-low)
                     (not (and (fp-pos-zero-p domain-low)
                               (fp-neg-zero-p arg-lo)))))
            (or (null domain-high)
-               (and arg-hi (<= arg-hi-val domain-high)
+               (and arg-hi (sb-xc:<= arg-hi-val domain-high)
                     (not (and (fp-neg-zero-p domain-high)
                               (fp-pos-zero-p arg-hi)))))))))
 
@@ -707,9 +643,7 @@
 (defstruct (interval (:constructor %make-interval (low high))
                      (:copier nil))
   low high)
-
-#-sb-xc-host ; (See CROSS-FLOAT-INFINITY-KLUDGE.)
-(progn
+(declaim (freeze-type interval))
 
 ;;; Handle monotonic functions of a single variable whose domain is
 ;;; possibly part of the real line. ARG is the variable, FUN is the
@@ -813,13 +747,17 @@
 ;;; y) = (exp (* y (log x))). However, computations done this way
 ;;; have too much roundoff. Thus we have to do it the hard way.
 (defun safe-expt (x y)
-  #+sb-xc-host (when (< (abs y) 10000) (expt x y))
-  #-sb-xc-host
-  (handler-case
-      (when (< (abs y) 10000)
-        (expt x y))
-    (error ()
-      nil)))
+  (when (and (numberp x) (numberp y))
+    (handler-case
+        (when (< (abs y) 10000)
+          (expt x y))
+      ;; Currently we can hide unanticipated errors (such as failure to use SB-XC: math
+      ;; when cross-compiling) as well as the anticipated potential problem of overflow.
+      ;; So don't handle anything when cross-compiling.
+      ;; FIXME: I think this should not handle ERROR, but just FLOATING-POINT-OVERFLOW.
+      (#+sb-xc-host nil
+       #-sb-xc-host error ()
+        nil))))
 
 ;;; Handle the case when x >= 1.
 (defun interval-expt-> (x y)
@@ -1116,7 +1054,7 @@
                    (t (numeric-type-format arg))))
          (bound-type (or format 'float)))
     (cond ((numeric-type-real-p arg)
-           (case (interval-range-info (numeric-type->interval arg) $0.0)
+           (case (interval-range-info> (numeric-type->interval arg) $0.0)
              (+
               ;; The number is positive, so the phase is 0.
               (make-numeric-type :class 'float
@@ -1156,8 +1094,6 @@
 
 (defoptimizer (phase derive-type) ((num))
   (one-arg-derive-type num #'phase-derive-type-aux #'phase))
-
-) ; PROGN
 
 (deftransform realpart ((x) ((complex rational)) *)
   '(%realpart x))
@@ -1259,7 +1195,6 @@
                                             :complex)))))
       (specifier-type 'complex)))
 
-#-sb-xc-host ; (See CROSS-FLOAT-INFINITY-KLUDGE.)
 (defoptimizer (complex derive-type) ((re &optional im))
   (if im
       (two-arg-derive-type re im #'complex-derive-type-aux-2 #'complex)
@@ -1413,10 +1348,8 @@
 ;;; possible answer. This gets around the problem of doing range
 ;;; reduction correctly but still provides useful results when the
 ;;; inputs are union types.
-#-sb-xc-host ; (See CROSS-FLOAT-INFINITY-KLUDGE.)
-(progn
 (defun trig-derive-type-aux (arg domain fun
-                                 &optional def-lo def-hi (increasingp t))
+                             &optional def-lo def-hi (increasingp t))
   (etypecase arg
     (numeric-type
      (flet ((floatify-format ()
@@ -1510,7 +1443,7 @@
                   (high (numeric-type-high arg)))
               (let ((new-low (most-negative-bound low high))
                     (new-high (most-positive-bound low high)))
-              (modified-numeric-type arg :low new-low :high new-high))))))
+                (modified-numeric-type arg :low new-low :high new-high))))))
     #'conjugate))
 
 (defoptimizer (cis derive-type) ((num))
@@ -1520,7 +1453,6 @@
        `(complex ,(or (numeric-type-format arg) 'float))))
     #'cis))
 
-) ; PROGN
 
 ;;;; TRUNCATE, FLOOR, CEILING, and ROUND
 

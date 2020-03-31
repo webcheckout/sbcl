@@ -136,8 +136,7 @@
   (:results (res :scs (any-reg descriptor-reg)))
   (:policy :fast-safe)
   (:generator 1
-    (inst andi res ptr (lognot lowtag-mask))
-    (inst srli res res (- n-lowtag-bits n-fixnum-tag-bits))))
+    (inst andi res ptr (lognot fixnum-tag-mask))))
 
 
 ;;;; Allocation
@@ -274,7 +273,7 @@
     (emit-alignment 2)))
 
 ;;;; Dummy definition for a spin-loop hint VOP
-(define-vop (spin-loop-hint)
+(define-vop ()
   (:translate spin-loop-hint)
   (:policy :fast-safe)
   (:generator 0))

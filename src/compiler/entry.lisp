@@ -14,11 +14,7 @@
 (in-package "SB-C")
 
 ;;; This phase runs before IR2 conversion, initializing each XEP's
-;;; ENTRY-INFO structure. We call the VM-supplied
-;;; SELECT-COMPONENT-FORMAT function to make VM-dependent
-;;; initializations in the IR2-COMPONENT. This includes setting the
-;;; IR2-COMPONENT-KIND and allocating fixed implementation overhead in
-;;; the constant pool. If there was a forward reference to a function,
+;;; ENTRY-INFO structure.  If there was a forward reference to a function,
 ;;; then the ENTRY-INFO will already exist, but will be uninitialized.
 (defun entry-analyze (component)
   (let ((2comp (component-info component)))
@@ -28,7 +24,6 @@
                         (setf (leaf-info fun) (make-entry-info)))))
           (compute-entry-info fun info)
           (push info (ir2-component-entries 2comp))))))
-  (select-component-format component)
   (values))
 
 ;;; An "effectively" null environment captures at most
@@ -63,11 +58,11 @@
     (setf (entry-info-offset info) (gen-label))
     (setf (entry-info-name info)
           (leaf-debug-name internal-fun))
-    (let ((form (functional-inline-expansion internal-fun))
-          (doc (functional-documentation internal-fun))
-          (xrefs (pack-xref-data (functional-xref internal-fun))))
-      (setf (entry-info-form/doc/xrefs info)
-            (list (if (fasl-output-p *compile-object*)
+    (setf (entry-info-xref info) (pack-xref-data (functional-xref internal-fun)))
+    (let* ((inline-expansion (functional-inline-expansion internal-fun))
+           (form  (if (fasl-output-p *compile-object*)
+                      ;; If compiling to a file, we only store sources if the STORE-SOURCE
+                      ;; quality value is 3. If to memory, any nonzero value will do.
                       (and (policy bind (= store-source-form 3))
                            ;; Downgrade the error to a warning if this was signaled
                            ;; by SB-PCL::DONT-KNOW-HOW-TO-DUMP.
@@ -83,20 +78,25 @@
                                      ;; on MAKE-LOAD-FORM?  Why did we choose to further obfuscate
                                      ;; a condition that was reflectable and instead turn it
                                      ;; into a dumb text string?
-                                     (when (and (typep c 'simple-error)
-                                                (search "know how to dump"
-                                                        (simple-condition-format-control c)))
-                                       ;; This might be worth a full warning. Dunno.
-                                       ;; After all, the user asked to do what can't be done.
-                                       (compiler-style-warn
+                                     (if (and (typep c 'simple-error)
+                                              (stringp (simple-condition-format-control c))
+                                              (search "know how to dump"
+                                                      (simple-condition-format-control c)))
+                                         ;; This might be worth a full warning. Dunno.
+                                         ;; After all, the user asked to do what can't be done.
+                                         (compiler-style-warn
                                         "Can't preserve function source - ~
 missing MAKE-LOAD-FORM methods?")
-                                       (return nil)))))
-                               (constant-value (find-constant form)))))
+                                         (compiler-style-warn
+                                          "Can't preserve function source: ~A"
+                                          (princ-to-string c)))
+                                       (return nil))))
+                               (constant-value (find-constant inline-expansion)))))
                       (and (policy bind (> store-source-form 0))
-                           form))
-                  doc
-                  xrefs)))
+                           inline-expansion)))
+           (doc (functional-documentation internal-fun)))
+      (setf (entry-info-form/doc info)
+            (if (and form doc) (cons form doc) (or form doc))))
     (when (policy bind (>= debug 1))
       (let ((args (functional-arg-documentation internal-fun)))
         ;; When the component is dumped, the arglists of the entry

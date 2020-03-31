@@ -37,7 +37,7 @@
 #include "interr.h"
 #include "alloc.h"
 #include "gc-internal.h"
-#include "pseudo-atomic.h"
+#include "getallocptr.h"
 #include "interrupt.h"
 #include "lispregs.h"
 
@@ -993,7 +993,7 @@ wake_thread_posix(os_thread_t os_thread)
                                  * transition. */
                                 int status = pthread_kill(os_thread, SIGPIPE);
                                 if (status)
-                                    lose("wake_thread_posix: pthread_kill failed with %d\n",
+                                    lose("wake_thread_posix: pthread_kill failed with %d",
                                          status);
                             }
                             break;

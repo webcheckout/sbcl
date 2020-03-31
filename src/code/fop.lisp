@@ -221,8 +221,14 @@
   (error nil :read-only t))
 (declaim (freeze-type undefined-package))
 
-;; Cold load has its own implementation of all symbol fops,
-;; but we have to execute define-fop now to assign their numbers.
+;;; Cold load has its own implementation of all symbol fops,
+;;; but we have to execute define-fop now to assign their numbers.
+;;;
+;;; Any symbols created by the loader must have their SYMBOL-HASH computed.
+;;; This is a requirement for the CASE macro to work. When code is compiled
+;;; to memory, symbols in the expansion are subject to SXHASH, so all is well.
+;;; When loaded, even uninterned symbols need a hash.
+;;; Interned symbols automatically get a precomputed hash.
 (labels #+sb-xc-host ()
         #-sb-xc-host
         ((read-symbol-name (length+flag fasl-input)
@@ -250,12 +256,6 @@
                               (undefined-package-error package)))
                  (push-fop-table (%intern name length package elt-type t)
                                  fasl-input))))
-         ;; Symbol-hash is usually computed lazily and memoized into a symbol.
-         ;; Laziness slightly improves the speed of allocation.
-         ;; But when loading fasls, the time spent in the loader totally swamps
-         ;; any time savings of not precomputing symbol-hash.
-         ;; INTERN hashes everything anyway, so let's be consistent
-         ;; and precompute the hashes of uninterned symbols too.
          (ensure-hashed (symbol)
            (ensure-symbol-hash symbol)
            symbol))
@@ -512,9 +512,9 @@
 ;;; putting the implementation and version in required fields in the
 ;;; fasl file header.)
 
-;; Cold-load calls COLD-LOAD-CODE instead
 (define-fop 16 :not-host (fop-load-code ((:operands header n-code-bytes n-fixups)))
-  (let* ((n-boxed-words (ash header -1))
+  (let* ((n-named-calls (read-unsigned-byte-32-arg (fasl-input-stream)))
+         (n-boxed-words (ash header -1))
          (n-constants (- n-boxed-words sb-vm:code-constants-offset)))
     ;; stack has (at least) N-CONSTANTS words plus debug-info
     (with-fop-stack ((stack (operand-stack)) ptr (1+ n-constants))
@@ -522,14 +522,21 @@
              (n-boxed-words (+ sb-vm:code-constants-offset n-constants))
              (code (sb-c:allocate-code-object
                     (if (oddp header) :immobile :dynamic)
+                    n-named-calls
                     (align-up n-boxed-words sb-c::code-boxed-words-align)
                     n-code-bytes)))
-        (setf (%code-debug-info code) (svref stack debug-info-index))
         (loop for i of-type index from sb-vm:code-constants-offset
               for j of-type index from ptr below debug-info-index
               do (setf (code-header-ref code i) (svref stack j)))
         (with-pinned-objects (code)
+          ;; * DO * NOT * SEPARATE * THESE * STEPS *
+          ;; For a full explanation, refer to the comment above MAKE-CORE-COMPONENT
+          ;; concerning the corresponding use therein of WITH-PINNED-OBJECTS etc.
           (read-n-bytes (fasl-input-stream) (code-instructions code) 0 n-code-bytes)
+          (sb-thread:barrier (:write))
+          ;; Assign debug-info last. A code object that has no debug-info will never
+          ;; have its fun table accessed in conservative_root_p() or pin_object().
+          (setf (%code-debug-info code) (svref stack debug-info-index))
           (sb-c::apply-fasl-fixups stack code n-fixups))
         #-sb-xc-host
         (when (typep (code-header-ref code (1- n-boxed-words))
@@ -557,14 +564,8 @@
     (setf (code-header-ref code index) value)
     (values)))
 
-(define-fop 20 :not-host (fop-fun-entry ((:operands fun-index)
-                                           code-object name arglist type info))
-  (let ((fun (%code-entry-point code-object fun-index)))
-    (setf (%simple-fun-name fun) name)
-    (setf (%simple-fun-arglist fun) arglist)
-    (setf (%simple-fun-type fun) type)
-    (apply #'set-simple-fun-info fun info)
-    fun))
+(define-fop 20 :not-host (fop-fun-entry ((:operands fun-index) code-object))
+  (%code-entry-point code-object fun-index))
 
 ;;;; assemblerish fops
 
@@ -622,14 +623,19 @@
                                                          (cadr spec)))
                                           (find-layout ',(cadr spec))))
                           specs))))
-  (frob (#x6c t)
-        (#x6d structure-object)
-        (#x6e condition)
-        (#x6f definition-source-location)
-        (#x70 sb-c::debug-fun)
-        (#x71 sb-c::compiled-debug-fun)
-        (#x72 sb-c::debug-info)
-        (#x73 sb-c::compiled-debug-info)
-        (#x74 sb-c::debug-source)
-        (#x75 defstruct-description)
-        (#x76 defstruct-slot-description)))
+  (frob (#x68 t)
+        (#x69 structure-object)
+        (#x6a condition)
+        (#x6b definition-source-location)
+        (#x6c sb-c::debug-info)
+        (#x6d sb-c::compiled-debug-info)
+        (#x6e sb-c::debug-source)
+        (#x6f defstruct-description)
+        (#x70 defstruct-slot-description)
+        (#x71 sb-c::debug-fun)
+        (#x72 sb-c::compiled-debug-fun)
+        (#x73 sb-c::compiled-debug-fun-optional)
+        (#x74 sb-c::compiled-debug-fun-more)
+        (#x75 sb-c::compiled-debug-fun-external)
+        (#x76 sb-c::compiled-debug-fun-toplevel)
+        (#x77 sb-c::compiled-debug-fun-cleanup)))

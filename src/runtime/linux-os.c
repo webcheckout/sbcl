@@ -64,8 +64,6 @@ int personality (unsigned long);
 #include <sys/personality.h>
 #endif
 
-size_t os_vm_page_size;
-
 #if defined(LISP_FEATURE_SB_THREAD) && defined(LISP_FEATURE_SB_FUTEX) && !defined(LISP_FEATURE_SB_PTHREAD_FUTEX)
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -112,7 +110,7 @@ futex_init()
     if (errno == ENOSYS)
         lose("This version of SBCL is compiled with threading support, but your kernel\n"
              "is too old to support this. Please use a more recent kernel or\n"
-             "a version of SBCL without threading support.\n");
+             "a version of SBCL without threading support.");
     sys_futex(&x, FUTEX_WAIT_PRIVATE, 1, 0);
     if (errno == EWOULDBLOCK) {
         futex_private_supported_p = 1;
@@ -174,7 +172,6 @@ futex_wake(int *lock_word, int n)
 #endif
 
 
-int linux_sparc_siginfo_bug = 0;
 
 #ifdef LISP_FEATURE_SB_THREAD
 int
@@ -215,18 +212,6 @@ static void getuname(int *major_version, int* minor_version, int *patch_version)
 void os_init(char __attribute__((unused)) *argv[],
              char __attribute__((unused)) *envp[])
 {
-    int major_version, minor_version, patch_version;
-    getuname(&major_version, &minor_version, &patch_version);
-    if (major_version<2) {
-        lose("linux kernel version too old: major version=%d (can't run in version < 2.0.0)\n",
-             major_version);
-    }
-    if (!(major_version>2 || minor_version >= 4)) {
-#ifdef LISP_FEATURE_SPARC
-        FSHOW((stderr,"linux kernel %d.%d predates 2.4;\n enabling workarounds for SPARC kernel bugs in signal handling.\n", major_version,minor_version));
-        linux_sparc_siginfo_bug = 1;
-#endif
-    }
 #ifdef LISP_FEATURE_SB_THREAD
 #if defined(LISP_FEATURE_SB_FUTEX) && !defined(LISP_FEATURE_SB_PTHREAD_FUTEX)
     futex_init();
@@ -234,15 +219,9 @@ void os_init(char __attribute__((unused)) *argv[],
     if(! isnptl()) {
        lose("This version of SBCL only works correctly with the NPTL threading\n"
             "library. Please use a newer glibc, use an older SBCL, or stop using\n"
-            "LD_ASSUME_KERNEL\n");
+            "LD_ASSUME_KERNEL");
     }
 #endif
-
-    /* Don't use getpagesize(), since it's not constant across Linux
-     * kernel versions on some architectures (for example PPC). FIXME:
-     * possibly the same should be done on other architectures too.
-     */
-    os_vm_page_size = BACKEND_PAGE_BYTES;
 
 #ifdef LISP_FEATURE_X86
     /* Use SSE detector.  Recent versions of Linux enable SSE support
@@ -261,6 +240,20 @@ void os_init(char __attribute__((unused)) *argv[],
 
 int os_preinit(char *argv[], char *envp[])
 {
+    int major_version, minor_version, patch_version;
+    getuname(&major_version, &minor_version, &patch_version);
+    if (major_version<2) {
+        lose("linux kernel version too old: major version=%d (can't run in version < 2.0.0)",
+             major_version);
+    }
+    // Rev b44ca02cb963 conditionally enabled a workaround for a kernel 2.6 bug.
+    // Rev d4d6c4b16a36 moved the workaround check from compile-time to runtime.
+    // 14 years later we're still performing that check, which annoyingly adds
+    // signal-related junk to startup which must be ignored when debugging.
+    // Let's assume that major version 3 and later are fine.
+    extern void set_sigaction_nodefer_works();
+    if (major_version>=3) set_sigaction_nodefer_works();
+
 #if ALLOW_PERSONALITY_CHANGE
     if (getenv("SBCL_IS_RESTARTING")) {
         /* We restarted due to previously enabled ASLR.  Now,
@@ -277,15 +270,12 @@ int os_preinit(char *argv[], char *envp[])
     if (allocate_hardwired_spaces(0)) // soft failure mode
         return 1; // indicate that we already allocated hardwired spaces
 
+#if ALLOW_PERSONALITY_CHANGE
     /* KLUDGE: Disable memory randomization on new Linux kernels
      * by setting a personality flag and re-executing. (We need
      * to re-execute, since the memory maps that can conflict with
      * the SBCL spaces have already been done at this point).
      */
-    int major_version, minor_version, patch_version;
-    getuname(&major_version, &minor_version, &patch_version);
-
-#if ALLOW_PERSONALITY_CHANGE
     if ((major_version == 2
          /* Some old kernels will apparently lose unsupported personality flags
           * on exec() */
@@ -332,23 +322,6 @@ int os_preinit(char *argv[], char *envp[])
 #endif
     return 0;
 }
-
-
-#ifdef LISP_FEATURE_ALPHA
-/* The Alpha is a 64 bit CPU.  SBCL is a 32 bit application.  Due to all
- * the places that assume we can get a pointer into a fixnum with no
- * information loss, we have to make sure it allocates all its ram in the
- * 0-2Gb region.  */
-
-static void * under_2gb_free_pointer;
-os_set_cheneygc_spaces(uword_t space0_start, uword_t space1_start)
-{
-    uword_t max;
-    max = (space1_start > space0_start) ? space1_start : space0_start;
-    under_2gb_free_pointer = max + dynamic_space_size;
-}
-
-#endif
 
 void
 os_protect(os_vm_address_t address, os_vm_size_t length, os_vm_prot_t prot)

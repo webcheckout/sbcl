@@ -248,14 +248,20 @@
 (eval-when (:compile-toplevel :execute)
   ;; Don't use a macro for this, because define-vop is weird.
   (defun bignum-from-reg (tn signedp)
-    `(aref ',(map 'vector
+    (flet ((make-vector (suffix)
+             (map 'vector
                   (lambda (x)
                     ;; At present R11 can not occur here,
                     ;; but let's be future-proof and allow for it.
                     (unless (member x '(rsp rbp) :test 'string=)
-                      (symbolicate "ALLOC-" signedp "-BIGNUM-IN-" x)))
-                  +qword-register-names+)
-           (tn-offset ,tn))))
+                      (symbolicate "ALLOC-" signedp "-BIGNUM-IN-" x suffix)))
+                  +qword-register-names+)))
+      `(aref (cond #+avx2
+                   ((avx-registers-used-p)
+                    ',(make-vector "-AVX2"))
+                   (t
+                    ',(make-vector "")))
+             (tn-offset ,tn)))))
 
 ;;; Convert an untagged signed word to a lispobj -- fixnum or bignum
 ;;; as the case may be. Fixnum case inline, bignum case in an assembly
@@ -290,17 +296,31 @@
   (:args (x :scs (signed-reg unsigned-reg)))
   (:results (y :scs (any-reg descriptor-reg)))
   (:generator 4
-    #.(aver (= n-fixnum-tag-bits 1))
-    (move y x)
-    (inst shl y 1)
-    (inst cmov :o y (emit-constant (1+ sb-xc:most-positive-fixnum)))))
+    (cond ((= n-fixnum-tag-bits 1)
+           (move y x)
+           (inst shl y 1)
+           (inst cmov :o y (emit-constant (1+ sb-xc:most-positive-fixnum))))
+          (t
+           ;; not worth optimizing into SHL. The processor doesn't set OF for
+           ;; for shift count > 1 so we'd have to detect overflow differently.
+           (inst imul y x (ash 1 n-fixnum-tag-bits))
+           (inst jmp :no DONE)
+           (move y (emit-constant (1+ sb-xc:most-positive-fixnum)))))
+    DONE))
 
 (define-vop (move-from-fixnum-1 move-from-fixnum+1)
   (:generator 4
-    #.(aver (= n-fixnum-tag-bits 1))
-    (move y x)
-    (inst shl y 1)
-    (inst cmov :o y (emit-constant (1- sb-xc:most-negative-fixnum)))))
+    (cond ((= n-fixnum-tag-bits 1)
+           (move y x)
+           (inst shl y 1)
+           (inst cmov :o y (emit-constant (1- sb-xc:most-negative-fixnum))))
+          (t
+           ;; not worth optimizing into SHL. The processor doesn't set OF for
+           ;; for shift count > 1 so we'd have to detect overflow differently.
+           (inst imul y x (ash 1 n-fixnum-tag-bits))
+           (inst jmp :no DONE)
+           (move y (emit-constant (1- sb-xc:most-negative-fixnum)))))
+    DONE))
 
 ;;; Convert an untagged unsigned word to a lispobj -- fixnum or bignum
 ;;; as the case may be. Fixnum case inline, bignum case in an assembly

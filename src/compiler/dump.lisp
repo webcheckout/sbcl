@@ -21,7 +21,6 @@
 ;;; know about dumping to a fasl file. (We need to objectify the
 ;;; state because the fasdumper must be reentrant.)
 (defstruct (fasl-output
-            #-no-ansi-print-object
             (:print-object (lambda (x s)
                              (print-unreadable-object (x s :type t)
                                (prin1 (namestring (fasl-output-stream x))
@@ -35,12 +34,12 @@
   (varint-buf (make-array 10 :element-type '(unsigned-byte 8) :fill-pointer t))
   ;; hashtables we use to keep track of dumped constants so that we
   ;; can get them from the table rather than dumping them again. The
-  ;; EQUAL-TABLE is used for lists and strings, and the EQ-TABLE is
+  ;; SIMILAR-TABLE is used for lists and strings, and the EQ-TABLE is
   ;; used for everything else. We use a separate EQ table to avoid
   ;; performance pathologies with objects for which EQUAL degenerates
-  ;; to EQL. Everything entered in the EQUAL table is also entered in
+  ;; to EQL. Everything entered in the SIMILAR table is also entered in
   ;; the EQ table.
-  (equal-table (make-hash-table :test 'equal) :type hash-table)
+  (similar-table (make-hash-table :test 'equal) :type hash-table)
   (eq-table (make-hash-table :test 'eq) :type hash-table)
   ;; Hashtable mapping a string to a list of fop-table indices of
   ;; symbols whose name is that string. For any name as compared
@@ -75,6 +74,7 @@
   (valid-structures (make-hash-table :test 'eq) :type hash-table)
   ;; DEBUG-SOURCE written at the very beginning
   (source-info nil :type (or null sb-c::debug-source)))
+(declaim (freeze-type fasl-output))
 
 ;;; This structure holds information about a circularity.
 (defstruct (circularity (:copier nil))
@@ -185,21 +185,14 @@
     (dump-fop 'fop-move-to-table fasl-output)
     (incf (fasl-output-table-free fasl-output))))
 
-;;; If X is in File's EQUAL-TABLE, then push the object and return T,
+;;; If X is in File's SIMILAR-TABLE, then push the object and return T,
 ;;; otherwise NIL.
-(defun equal-check-table (x fasl-output)
+(defun similar-check-table (x fasl-output)
   (declare (type fasl-output fasl-output))
-  (let ((handle (gethash x (fasl-output-equal-table fasl-output))))
-    (cond
-     (handle (dump-push handle fasl-output) t)
-     (t nil))))
-(defun string-check-table (x fasl-output)
-  (declare (type fasl-output fasl-output)
-           (type string x))
-  (let ((handle (cdr (assoc
-                      #+sb-xc-host 'base-char ; for repeatable xc fasls
-                      #-sb-xc-host (array-element-type x)
-                      (gethash x (fasl-output-equal-table fasl-output))))))
+  (let ((handle
+         (dolist (candidate (gethash x (fasl-output-similar-table fasl-output)))
+           (when (sb-c::similarp (car candidate) x)
+             (return (cdr candidate))))))
     (cond
      (handle (dump-push handle fasl-output) t)
      (t nil))))
@@ -212,20 +205,10 @@
   (setf (gethash x (fasl-output-eq-table fasl-output))
         (dump-to-table fasl-output))
   (values))
-(defun equal-save-object (x fasl-output)
+(defun similar-save-object (x fasl-output)
   (declare (type fasl-output fasl-output))
   (let ((handle (dump-to-table fasl-output)))
-    (setf (gethash x (fasl-output-equal-table fasl-output)) handle)
-    (setf (gethash x (fasl-output-eq-table fasl-output)) handle))
-  (values))
-(defun string-save-object (x fasl-output)
-  (declare (type fasl-output fasl-output)
-           (type string x))
-  (let ((handle (dump-to-table fasl-output)))
-    (push (cons #+sb-xc-host 'base-char ; repeatable xc fasls
-                #-sb-xc-host (array-element-type x)
-                handle)
-          (gethash x (fasl-output-equal-table fasl-output)))
+    (push (cons x handle) (gethash x (fasl-output-similar-table fasl-output)))
     (setf (gethash x (fasl-output-eq-table fasl-output)) handle))
   (values))
 ;;; Record X in File's CIRCULARITY-TABLE. This is called on objects
@@ -339,9 +322,9 @@
               (cond ((not (coalesce-tree-p x))
                      (dump-list x file)
                      (eq-save-object x file))
-                    ((not (equal-check-table x file))
+                    ((not (similar-check-table x file))
                      (dump-list x file t)
-                     (equal-save-object x file))))
+                     (similar-save-object x file))))
              (layout
               (dump-layout x file)
               (eq-save-object x file))
@@ -364,37 +347,41 @@
               ;; updating the EQ and EQUAL hash tables.
               (dump-array x file))
              (number
-              (unless (equal-check-table x file)
+              (unless (similar-check-table x file)
                 (etypecase x
                   (ratio (dump-ratio x file))
                   (complex (dump-complex x file))
                   (float (dump-float x file))
                   (integer (dump-integer x file)))
-                (equal-save-object x file)))
+                (similar-save-object x file)))
              #+(and (not sb-xc-host) sb-simd-pack)
              (simd-pack
-              (unless (equal-check-table x file)
+              (unless (similar-check-table x file)
                 (dump-fop 'fop-simd-pack file)
                 (dump-integer-as-n-bytes (%simd-pack-tag  x) 8 file)
                 (dump-integer-as-n-bytes (%simd-pack-low  x) 8 file)
-                (dump-integer-as-n-bytes (%simd-pack-high x) 8 file))
-              (equal-save-object x file))
+                (dump-integer-as-n-bytes (%simd-pack-high x) 8 file)
+                (similar-save-object x file)))
              #+(and (not sb-xc-host) sb-simd-pack-256)
              (simd-pack-256
-              (unless (equal-check-table x file)
-                (dump-fop 'fop-simd-pack file)
-                (dump-integer-as-n-bytes (logior (%simd-pack-256-tag x) 4) 8 file)
-                (dump-integer-as-n-bytes (%simd-pack-256-0 x) 8 file)
-                (dump-integer-as-n-bytes (%simd-pack-256-1 x) 8 file)
-                (dump-integer-as-n-bytes (%simd-pack-256-2 x) 8 file)
-                (dump-integer-as-n-bytes (%simd-pack-256-3 x) 8 file))
-              (equal-save-object x file))
+              (unless (similar-check-table x file)
+                (dump-simd-pack-256 x file)
+                (similar-save-object x file)))
              (t
               ;; This probably never happens, since bad things tend to
               ;; be detected during IR1 conversion.
               (error "This object cannot be dumped into a fasl file:~% ~S"
                      x))))))
   (values))
+
+#+(and (not sb-xc-host) sb-simd-pack-256)
+(defun dump-simd-pack-256 (x file)
+  (dump-fop 'fop-simd-pack file)
+  (dump-integer-as-n-bytes (logior (%simd-pack-256-tag x) 4) 8 file)
+  (dump-integer-as-n-bytes (%simd-pack-256-0 x) 8 file)
+  (dump-integer-as-n-bytes (%simd-pack-256-1 x) 8 file)
+  (dump-integer-as-n-bytes (%simd-pack-256-2 x) 8 file)
+  (dump-integer-as-n-bytes (%simd-pack-256-3 x) 8 file))
 
 ;;; Dump an object of any type by dispatching to the correct
 ;;; type-specific dumping function. We pick off immediate objects,
@@ -664,9 +651,9 @@
                          ((not coalesce)
                           (dump-list obj file)
                           (eq-save-object obj file))
-                         ((not (equal-check-table obj file))
+                         ((not (similar-check-table obj file))
                           (dump-list obj file t)
-                          (equal-save-object obj file)))))
+                          (similar-save-object obj file)))))
                 (t
                  (sub-dump-object obj file))))))))
 
@@ -712,17 +699,17 @@
       ;; On the host, take all strings to be simple-base-string.
       ;; In the target, really test for simple-base-string.
       (#+sb-xc-host simple-string #-sb-xc-host simple-base-string
-       (unless (string-check-table x file)
+       (unless (similar-check-table x file)
          (dump-fop 'fop-base-string file (length simple-version))
          (dump-chars simple-version file t)
-         (string-save-object x file)))
+         (similar-save-object x file)))
       #-sb-xc-host
       ((simple-array character (*))
        #-sb-unicode (bug "how did we get here?")
-       (unless (string-check-table x file)
+       (unless (similar-check-table x file)
          (dump-fop 'fop-character-string file (length simple-version))
          (dump-chars simple-version file nil)
-         (string-save-object x file)))
+         (similar-save-object x file)))
       ;; SB-XC:SIMPLE-VECTOR will not match an array whose element type
       ;; the host upgraded to T but whose expressed type was not T.
       (sb-xc:simple-vector
@@ -774,6 +761,14 @@
     (unless data-only
       (dump-fop 'fop-spec-vector file length)
       (dump-byte widetag file))
+
+    #+sb-xc-host
+    (when (or (= widetag sb-vm:simple-array-fixnum-widetag)
+              (= widetag sb-vm:simple-array-unsigned-fixnum-widetag))
+      ;; Fixnum vector contents are tagged numbers. Make a copy.
+      (setq vector (map 'vector (lambda (x) (ash x sb-vm:n-fixnum-tag-bits))
+                        vector)))
+
     ;; cross-io doesn't know about fasl streams, so use actual stream.
     (sb-impl::buffer-output (fasl-output-stream file)
                             vector
@@ -859,7 +854,8 @@
   (assert (<= (length +fixup-kinds+) 8))) ; fixup-kind fits in 3 bits
 
 (defconstant-eqx +fixup-flavors+
-  #(:assembly-routine :assembly-routine* :symbol-tls-index
+  #(:assembly-routine :assembly-routine* :asm-routine-nil-offset
+    :symbol-tls-index
     :foreign :foreign-dataref :code-object
     :layout :immobile-symbol :named-call :static-call
     :symbol-value)
@@ -903,7 +899,8 @@
             (ecase flavor
               (:code-object (the null name))
               (:layout (if (symbolp name) name (layout-classoid-name name)))
-              ((:assembly-routine :assembly-routine* :symbol-tls-index
+              ((:assembly-routine :assembly-routine* :asm-routine-nil-offset
+               :symbol-tls-index
                ;; Only #+immobile-space can use the following two flavors.
                ;; An :IMMOBILE-SYMBOL fixup references the symbol itself,
                ;; whereas a :SYMBOL-VALUE fixup references the value of the symbol.
@@ -936,7 +933,8 @@
   (let* ((n-fixups (dump-fixups fixups fasl-output))
          (2comp (component-info component))
          (constants (sb-c:ir2-component-constants 2comp))
-         (header-length (length constants)))
+         (header-length (length constants))
+         (n-named-calls 0))
     (collect ((patches))
       ;; Dump the constants, noting any :ENTRY constants that have to
       ;; be patched.
@@ -947,8 +945,10 @@
              (dump-object (sb-c::constant-value entry) fasl-output))
             (cons
              (ecase (car entry)
+               (:constant ; anything that has not been wrapped in a #<CONSTANT>
+                (dump-object (cadr entry) fasl-output))
                (:entry
-                (let* ((info (sb-c::leaf-info (cdr entry)))
+                (let* ((info (sb-c::leaf-info (cadr entry)))
                        (handle (gethash info
                                         (fasl-output-entry-table
                                          fasl-output))))
@@ -960,12 +960,13 @@
                     (patches (cons info i))
                     (dump-fop 'fop-misc-trap fasl-output)))))
                (:load-time-value
-                (dump-push (cdr entry) fasl-output))
-               (:fdefinition
-                (dump-object (cdr entry) fasl-output)
+                (dump-push (cadr entry) fasl-output))
+               ((:named-call :fdefinition)
+                (when (eq (car entry) :named-call) (incf n-named-calls))
+                (dump-object (cadr entry) fasl-output)
                 (dump-fop 'fop-fdefn fasl-output))
                (:known-fun
-                (dump-object (cdr entry) fasl-output)
+                (dump-object (cadr entry) fasl-output)
                 (dump-fop 'fop-known-fun fasl-output))))
             (null
              (dump-fop 'fop-misc-trap fasl-output)))))
@@ -980,7 +981,11 @@
                 (logior (ash header-length 1)
                         (if (sb-c::code-immobile-p component) 1 0))
                 code-length n-fixups)
-
+      ;; Fasl dumper/loader convention allows at most 3 integer args.
+      ;; Others have to be written with explicit calls.
+      (dump-integer-as-n-bytes (the (unsigned-byte 22) n-named-calls)
+                               4 ; output 4 bytes
+                               fasl-output)
       (dump-segment code-segment code-length fasl-output)
 
       (let ((handle (dump-pop fasl-output)))
@@ -1041,15 +1046,28 @@
          (entries (sb-c::ir2-component-entries 2comp))
          (nfuns (length entries))
          (code-handle
-          (dump-code-object component code-segment code-length fixups file))
+          ;; fill in the placeholder elements of constants
+          ;; with the NAME, ARGLIST, TYPE, INFO slots of each simple-fun.
+          (let ((constants (sb-c:ir2-component-constants 2comp))
+                (wordindex (+ sb-vm:code-constants-offset
+                              (* sb-vm:code-slots-per-simple-fun nfuns))))
+            (dolist (entry entries)
+              ;; Process in reverse order of ENTRIES.
+              ;; See also MAKE-CORE-COMPONENT which does the same thing.
+              (decf wordindex 4)
+              (setf (aref constants (+ wordindex sb-vm:simple-fun-name-slot))
+                    `(:constant ,(sb-c::entry-info-name entry))
+                    (aref constants (+ wordindex sb-vm:simple-fun-arglist-slot))
+                    `(:constant ,(sb-c::entry-info-arguments entry))
+                    (aref constants (+ wordindex sb-vm:simple-fun-source-slot))
+                    `(:constant ,(sb-c::entry-info-form/doc entry))
+                    (aref constants (+ wordindex sb-vm:simple-fun-info-slot))
+                    `(:constant ,(sb-c::entry-info-type/xref entry))))
+            (dump-code-object component code-segment code-length fixups file)))
          (fun-index nfuns))
 
     (dolist (entry entries)
       (dump-push code-handle file)
-      (dump-object (sb-c::entry-info-name entry) file)
-      (dump-object (sb-c::entry-info-arguments entry) file)
-      (dump-object (sb-c::entry-info-type entry) file)
-      (dump-object (sb-c::entry-info-form/doc/xrefs entry) file)
       (dump-fop 'fop-fun-entry file (decf fun-index))
       (let ((entry-handle (dump-pop file)))
         (setf (gethash entry (fasl-output-entry-table file)) entry-handle)

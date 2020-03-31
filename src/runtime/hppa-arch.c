@@ -24,11 +24,6 @@
 #include "interr.h"
 #include "breakpoint.h"
 
-void arch_init(void)
-{
-    return;
-}
-
 static inline unsigned int
 os_context_pc(os_context_t *context)
 {
@@ -196,7 +191,7 @@ static void restore_breakpoint(struct sigcontext *scp)
     /* state so that we will continue as if nothing happened. */
 
     if (NextPc == NULL)
-        lose("SingleStepBreakpoint trap at strange time.\n");
+        lose("SingleStepBreakpoint trap at strange time.");
 
     if ((SC_PC(scp)&~3) == (unsigned int)SingleStepTraps) {
         /* The next instruction was not nullified. */

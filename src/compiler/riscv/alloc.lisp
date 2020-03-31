@@ -39,9 +39,10 @@
                (let* ((cons-cells (if star (1- num) num))
                       (alloc (* (pad-data-block cons-size) cons-cells)))
                  (pseudo-atomic (pa-flag)
-                   (allocation res alloc list-pointer-lowtag
+                   (allocation 'list alloc list-pointer-lowtag res
                                :flag-tn pa-flag
-                               :stack-allocate-p (node-stack-allocate-p node))
+                               :stack-allocate-p (node-stack-allocate-p node)
+                               :temp-tn temp)
                    (move ptr res)
                    (dotimes (i (1- cons-cells))
                      (storew (maybe-load (tn-ref-tn things)) ptr
@@ -98,7 +99,7 @@
              (inst slli bytes words (- word-shift n-fixnum-tag-bits))
              (inst addi bytes bytes (* (1+ vector-data-offset) n-word-bytes))))
       (inst andi bytes bytes (lognot lowtag-mask))
-      (allocation result bytes other-pointer-lowtag :flag-tn pa-flag)
+      (allocation nil bytes other-pointer-lowtag result :flag-tn pa-flag)
       (storew type result 0 other-pointer-lowtag)
       (storew length result vector-length-slot other-pointer-lowtag))))
 
@@ -123,7 +124,8 @@
       (inst andi bytes bytes (lognot lowtag-mask))
 
       ;; FIXME: It would be good to check for stack overflow here.
-      (allocation result bytes other-pointer-lowtag :flag-tn pa-flag :stack-allocate-p t)
+      (allocation nil bytes other-pointer-lowtag result
+                  :flag-tn pa-flag :stack-allocate-p t)
 
       (storew type result 0 other-pointer-lowtag)
 
@@ -152,7 +154,7 @@
     (let* ((size (+ length closure-info-offset))
            (alloc-size (pad-data-block size)))
       (pseudo-atomic (pa-flag)
-        (allocation result alloc-size fun-pointer-lowtag
+        (allocation nil alloc-size fun-pointer-lowtag result
                     :flag-tn pa-flag
                     :stack-allocate-p stack-allocate-p)
         (inst li pa-flag (logior (ash (1- size) n-widetag-bits)
@@ -198,8 +200,8 @@
 (define-vop (var-alloc)
   (:args (extra :scs (any-reg)))
   (:arg-types positive-fixnum)
-  (:info name words type lowtag)
-  (:ignore name)
+  (:info name words type lowtag stack-allocate-p)
+  (:ignore name stack-allocate-p)
   (:temporary (:scs (any-reg)) bytes)
   (:temporary (:sc non-descriptor-reg) pa-flag)
   (:temporary (:sc non-descriptor-reg) header)
@@ -220,5 +222,5 @@
       (inst addi bytes bytes (* 2 n-word-bytes)))
     (inst andi bytes bytes (lognot lowtag-mask))
     (pseudo-atomic (pa-flag)
-      (allocation result bytes lowtag :flag-tn pa-flag)
+      (allocation nil bytes lowtag result :flag-tn pa-flag)
       (storew header result 0 lowtag))))

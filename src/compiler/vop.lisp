@@ -233,7 +233,7 @@
   ;; (to the debugger) locations in this block
   (locations nil :type list))
 
-(defprinter (ir2-block)
+(defprinter (ir2-block :identity t)
   (pushed :test pushed)
   (popped :test popped)
   (start-vop :test start-vop)
@@ -323,25 +323,37 @@
   ;; constant pool. A non-immediate :CONSTANT TN with offset 0 refers
   ;; to the constant in element 0, etc. Normal constants are
   ;; represented by the placing the CONSTANT leaf in this vector. A
-  ;; load-time constant is distinguished by being a cons (KIND .
-  ;; WHAT). KIND is a keyword indicating how the constant is computed,
-  ;; and WHAT is some context.
+  ;; load-time constant is distinguished by being a cons
+  ;; (KIND WHAT TN).
+  ;; KIND is a keyword indicating how the constant is computed, and
+  ;; WHAT is some context.
   ;;
   ;; These load-time constants are recognized:
   ;;
-  ;; (:entry . <function>)
+  ;; (:entry <function>)
   ;;    Is replaced by the code pointer for the specified function.
   ;;    This is how compiled code (including DEFUN) gets its hands on
   ;;    a function. <function> is the XEP lambda for the called
   ;;    function; its LEAF-INFO should be an ENTRY-INFO structure.
   ;;
-  ;; (:label . <label>)
-  ;;    Is replaced with the byte offset of that label from the start
-  ;;    of the code vector (including the header length.)
+  ;; (:fdefinition <name>)
+  ;;    Is replaced with the fdefn for NAME.
+  ;;
+  ;; (:known-fun <name>)
+  ;;    Is replaced with #'NAME for a system-internal function.
+  ;;
+  ;; (:load-time-value <handle>)
+  ;;    Is replaced with the result of executing the forms
+  ;;    to compute <handle>.
   ;;
   ;; A null entry in this vector is a placeholder for implementation
   ;; overhead that is eventually stuffed in somehow.
-  (constants (make-array 10 :fill-pointer 0 :adjustable t) :type vector)
+  ;; Prior to performing SORT-BOXED-CONSTANTS, the index 0 is reserved
+  ;; to signify something (other than NIL) if stored as a TN-OFFSET,
+  ;; though nothing makes use of this at present.
+  (constants (make-array 10 :fill-pointer 1 :adjustable t
+                         :initial-element :ignore)
+             :type vector :read-only t)
   ;; some kind of info about the component's run-time representation.
   ;; This is filled in by the VM supplied SELECT-COMPONENT-FORMAT function.
   format
@@ -362,7 +374,9 @@
   ;; setup-dynamic-count-info. (But only if we are generating code to
   ;; collect dynamic statistics.)
   #+sb-dyncount
-  (dyncount-info nil :type (or null dyncount-info)))
+  (dyncount-info nil :type (or null dyncount-info))
+  #+avx2
+  (avx2-used-p nil))
 
 ;;; An ENTRY-INFO condenses all the information that the dumper needs
 ;;; to create each XEP's function entry data structure. ENTRY-INFO
@@ -383,11 +397,16 @@
   (name "<not computed>" :type (or simple-string list symbol))
   ;; the argument list that the function was defined with.
   (arguments nil :type list)
+  ;; source form and/or docstring
+  (form/doc nil :type (or list string (cons t string)))
   ;; a function type specifier representing the arguments and results
   ;; of this function
   (type 'function :type (or list (member function)))
-  ;; source form and/or docstring and/or xref information for the XEP
-  (form/doc/xrefs nil :type (or null simple-vector string cons)))
+  (xref))
+(defun entry-info-type/xref (entry)
+  (let ((type (entry-info-type entry))
+        (xref (entry-info-xref entry)))
+    (if (and type xref) (cons type xref) (or type xref))))
 
 ;;; An IR2-PHYSENV is used to annotate non-LET LAMBDAs with their
 ;;; passing locations. It is stored in the PHYSENV-INFO.
@@ -501,7 +520,7 @@
 (def!struct (vop (:constructor make-vop (block node info args results))
                  (:copier nil))
   ;; VOP-INFO structure containing static info about the operation
-  (info nil :type (or vop-info null))
+  (info nil :type vop-info)
   ;; the IR2-BLOCK this VOP is in
   (block (missing-arg) :type ir2-block)
   ;; VOPs evaluated after and before this one. Null at the
@@ -709,7 +728,9 @@
   ;; a vector of the various targets that should be done. Each element
   ;; encodes the source ref (shifted 8, it is also encoded in
   ;; MAX-VOP-TN-REFS) and the dest ref index.
-  (targets nil :type (or null (simple-array (unsigned-byte 16) 1))))
+  (targets nil :type (or null (simple-array (unsigned-byte 16) 1)))
+  (optimizer nil :type (or null function))
+  move-vop-p)
 
 ;; These printers follow the definition of VOP-INFO because they
 ;; want to inline VOP-INFO-NAME, and it's less code to move them here
@@ -724,6 +745,10 @@
   write-p
   (vop :test vop :prin1 (vop-info-name (vop-info vop))))
 
+(declaim (inline vop-name))
+(defun vop-name (vop)
+  (declare (type vop vop))
+  (vop-info-name (vop-info vop)))
 
 ;;;; SBs and SCs
 
@@ -1050,7 +1075,11 @@
   (sc nil :type (or storage-class null))
   ;; the offset within the SB that this TN is packed into. This is what
   ;; indicates that the TN is packed
-  (offset nil :type (or index null))
+  ;; The integer bound ensures that TN-BYTE-OFFSET remains a fixnum.
+  ;; The default stack size is 2MB, so this is plenty big.
+  (offset nil :type (or null
+                        (unsigned-byte #.(- sb-vm:n-positive-fixnum-bits
+                                            sb-vm:word-shift))))
   ;; some kind of info about how important this TN is
   (cost 0 :type fixnum)
   ;; If a :ENVIRONMENT or :DEBUG-ENVIRONMENT TN, this is the
@@ -1061,7 +1090,7 @@
 
 (declaim (freeze-type tn))
 (defmethod print-object ((tn tn) stream)
-  (cond ((not (boundp 'sb-c::*compiler-ir-obj-map*))
+  (cond ((not (boundp '*compilation*))
          (print-unreadable-object (tn stream :type t :identity t)))
         (t
          (print-unreadable-object (tn stream :type t)

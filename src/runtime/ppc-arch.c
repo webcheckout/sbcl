@@ -29,7 +29,7 @@
 #endif
 
 #ifdef LISP_FEATURE_SB_THREAD
-#include "pseudo-atomic.h"
+#include "getallocptr.h"
 #endif
 
   /* The header files may not define PT_DAR/PT_DSISR.  This definition
@@ -55,11 +55,12 @@
 #endif
 #endif
 
-/* Magic encoding for the instruction used for traps. */
+#ifdef LISP_FEATURE_64_BIT
+#define TRAP_INSTRUCTION(trap) ((2<<26) | (1 << 21) | reg_NULL << 16 | (trap))
+#else
 #define TRAP_INSTRUCTION(trap) ((3<<26) | (6 << 21) | (trap))
+#endif
 
-void arch_init() {
-}
 
 os_vm_address_t
 arch_get_bad_addr(int sig, siginfo_t *code, os_context_t *context)
@@ -261,37 +262,43 @@ arch_do_displaced_inst(os_context_t *context, unsigned int orig_inst)
 }
 
 #define INLINE_ALLOC_DEBUG 0
-#ifdef LISP_FEATURE_GENCGC
+#ifdef LISP_FEATURE_CHENEYGC
+#define handle_allocation_trap(x) (0)
+#else
 /*
  * Return non-zero if the current instruction is an allocation trap
  */
 static int
 allocation_trap_p(os_context_t * context)
 {
-    unsigned int *pc;
-    unsigned inst;
-    unsigned opcode;
-    unsigned src;
-    unsigned __attribute__((unused)) dst;
-
     /*
-     * First, the instruction has to be a TWLGT temp, NL3, which has the
+     * First, the instruction has to be "Tx {LGT|LGE} temp, NL3, which has the
      * format.
-     * | 6| 5| 5 | 5 | 10|1|  field width
-     * |31| 1|dst|src|  4|0|  value
+     * | 6|  5| 5 | 5 | 10|1|  field width
+     * ----------------------
+     * |31| TO|dst|src|  4|0|  TW - trap word
+     * |31| TO|dst|src| 68|0|  TD - trap doubleword
+     *
+     *   TO = #b00001 for LGT
+     *        #b00101 for LGE
      */
-    pc = (unsigned int *) (*os_context_pc_addr(context));
-    inst = *pc;
+    unsigned *pc = (unsigned int *) *os_context_pc_addr(context);
+    unsigned inst = *pc;
+    unsigned opcode = inst >> 26;
+    unsigned src = (inst >> 11) & 0x1f;
+    // unsigned dst = (inst >> 16) & 0x1f;
+    unsigned to = (inst >> 21) & 0x1f;
+    unsigned subcode = inst & 0x7ff;
 
-#if INLINE_ALLOC_DEBUG
-    fprintf(stderr, "allocation_trap_p at %p:  inst = 0x%08x\n", pc, inst);
-#endif
+    if (opcode == 31 && (to == 1 || to == 5) && src == reg_NL3
+        && (subcode == 4<<1 || subcode == 68<<1)) {
+        /* It doesn't much matter which trap option we pick for "could be large"
+         * but I've chosen "TGE" because of the choices, that one is subject to spurious
+         * failure, and I'd prefer not to spuriously fail on a 2-word cons.
+         * (Spurious failure occurs when the EQ condition is met, meaning the allocation
+         * would have worked, but the trap happens regardless) */
+        int success = (to == 5) ? 1 : -1; // 1 = single-object page ok, -1 = not ok
 
-    opcode = inst >> 26;
-    src = (inst >> 11) & 0x1f;
-    dst = (inst >> 16) & 0x1f;
-    if ((opcode == 31) && (src == reg_NL3) && (1 == ((inst >> 21) & 0x1f))
-        && (4 == ((inst >> 1) & 0x3ff))) {
         /*
          * We got the instruction.  Now, look back to make sure it was
          * proceeded by what we expected.  The previous instruction
@@ -300,15 +307,11 @@ allocation_trap_p(os_context_t * context)
         unsigned int add_inst;
 
         add_inst = pc[-1];
-#if INLINE_ALLOC_DEBUG
-        fprintf(stderr, "   add inst at %p:  inst = 0x%08x\n",
-                pc - 1, add_inst);
-#endif
         opcode = add_inst >> 26;
         if ((opcode == 31) && (266 == ((add_inst >> 1) & 0x1ff))) {
-            return 1;
+            return success;
         } else if ((opcode == 14)) {
-            return 1;
+            return success;
         } else {
             fprintf(stderr,
                     "Whoa! Got allocation trap but could not find ADD or ADDI instruction: 0x%08x in the proper place\n",
@@ -322,73 +325,30 @@ allocation_trap_p(os_context_t * context)
 #define boxed_region gc_alloc_region[0]
 #endif
 
-void
+static int
 handle_allocation_trap(os_context_t * context)
 {
-    unsigned int *pc;
-    unsigned int inst;
-    unsigned int target;
-    uword_t __attribute__((unused)) target_ptr, end_addr;
-    unsigned int opcode;
-    int size;
-    boolean were_in_lisp;
-    char *memory;
+    int alloc_trap_p = allocation_trap_p(context);
 
-    target = 0;
-    size = 0;
+    if (!alloc_trap_p) return 0;
+    gc_assert(!foreign_function_call_active_p(arch_os_get_current_thread()));
+    fake_foreign_function_call(context);
 
-#if INLINE_ALLOC_DEBUG
-    fprintf(stderr, "In handle_allocation_trap\n");
-#endif
-
-    /* I don't think it's possible for us NOT to be in lisp when we get
-     * here.  Remove this later? */
-    were_in_lisp = !foreign_function_call_active_p(arch_os_get_current_thread());
-
-    if (were_in_lisp) {
-        fake_foreign_function_call(context);
-    } else {
-        fprintf(stderr, "**** Whoa! allocation trap and we weren't in lisp!\n");
-    }
-
-    /*
-     * Look at current instruction: TWNE temp, NL3. We're here because
-     * temp > NL3 and temp is the end of the allocation, and NL3 is
-     * current-region-end-addr.
-     *
-     * We need to adjust temp and alloc-tn.
-     */
-
-    pc = (unsigned int *) (*os_context_pc_addr(context));
-    inst = pc[0];
-    end_addr = (inst >> 11) & 0x1f;
-    target = (inst >> 16) & 0x1f;
-
-    target_ptr = *os_context_register_addr(context, target);
-
-#if INLINE_ALLOC_DEBUG
-    fprintf(stderr, "handle_allocation_trap at %p:\n", pc);
-    fprintf(stderr, "boxed_region.free_pointer: %p\n", boxed_region.free_pointer);
-    fprintf(stderr, "boxed_region.end_addr: %p\n", boxed_region.end_addr);
-    fprintf(stderr, "target reg: %d, end_addr reg: %ld\n", target, end_addr);
-    fprintf(stderr, "target: %"OBJ_FMTX"\n",
-            (uword_t)*os_context_register_addr(context, target));
-    fprintf(stderr, "end_addr: %"OBJ_FMTX"\n",
-            (uword_t)*os_context_register_addr(context, end_addr));
-    fprintf(stderr, "trap inst = 0x%08x\n", inst);
-    fprintf(stderr, "target reg = %s\n", lisp_register_names[target]);
-#endif
+    unsigned int *pc = (unsigned int *) (*os_context_pc_addr(context));
 
     /*
      * Go back and look at the add/addi instruction.  The second src arg
      * is the size of the allocation.  Get it and call alloc to allocate
      * new space.
      */
-    inst = pc[-1];
-    opcode = inst >> 26;
+
+    unsigned int inst = pc[-1];
+    int target = (inst >> 21) & 0x1f;
+    unsigned int opcode = inst >> 26;
 #if INLINE_ALLOC_DEBUG
     fprintf(stderr, "  add inst  = 0x%08x, opcode = %d\n", inst, opcode);
 #endif
+    sword_t size = 0;
     if (opcode == 14) {
         /*
          * ADDI temp-tn, alloc-tn, size
@@ -437,12 +397,13 @@ handle_allocation_trap(os_context_t * context)
         (lispobj *) ((long) dynamic_space_free_pointer - size);
     */
 
+    char *memory;
     {
-        extern lispobj* alloc(sword_t);
+        extern lispobj *alloc(sword_t), *alloc_list(sword_t);
         struct interrupt_data *data =
             arch_os_get_current_thread()->interrupt_data;
         data->allocation_trap_context = context;
-        memory = (char *) alloc(size);
+        memory = (char*)(alloc_trap_p < 0 ? alloc_list(size) : alloc(size));
         data->allocation_trap_context = 0;
     }
 
@@ -471,20 +432,11 @@ handle_allocation_trap(os_context_t * context)
          & LOWTAG_MASK);
 #endif
 
-    if (were_in_lisp) {
-        undo_fake_foreign_function_call(context);
-    }
+    undo_fake_foreign_function_call(context);
 
-    /* Skip the allocation trap and the write of the updated free
-     * pointer back to the allocation region.  This is two
-     * instructions when threading is enabled and four instructions
-     * otherwise. */
-#ifdef LISP_FEATURE_SB_THREAD
+    // Skip 2 instructions: the trap, and the writeback of free pointer
     (*os_context_pc_addr(context)) = (uword_t)(pc + 2);
-#else
-    (*os_context_pc_addr(context)) = (uword_t)(pc + 4);
-#endif
-
+    return 1; // handled
 }
 #endif
 
@@ -526,6 +478,8 @@ arch_handle_single_step_trap(os_context_t *context, int trap)
 static void
 sigtrap_handler(int signal, siginfo_t *siginfo, os_context_t *context)
 {
+    if (signal == SIGTRAP && handle_allocation_trap(context)) return;
+
     unsigned int code;
 
     code=*((u32 *)(*os_context_pc_addr(context)));
@@ -539,21 +493,22 @@ sigtrap_handler(int signal, siginfo_t *siginfo, os_context_t *context)
         interrupt_handle_pending(context);
         return;
     }
-
-#ifdef LISP_FEATURE_GENCGC
-    /* Is this an allocation trap? */
-    if (allocation_trap_p(context)) {
-        handle_allocation_trap(context);
+#ifdef LISP_FEATURE_64_BIT
+    /* TDI LGT,$NULL,code */
+    if ((code >> 16) == ((2 << 10) | (1 << 5) | reg_NULL)) {
+        int trap = code & 0xff;
+        handle_trap(context,trap);
         return;
     }
-#endif
-
+#else
     if ((code >> 16) == ((3 << 10) | (6 << 5))) {
         /* twllei reg_ZERO,N will always trap if reg_ZERO = 0 */
         int trap = code & 0xff;
         handle_trap(context,trap);
         return;
     }
+#endif
+
     /* twi :ne ... or twi ... nargs */
     if (((code >> 26) == 3) && (((code >> 21) & 31) == 24
                                 || ((code >> 16) & 31) == reg_NARGS
@@ -584,8 +539,6 @@ ppc_flush_icache(os_vm_address_t address, os_vm_size_t length)
   }
 }
 
-#ifdef LISP_FEATURE_LINKAGE_TABLE
-
 /* Linkage tables for PowerPC
  *
  * Linkage entry size is 16, because we need at least 4 instructions to
@@ -606,12 +559,96 @@ ppc_flush_icache(os_vm_address_t address, os_vm_size_t length)
  * Insert the necessary jump instructions at the given address.
  */
 void
-arch_write_linkage_table_entry(char *reloc_addr, void *target_addr, int datap)
+arch_write_linkage_table_entry(int index, void *target_addr, int datap)
 {
+  char *reloc_addr = (char*)LINKAGE_TABLE_SPACE_START + index * LINKAGE_TABLE_ENTRY_SIZE;
   if (datap) {
     *(unsigned long *)reloc_addr = (unsigned long)target_addr;
     return;
   }
+
+#if defined LISP_FEATURE_64_BIT
+  extern long call_into_c; // actually a function entry address,
+  // but trick the compiler into thinking it isn't, so that it does not
+  // indirect through a descriptor, but instead we get its logical address.
+  if (target_addr != &call_into_c) {
+#ifdef LISP_FEATURE_LITTLE_ENDIAN
+      int* inst_ptr;
+      unsigned long a0,a16,a32,a48;
+      unsigned int inst;
+
+      inst_ptr = (int*) reloc_addr;
+
+      a48 = (unsigned long) target_addr >> 48 & 0xFFFF;
+      a32 = (unsigned long) target_addr >> 32 & 0xFFFF;
+      a16 = (unsigned long) target_addr >> 16 & 0xFFFF;
+      a0 =  (unsigned long) target_addr       & 0xFFFF;
+
+
+      /* addis 12, 0, a48 */
+
+      inst = (15 << 26) | (12 << 21) | (0 << 16) | a48;
+      *inst_ptr++ = inst;
+
+      /* ori 12, 12, a32 */
+
+      inst = (24 << 26) | (12 << 21) | (12 << 16) | a32;
+      *inst_ptr++ = inst;
+
+      /* sldi 12, 12, 32 */
+      inst = (30 << 26) | (12 << 21) | (12 << 16) | 0x07C6;
+      *inst_ptr++ = inst;
+
+      /* oris 12, 12, a16 */
+
+      inst = (25 << 26) | (12 << 21) | (12 << 16) | a16;
+      *inst_ptr++ = inst;
+
+      /* ori 12, 12, a0 */
+
+      inst = (24 << 26) | (12 << 21) | (12 << 16) | a0;
+      *inst_ptr++ = inst;
+
+      /*
+       * mtctr 12
+       */
+
+      inst = (31 << 26) | (12 << 21) | (9 << 16) | (467 << 1);
+      *inst_ptr++ = inst;
+
+      /*
+       * bctr
+       */
+
+      inst = (19 << 26) | (20 << 21) | (528 << 1);
+      *inst_ptr++ = inst;
+
+      os_flush_icache((os_vm_address_t) reloc_addr, (char*) inst_ptr - reloc_addr);
+
+#else
+      // Could use either ABI, but we're assuming v1
+      /* In the 64-bit v1 ABI, function pointers are alway passed around
+       * as "function descriptors", not directly the jump target address.
+       * A descriptor is 3 words:
+       *   word 0 = address to jump to
+       *   word 1 = value to place in r2
+       *   word 2 = value to place in r11
+       * For foreign calls, the value that we hand off to call_into_c
+       * is therefore a function descriptor. To make things consistent,
+       * this linkage table entry itself has to look like a function descriptor.
+       * We can just copy the real descriptor to here, except in one case:
+       * call_into_c is not itself an ABI-compatible call. It really should be
+       * a lisp assembly routine, but then we have a turtles-all-the-way-down problem:
+       * it's tricky to access C global data from lisp assembly routines.
+       */
+      memcpy(reloc_addr, target_addr, 24);
+#endif
+      return;
+  }
+  // Can't encode more than 32 bits of jump address
+  gc_assert(((unsigned long) target_addr >> 32) == 0);
+#endif
+
   /*
    * Make JMP to function entry.
    *
@@ -664,4 +701,3 @@ arch_write_linkage_table_entry(char *reloc_addr, void *target_addr, int datap)
 
   os_flush_icache((os_vm_address_t) reloc_addr, (char*) inst_ptr - reloc_addr);
 }
-#endif

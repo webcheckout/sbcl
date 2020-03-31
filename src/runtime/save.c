@@ -35,10 +35,12 @@
 #include "gc-internal.h"
 #include "thread.h"
 #include "arch.h"
-#include "pseudo-atomic.h"
+#include "getallocptr.h"
 #include "genesis/static-symbols.h"
 #include "genesis/symbol.h"
+#include "genesis/vector.h"
 #include "immobile-space.h"
+#include "search.h"
 
 #ifdef LISP_FEATURE_SB_CORE_COMPRESSION
 # include <zlib.h>
@@ -86,7 +88,7 @@ write_bytes_to_file(FILE * file, char *addr, long bytes, int compression)
             }
             else {
                 perror(GENERAL_WRITE_FAILURE_MSG);
-                lose("core file is incomplete or corrupt\n");
+                lose("core file is incomplete or corrupt");
             }
         }
 #ifdef LISP_FEATURE_SB_CORE_COMPRESSION
@@ -104,12 +106,12 @@ write_bytes_to_file(FILE * file, char *addr, long bytes, int compression)
         stream.next_in  = (void*)addr;
         ret = deflateInit(&stream, compression);
         if (ret != Z_OK)
-            lose("deflateInit: %i\n", ret);
+            lose("deflateInit: %i", ret);
         do {
             stream.avail_out = ZLIB_BUFFER_SIZE;
             stream.next_out = buf;
             ret = deflate(&stream, Z_FINISH);
-            if (ret < 0) lose("zlib deflate error: %i... exiting\n", ret);
+            if (ret < 0) lose("zlib deflate error: %i... exiting", ret);
             written = buf;
             end     = buf+ZLIB_BUFFER_SIZE-stream.avail_out;
             total_written += end - written;
@@ -119,7 +121,7 @@ write_bytes_to_file(FILE * file, char *addr, long bytes, int compression)
                     written += count;
                 } else {
                     perror(GENERAL_WRITE_FAILURE_MSG);
-                    lose("core file is incomplete or corrupt\n");
+                    lose("core file is incomplete or corrupt");
                 }
             }
         } while (stream.avail_out == 0);
@@ -131,15 +133,15 @@ write_bytes_to_file(FILE * file, char *addr, long bytes, int compression)
 #endif
     } else {
 #ifdef LISP_FEATURE_SB_CORE_COMPRESSION
-        lose("Unknown core compression level %i, exiting\n", compression);
+        lose("Unknown core compression level %i, exiting", compression);
 #else
-        lose("zlib-compressed core support not built in this runtime\n");
+        lose("zlib-compressed core support not built in this runtime");
 #endif
     }
 
     if (fflush(file) != 0) {
       perror(GENERAL_WRITE_FAILURE_MSG);
-      lose("core file is incomplete or corrupt\n");
+      lose("core file is incomplete or corrupt");
     }
 };
 
@@ -186,10 +188,23 @@ output_space(FILE *file, int id, lispobj *addr, lispobj *end,
 
     bytes = words * sizeof(lispobj);
 
+#ifdef LISP_FEATURE_CHENEYGC
+    /* KLUDGE: cheneygc can not restart a saved core if the dynamic space is empty,
+     * because coreparse would never get to make the second semispace. That GC is such
+     * a total piece of garbage that I don't care to fix, but yet it shouldn't be in
+     * such bad shape that saved cores don't work. This seems to do the trick. */
+    if (id == DYNAMIC_CORE_SPACE_ID && bytes == 0) bytes = 2*N_WORD_BYTES;
+#endif
+
     if (!lisp_startup_options.noinform)
         printf("writing %lu bytes from the %s space at %p\n",
                (long unsigned)bytes, names[id], addr);
 
+    /* FIXME: it sure would be nice to discover and document the behavior of this function
+     * with regard to aligning up the byte count as pertains to bytes spanned by a rounded
+     * up count that were not zeroized and would not have been written had we not rounded.
+     * That seems quite bogus to operate on bytes that the caller didn't promise were OK
+     * to be saved out (and didn't contain, say, a password and social security number) */
     data = write_bytes(file, (char *)addr, ALIGN_UP(bytes, os_vm_page_size),
                        file_offset, core_compression_level);
 
@@ -223,6 +238,15 @@ void unwind_binding_stack()
     unbind_to_here((lispobj *)th->binding_stack_start,th);
     write_TLS(CURRENT_CATCH_BLOCK, 0, th); // If set to 0 on start, why here too?
     write_TLS(CURRENT_UNWIND_PROTECT_BLOCK, 0, th);
+    unsigned int hint = 0;
+    char symbol_name[] = "*SAVE-LISP-CLOBBERED-GLOBALS*";
+    lispobj* sym = find_symbol(symbol_name, sb_kernel_package(), &hint);
+    lispobj value;
+    int i;
+    if (!sym || !simple_vector_p(value = ((struct symbol*)sym)->value))
+        fprintf(stderr, "warning: bad value in %s\n", symbol_name);
+    else for(i=fixnum_value(VECTOR(value)->length)-1; i>=0; --i)
+        SYMBOL(VECTOR(value)->data[i])->value = UNBOUND_MARKER_WIDETAG;
     if (verbose) printf("done]\n");
 }
 
@@ -539,6 +563,7 @@ save(char *filename, lispobj init_function, boolean prepend_runtime,
      * too late to remove old references from the binding stack.
      * There's probably no safe way to do that from Lisp */
     unwind_binding_stack();
+    os_unlink_runtime();
     return save_to_filehandle(file, filename, init_function, prepend_runtime,
                               save_runtime_options,
                               compressed ? compressed : COMPRESSION_LEVEL_NONE);

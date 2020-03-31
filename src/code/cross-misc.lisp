@@ -27,6 +27,8 @@
   (declare (ignore table))
   `(progn ,@body))
 
+(defmacro define-thread-local (&rest rest) `(defvar ,@rest))
+
 (defmacro defglobal (name value &rest doc)
   `(eval-when (:compile-toplevel :load-toplevel :execute)
      (defparameter ,name
@@ -77,6 +79,17 @@
 (defun funcallable-instance-p (x)
   (error "Called FUNCALLABLE-INSTANCE-P ~s" x))
 
+(defun simple-fun-p (x)
+  (if (symbolp x) nil (error "Called SIMPLE-FUN-P on ~S" x)))
+(defun closurep (x)
+  (if (symbolp x) nil (error "Called CLOSUREP on ~S" x)))
+(defun unbound-marker-p (x)
+  (if (symbolp x) nil (error "Called UNBOUND-MARKER-P on ~S" x)))
+(defun vector-with-fill-pointer-p (x)
+  (if (symbolp x) nil (error "Called VECTOR-WITH-FILL-POINTER-P on ~S" x)))
+
+(defparameter sb-vm::*backend-cross-foldable-predicates* nil)
+
 ;; The definition of TYPE-SPECIFIER for the target appears in the file
 ;; 'deftypes-for-target' - it allows CLASSes and CLASOIDs as specifiers.
 ;; Instances are never used as specifiers when building SBCL,
@@ -105,6 +118,12 @@
   (when (typep object 'array)
     (assert (not (eq (array-element-type object) nil))))
   nil)
+
+(defun data-vector-ref-with-offset (array index offset)
+  (svref array (+ index offset)))
+
+(defun data-vector-ref (array index)
+  (svref array index))
 
 (defun %negate (number)
   (sb-xc:- number))
@@ -199,8 +218,6 @@
 (defun system-area-pointer-p (x) x nil) ; nothing is a SAP
 ;;; Needed for DEFINE-MOVE-FUN LOAD-SYSTEM-AREA-POINTER
 (defun sap-int (x) (error "can't take SAP-INT ~S" x))
-;;; Needed for FIXUP-CODE-OBJECT
-(defmacro without-gcing (&body body) `(progn ,@body))
 
 (defun logically-readonlyize (x) x)
 
@@ -264,6 +281,10 @@
                    (null (null form))
                    ((eql ?) (push form results) t) ; match and store anything
                    ((eql :ignore) t) ; match anything and disregard
+                   ((cons (eql :or))
+                    (some (lambda (template)
+                            (recurse form template))
+                          (cdr template)))
                    (cons (and (consp form)
                               (and (recurse (car form) (car template))
                                    (recurse (cdr form) (cdr template)))))
@@ -288,7 +309,7 @@
               `(defparameter ,symbol ,value)))
            (sb-impl::%defvar
             (destructuring-bind (symbol value) ; always occurs with a value
-                (matchp '((quote ?) (source-location) (unless (%boundp :ignore) ?))
+                (matchp '((quote ?) (source-location) (:or (unless (%boundp :ignore) ?) ?))
                         (cdr form))
               `(defvar ,symbol ,value)))
            (sb-c::%defconstant
@@ -317,6 +338,10 @@
             form))))))))
 
 (defmacro sb-format:tokens (string) string)
+
+(defmacro sb-thread::with-recursive-system-lock ((lock) &body body)
+  (declare (ignore lock))
+  `(progn ,@body))
 
 ;;; Used by our lockfree memoization functions (define-hash-cache)
 (defmacro sb-thread:barrier ((kind) &body body)

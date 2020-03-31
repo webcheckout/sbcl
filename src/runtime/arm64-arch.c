@@ -23,12 +23,7 @@
 #include "interr.h"
 #include "breakpoint.h"
 #include "monitor.h"
-#include "pseudo-atomic.h"
-
-void arch_init(void)
-{
-    return;
-}
+#include "getallocptr.h"
 
 os_vm_address_t arch_get_bad_addr(int sig, siginfo_t *code, os_context_t *context)
 {
@@ -146,8 +141,6 @@ void arch_install_interrupt_handlers()
 }
 
 
-#ifdef LISP_FEATURE_LINKAGE_TABLE
-
 /* Linkage tables
  *
  * Linkage entry size is 16, because we need 2 instructions and an 8 byte address.
@@ -155,8 +148,9 @@ void arch_install_interrupt_handlers()
 
 #define LINKAGE_TEMP_REG reg_NL9
 
-void arch_write_linkage_table_entry(char *reloc_addr, void *target_addr, int datap)
+void arch_write_linkage_table_entry(int index, void *target_addr, int datap)
 {
+  char *reloc_addr = (char*)LINKAGE_TABLE_SPACE_START + index * LINKAGE_TABLE_ENTRY_SIZE;
   if (datap) {
     *(unsigned long *)reloc_addr = (unsigned long)target_addr;
     return;
@@ -184,4 +178,3 @@ void arch_write_linkage_table_entry(char *reloc_addr, void *target_addr, int dat
 
   os_flush_icache((os_vm_address_t) reloc_addr, (char*) inst_ptr - reloc_addr);
 }
-#endif

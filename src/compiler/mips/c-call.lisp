@@ -223,7 +223,6 @@
   (:generator 2
     (inst li res (make-fixup foreign-symbol :foreign))))
 
-#+linkage-table
 (define-vop (foreign-symbol-dataref-sap)
   (:translate foreign-symbol-dataref-sap)
   (:policy :fast-safe)
@@ -246,13 +245,17 @@
   (:temporary (:sc any-reg :offset cfunc-offset
                    :from (:argument 0) :to (:result 0)) cfunc)
   (:temporary (:sc control-stack :offset nfp-save-offset) nfp-save)
+  (:temporary (:sc any-reg :offset nl3-offset) tramp) ; = $at
   (:vop-var vop)
   (:generator 0
     (let ((cur-nfp (current-nfp-tn vop)))
       (when cur-nfp
         (store-stack-tn nfp-save cur-nfp))
-      (inst jal (make-fixup "call_into_c" :foreign))
-      (move cfunc function t)
+      ;; (linkage-table-entry-address 0) is "call-into-c" in mips-assem.S
+      (inst lw tramp null-tn (- (linkage-table-entry-address 0) nil-value))
+      (inst nop)
+      (inst jal tramp)
+      (inst move cfunc function)
       (when cur-nfp
         (load-stack-tn cur-nfp nfp-save)))))
 

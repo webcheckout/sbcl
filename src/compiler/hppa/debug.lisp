@@ -1,22 +1,22 @@
 (in-package "SB-VM")
 
-(define-vop (debug-cur-sp)
-  (:translate sb-di::current-sp)
+(define-vop ()
+  (:translate current-sp)
   (:policy :fast-safe)
   (:results (res :scs (sap-reg)))
   (:result-types system-area-pointer)
   (:generator 1
     (move csp-tn res)))
 
-(define-vop (debug-cur-fp)
-  (:translate sb-di::current-fp)
+(define-vop ()
+  (:translate current-fp)
   (:policy :fast-safe)
   (:results (res :scs (sap-reg)))
   (:result-types system-area-pointer)
   (:generator 1
     (move cfp-tn res)))
 
-(define-vop (read-control-stack)
+(define-vop ()
   (:translate stack-ref)
   (:policy :fast-safe)
   (:args (object :scs (sap-reg))
@@ -26,19 +26,8 @@
   (:result-types *)
   (:generator 5
     (inst ldwx offset object result)))
-(define-vop (read-control-stack-c)
-  (:translate stack-ref)
-  (:policy :fast-safe)
-  (:args (object :scs (sap-reg)))
-  (:info offset)
-  ;; make room for multiply by limiting to 12 bits
-  (:arg-types system-area-pointer (:constant (signed-byte 12)))
-  (:results (result :scs (descriptor-reg)))
-  (:result-types *)
-  (:generator 4
-    (inst ldw (* offset n-word-bytes) object result)))
 
-(define-vop (write-control-stack)
+(define-vop ()
   (:translate %set-stack-ref)
   (:policy :fast-safe)
   (:args (object :scs (sap-reg) :target sap)
@@ -51,18 +40,6 @@
   (:generator 2
     (inst add object offset sap)
     (inst stw value 0 sap)
-    (move value result)))
-(define-vop (write-control-stack-c)
-  (:translate %set-stack-ref)
-  (:policy :fast-safe)
-  (:args (sap :scs (sap-reg))
-         (value :scs (descriptor-reg) :target result))
-  (:info offset)
-  (:arg-types system-area-pointer (:constant (signed-byte 12)) *)
-  (:results (result :scs (descriptor-reg)))
-  (:result-types *)
-  (:generator 1
-    (inst stw value (* offset n-word-bytes) sap)
     (move value result)))
 
 (define-vop (code-from-mumble)

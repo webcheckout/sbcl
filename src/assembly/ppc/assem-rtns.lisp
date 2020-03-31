@@ -205,6 +205,6 @@
 
   (move target catch)
   ;; reuse catch
-  (inst lr catch (make-fixup 'unwind :assembly-routine))
+  (load-asm-rtn-addr catch 'unwind)
   (inst mtlr catch)
   (inst blr))

@@ -349,12 +349,6 @@
     (tai '*print-base* :heap '(:space :immobile))
   t)
 
-(deftest allocation-information.2c
-  ;; This is a a test of SBCL genesis that leverages sb-introspect.
-    (tai (sb-kernel::find-fdefn (elt sb-vm:+static-fdefns+ 0))
-         :heap '(:space #+immobile-code :immobile #-immobile-code :static))
-  t)
-
 (deftest allocation-information.3
     (tai 42 :immediate nil)
   t)
@@ -374,7 +368,7 @@
 (deftest* (allocation-information.4
            ;; Ignored as per the comment above, even though it seems
            ;; unlikely that this is the right condition.
-           :fails-on (or :win32 (and :sparc :gencgc)))
+           :fails-on (or :win32 :ppc64 (and :sparc :gencgc)))
     #+gencgc
     (tai (make-list 1) :heap
          `(:space :dynamic :boxed t :large nil)
@@ -390,7 +384,7 @@
 (setq sb-ext:*evaluator-mode* :compile)
 (sb-ext:defglobal *large-obj* nil)
 
-#+(and gencgc (or x86 x86-64 ppc) (not win32))
+#+(and gencgc (or riscv x86 x86-64 ppc) (not win32))
 (progn
   (setq *print-array* nil)
   (setq *large-obj* (make-array (* sb-vm:gencgc-card-bytes 4)
@@ -442,7 +436,7 @@
                ;; but the large object size can be as small as 16K.
                ;; 16K might fit in the free space of an open region,
                ;; and by accident would not go on a large object page.
-               (sb-c:allocate-code-object nil 0
+               (sb-c:allocate-code-object nil 0 0
                 (max (* 4 sb-vm:gencgc-card-bytes) #-64-bit 65536))))
       (declare (notinline format))
       (format (make-string-output-stream) "~%")

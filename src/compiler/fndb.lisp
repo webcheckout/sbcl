@@ -49,7 +49,7 @@
 ;;; FIXNUMness) might be different between host and target. Perhaps
 ;;; this property should be protected by #-SB-XC-HOST? Perhaps we need
 ;;; 3-stage bootstrapping after all? (Ugh! It's *so* slow already!)
-(defknown typep (t type-specifier &optional lexenv-designator) t
+(defknown typep (t type-specifier &optional lexenv-designator) boolean
    ;; Unlike SUBTYPEP or UPGRADED-ARRAY-ELEMENT-TYPE and friends, this
    ;; seems to be FOLDABLE. Like SUBTYPEP, it's affected by type
    ;; definitions, but unlike SUBTYPEP, there should be no way to make
@@ -190,7 +190,7 @@
 (defknown copy-symbol (symbol &optional t) symbol (flushable))
 (defknown gensym (&optional (or string unsigned-byte)) symbol ())
 (defknown symbol-package (symbol) (or package null) (flushable))
-(defknown keywordp (t) boolean (flushable))       ; If someone uninterns it...
+(defknown keywordp (t) boolean (flushable)) ; semi-foldable, see src/compiler/typetran
 
 ;;;; from the "Packages" chapter:
 
@@ -278,19 +278,16 @@
   (movable foldable flushable))
 
 (defknown gcd (&rest integer) unsigned-byte
-  (movable foldable flushable)
-  #|:derive-type 'boolean-result-type|#)
-(defknown lcm (&rest integer) unsigned-byte
   (movable foldable flushable))
+(defknown sb-kernel::fixnum-gcd (fixnum fixnum) (integer 0 #.(1+ sb-xc:most-positive-fixnum))
+    (movable foldable flushable))
 
-#+sb-xc-host ; (See CROSS-FLOAT-INFINITY-KLUDGE.)
-(defknown exp (number) irrational
-  (movable foldable flushable recursive)
-  :derive-type #'result-type-float-contagion)
+(defknown lcm (&rest integer) unsigned-byte
+    (movable foldable flushable))
 
-#-sb-xc-host ; (See CROSS-FLOAT-INFINITY-KLUDGE.)
 (defknown exp (number) irrational
   (movable foldable flushable recursive))
+
 
 (defknown expt (number number) number
   (movable foldable flushable recursive))
@@ -306,25 +303,6 @@
 (defknown cis (real) (complex float)
   (movable foldable flushable))
 
-#+sb-xc-host ; (See CROSS-FLOAT-INFINITY-KLUDGE.)
-(progn
-(defknown (sin cos) (number)
-  (or (float $-1.0 $1.0) (complex float))
-  (movable foldable flushable recursive)
-  :derive-type #'result-type-float-contagion)
-
-(defknown atan
-  (number &optional real) irrational
-  (movable foldable unsafely-flushable recursive)
-  :derive-type #'result-type-float-contagion)
-
-(defknown (tan sinh cosh tanh asinh)
-  (number) irrational (movable foldable flushable recursive)
-  :derive-type #'result-type-float-contagion)
-) ; PROGN
-
-#-sb-xc-host ; (See CROSS-FLOAT-INFINITY-KLUDGE.)
-(progn
 (defknown (sin cos) (number)
   (or (float $-1.0 $1.0) (complex float))
   (movable foldable flushable recursive))
@@ -335,7 +313,6 @@
 
 (defknown (tan sinh cosh tanh asinh)
   (number) irrational (movable foldable flushable recursive))
-) ; PROGN
 
 (defknown (asin acos acosh atanh)
   (number) irrational
@@ -764,7 +741,14 @@
 (defknown (%bit-position/0 %bit-position/1) (simple-bit-vector t index index)
   (or (mod #.(1- sb-xc:array-dimension-limit)) null)
   (foldable flushable))
+(defknown (%bit-pos-fwd/0 %bit-pos-fwd/1 %bit-pos-rev/0 %bit-pos-rev/1)
+  (simple-bit-vector index index)
+  (or (mod #.(1- sb-xc:array-dimension-limit)) null)
+  (foldable flushable))
 (defknown %bit-position (t simple-bit-vector t index index)
+  (or (mod #.(1- sb-xc:array-dimension-limit)) null)
+  (foldable flushable))
+(defknown (%bit-pos-fwd %bit-pos-rev) (t simple-bit-vector index index)
   (or (mod #.(1- sb-xc:array-dimension-limit)) null)
   (foldable flushable))
 
@@ -1055,9 +1039,13 @@
   (foldable flushable))
 (defknown hash-table-size (hash-table) index (flushable))
 (defknown hash-table-test (hash-table) symbol (foldable flushable))
-(defknown sxhash (t) hash (#-sb-xc-host foldable flushable))
-(defknown psxhash (t &optional t) hash (#-sb-xc-host foldable flushable))
+(defknown sxhash (t) hash-code (foldable flushable))
+(defknown psxhash (t &optional t) hash-code (foldable flushable))
 (defknown hash-table-equalp (hash-table hash-table) boolean (foldable flushable))
+;; To avoid emitting code to test for nil-function-returned
+(defknown (sb-impl::signal-corrupt-hash-table
+           sb-impl::signal-corrupt-hash-table-bucket)
+ (t) nil ())
 
 ;;;; from the "Arrays" chapter
 
@@ -1252,17 +1240,20 @@
 
 ;;;; from the "Streams" chapter:
 
-(defknown make-synonym-stream (symbol) stream (flushable))
-(defknown make-broadcast-stream (&rest stream) stream (unsafely-flushable))
-(defknown make-concatenated-stream (&rest stream) stream (unsafely-flushable))
-(defknown make-two-way-stream (stream stream) stream (unsafely-flushable))
-(defknown make-echo-stream (stream stream) stream (flushable))
+(defknown make-synonym-stream (symbol) synonym-stream (flushable))
+(defknown make-broadcast-stream (&rest stream) broadcast-stream (unsafely-flushable))
+(defknown make-concatenated-stream (&rest stream) concatenated-stream (unsafely-flushable))
+(defknown make-two-way-stream (stream stream) two-way-stream (unsafely-flushable))
+(defknown make-echo-stream (stream stream) echo-stream (flushable))
 (defknown make-string-input-stream (string &optional index sequence-end)
   sb-impl::string-input-stream
   (flushable))
 (defknown make-string-output-stream (&key (:element-type type-specifier))
   sb-impl::string-output-stream
   (flushable))
+;; FIXME: sb-impl::string-output-stream as the result type causes a few
+;; "CROSS-TYPEP uncertain: CTYPEP T #<UNKNOWN-TYPE STRING-OUTPUT-STREAM>"
+;; warnings which need to be resolved.
 (defknown get-output-stream-string (stream) simple-string ())
 (defknown streamp (t) boolean (movable foldable flushable))
 (defknown stream-element-type (stream) type-specifier ; can it return a CLASS?
@@ -1624,6 +1615,7 @@
 
 ;;; and analogous SBCL extension:
 (defknown sb-impl::%failed-aver (t) nil)
+(defknown sb-impl::unreachable () nil)
 (defknown bug (t &rest t) nil) ; never returns
 (defknown simple-reader-error (stream string &rest t) nil)
 (defknown sb-kernel:reader-eof-error (stream string) nil)
@@ -1646,10 +1638,12 @@
    (:verbose t)
    (:print t)
    (:external-format external-format-designator)
+   (:progress t)
 
    ;; extensions
    (:trace-file t)
    (:block-compile t)
+   (:entry-points list)
    (:emit-cfasl t))
   (values (or pathname null) boolean boolean))
 
@@ -1660,10 +1654,10 @@
                        &allow-other-keys)
   pathname)
 
-;; FIXME: consider making (OR FUNCTION-DESIGNATOR CONS) something like
-;; EXTENDED-FUNCTION-DESIGNATOR
-(defknown disassemble ((or function-designator cons code-component) &key
-                       (:stream stream) (:use-labels t))
+(defknown disassemble ((or extended-function-designator
+                           (cons (member lambda))
+                           code-component)
+                       &key (:stream stream) (:use-labels t))
   null)
 
 (defknown describe (t &optional (or stream (member t nil))) (values))
@@ -1759,6 +1753,8 @@
 ;;; We should never emit a call to %typep-wrapper
 (defknown %typep-wrapper (t t (or type-specifier ctype)) t
   (movable flushable always-translatable))
+(defknown %type-constraint (t (or type-specifier ctype)) t
+    (always-translatable))
 
 ;;; An identity wrapper to avoid complaints about constant modification
 (defknown ltv-wrapper (t) t
@@ -2079,3 +2075,8 @@
 (defknown finalize
     (t (function-designator () * :no-function-conversion t) &key (:dont-save t))
     *)
+
+#+sb-thread
+(defknown sb-thread::call-with-recursive-lock (function t t t) *)
+#+sb-thread
+(defknown sb-thread::call-with-mutex (function t t t t) *)

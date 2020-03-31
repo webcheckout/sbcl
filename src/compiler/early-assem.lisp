@@ -61,12 +61,13 @@
   (posn nil :type (or index null)))
 
 (defstruct (label (:include annotation)
-                   (:constructor gen-label ())
+                   (:constructor gen-label (&optional comment))
                    (:copier nil))
+  (comment)
   (usedp nil :type boolean)) ; whether it was ever used as a branch target
 
 (defmethod print-object ((label label) stream)
-  (cond ((not (boundp 'sb-c::*compiler-ir-obj-map*))
+  (cond ((not (boundp 'sb-c:*compilation*))
          (print-unreadable-object (label stream :type t :identity t)))
         ((or *print-escape* *print-readably*)
          (print-unreadable-object (label stream :type t)

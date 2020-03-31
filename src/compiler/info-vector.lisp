@@ -273,10 +273,11 @@
 ;; If optional OUTPUT is supplied, it is used, otherwise output is allocated.
 ;; For efficiency the OUTPUT should be provided as a dynamic-extent array.
 ;;
-(defun unpackify-infos (input &optional (output nil output-supplied-p))
-  (declare (simple-vector input))
-  (unless output-supplied-p
-    (setq output (make-array (compute-unpackified-info-size input))))
+(defun unpackify-infos (input &optional (output
+                                         (make-array
+                                          (compute-unpackified-info-size input))
+                                         output-supplied-p))
+  (declare (simple-vector input output))
   (let ((i (length input)) (j -1))  ; input index and output index respectively
     (declare (type index-or-minus-1 i j))
     (!with-packed-info-iterator (next-field input :descriptor-index desc-idx)
@@ -720,6 +721,9 @@ This is interpreted as
        (declaim (type info-hashtable *info-environment*)
                 (always-bound *info-environment*)))
 
+(defmacro pcl-methodfn-name-p (name)
+  `(typep ,name '(cons (member sb-pcl::slow-method sb-pcl::fast-method))))
+
 ;;; Update the INFO-NUMBER for NAME in the global environment,
 ;;; setting it to NEW-VALUE. This is thread-safe in the presence
 ;;; of multiple readers/writers. Threads simultaneously writing data
@@ -770,6 +774,8 @@ This is interpreted as
       (warn "Globaldb storing info for ~S~% ~S ~S~% -> ~S"
             name (meta-info-category i) (meta-info-kind i) new-value)))
 
+  (when (pcl-methodfn-name-p name)
+    (error "Can't SET-INFO-VALUE on PCL-internal function"))
   (let ((name (uncross name)))
     ;; If the INFO-NUMBER already exists in VECT, then copy it and
     ;; alter one cell; otherwise unpack it, grow the vector, and repack.
@@ -804,6 +810,8 @@ This is interpreted as
   (declare (function new-value-fun))
   (when (typep name 'fixnum)
     (error "~D is not a legal INFO name." name))
+  (when (pcl-methodfn-name-p name)
+    (error "Can't SET-INFO-VALUE on PCL-internal function"))
   (let ((name (uncross name)) new-value)
     (dx-flet ((augment (vect aux-key) ; VECT is a packed vector, never NIL
                 (declare (simple-vector vect))

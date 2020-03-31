@@ -48,19 +48,13 @@
 ;;;; sufficient, though interaction between parallel intern and use-package
 ;;;; needs to be considered with some care.
 
-(!define-load-time-global *package-graph-lock*
-    #.(sb-thread:make-mutex :name "Package Graph Lock"))
+(!define-load-time-global *package-graph-lock* (sb-thread:make-mutex :name "Package Graph Lock"))
 
 (defmacro with-package-graph ((&key) &body forms)
-  `(flet ((thunk () ,@forms))
-     (declare (dynamic-extent #'thunk))
-     (call-with-package-graph #'thunk)))
-(defun call-with-package-graph (function)
-  (declare (function function))
   ;; FIXME: Since name conflicts can be signalled while holding the
   ;; mutex, user code can be run leading to lock ordering problems.
-  (sb-thread:with-recursive-lock (*package-graph-lock*)
-    (funcall function)))
+  `(sb-thread:with-recursive-lock (*package-graph-lock*)
+     ,@forms))
 
 ;;; a map from package names to packages
 (define-load-time-global *package-names* nil)
@@ -540,6 +534,57 @@ error if any of PACKAGES is not a valid package designator."
     (print-unreadable-object (package stream :type t :identity (not name))
       (if name (prin1 name stream) (write-string "(deleted)" stream)))))
 
+;;; Perform (GETHASH NAME TABLE) and then unwrap the value if it is a list.
+;;; List vs nonlist disambiguates a nickname from the primary name.
+;;; And never return the symbol :DELETED.
+(declaim (inline %get-package))
+(defun %get-package (name table)
+  (let ((found (info-gethash name table)))
+    (cond ((listp found) (car found))
+          ((neq found :deleted) found))))
+
+;;; This is undocumented and unexported for now, but the idea is that by
+;;; making this a generic function then packages with custom package classes
+;;; could hook into this to provide their own resolution.
+;;; (Any such generic solution will turn the performance to crap, so let's not)
+(declaim (inline find-package-using-package))
+(defun find-package-using-package (package-designator base)
+  (let ((string (typecase package-designator
+                  (package
+                   (return-from find-package-using-package package-designator))
+                  (symbol (symbol-name package-designator))
+                  (string package-designator)
+                  (character (string package-designator))
+                  (t
+                   (sb-c::%type-check-error package-designator '(or character package string symbol) nil)))))
+    (or (and base
+             (package-%local-nicknames base)
+             (pkgnick-search-by-name string base))
+        (%get-package string *package-names*))))
+
+(defun find-package (package-designator)
+  "If PACKAGE-DESIGNATOR is a package, it is returned. Otherwise PACKAGE-DESIGNATOR
+must be a string designator, in which case the package it names is located and returned.
+
+As an SBCL extension, the current package may affect the way a package name is
+resolved: if the current package has local nicknames specified, package names
+matching those are resolved to the packages associated with them instead.
+
+Example:
+
+  (defpackage :a)
+  (defpackage :example (:use :cl) (:local-nicknames (:x :a)))
+  (let ((*package* (find-package :example)))
+    (find-package :x)) => #<PACKAGE A>
+
+See also: ADD-PACKAGE-LOCAL-NICKNAME, PACKAGE-LOCAL-NICKNAMES,
+REMOVE-PACKAGE-LOCAL-NICKNAME, and the DEFPACKAGE option :LOCAL-NICKNAMES."
+  (declare (explicit-check))
+  ;; We had a BOUNDP check on *PACKAGE* here, but it's effectless due to the
+  ;; always-bound proclamation.
+  (find-package-using-package package-designator *package*))
+(declaim (notinline find-package-using-package))
+
 ;;; ANSI says (in the definition of DELETE-PACKAGE) that these, and
 ;;; most other operations, are unspecified for deleted packages. We
 ;;; just do the easy thing and signal errors in that case.
@@ -746,58 +791,6 @@ Experimental: interface subject to change."
   (declare (ignore condition))
   (bug "No such thing as DEBOOTSTRAP-PACKAGE"))
 
-(defun find-package (package-designator)
-  "If PACKAGE-DESIGNATOR is a package, it is returned. Otherwise PACKAGE-DESIGNATOR
-must be a string designator, in which case the package it names is located and returned.
-
-As an SBCL extension, the current package may affect the way a package name is
-resolved: if the current package has local nicknames specified, package names
-matching those are resolved to the packages associated with them instead.
-
-Example:
-
-  (defpackage :a)
-  (defpackage :example (:use :cl) (:local-nicknames (:x :a)))
-  (let ((*package* (find-package :example)))
-    (find-package :x)) => #<PACKAGE A>
-
-See also: ADD-PACKAGE-LOCAL-NICKNAME, PACKAGE-LOCAL-NICKNAMES,
-REMOVE-PACKAGE-LOCAL-NICKNAME, and the DEFPACKAGE option :LOCAL-NICKNAMES."
-  ;: We had a BOUNDP check on *PACKAGE* here, but it's effectless due to the
-  ;; always-bound proclamation.
-  (truly-the (or null package) ; force elision of return value type check
-    (find-package-using-package package-designator *package*)))
-
-;;; Perform (GETHASH NAME TABLE) and then unwrap the value if it is a list.
-;;; List vs nonlist disambiguates a nickname from the primary name.
-;;; And never return the symbol :DELETED.
-(defun %get-package (name table)
-  (let ((found (info-gethash name table)))
-    (cond ((listp found) (car found))
-          ((neq found :deleted) found))))
-
-;;; This is undocumented and unexported for now, but the idea is that by
-;;; making this a generic function then packages with custom package classes
-;;; could hook into this to provide their own resolution.
-;;; (Any such generic solution will turn the performance to crap, so let's not)
-(defun find-package-using-package (package-designator base)
-  (typecase package-designator
-    (package package-designator)
-    ;; Rather than use STRINGIFY-STRING-DESIGNATOR, we check type by hand
-    ;; to avoid consing a new simple-base-string if the designator is one
-    ;; that would undergo coercion entailing allocation.
-    ((or symbol string character)
-     (let ((string (string package-designator)))
-       (or (and base
-                (package-%local-nicknames base)
-                (pkgnick-search-by-name string base))
-           (%get-package string *package-names*))))
-    ;; Is there a fundamental reason we don't declare the FTYPE
-    ;; of FIND-PACKAGE-USING-PACKAGE letting the compiler do the checking?
-    (t (error 'type-error
-                :datum package-designator
-                :expected-type '(or character package string symbol)))))
-
 ;;; Return a list of packages given a package designator or list of
 ;;; package designators, or die trying.
 (defun package-listify (thing)
@@ -909,7 +902,7 @@ REMOVE-PACKAGE-LOCAL-NICKNAME, and the DEFPACKAGE option :LOCAL-NICKNAMES."
   (with-unique-names (vec len h2 probed-thing name)
     `(let* ((,vec (package-hashtable-cells ,table))
             (,len (length ,vec))
-            (,index-var (rem (the hash ,sxhash) ,len))
+            (,index-var (rem (the hash-code ,sxhash) ,len))
             (,h2 (1+ (the index (rem ,sxhash (the index (- ,len 2)))))))
        (declare (type index ,len ,h2 ,index-var))
        (loop
@@ -938,7 +931,7 @@ REMOVE-PACKAGE-LOCAL-NICKNAME, and the DEFPACKAGE option :LOCAL-NICKNAMES."
          (length (length string))
          (hash (symbol-hash symbol)))
     (declare (type index length)
-             (type hash hash))
+             (hash-code hash))
     (with-symbol ((symbol index) table string length hash)
       ;; It is suboptimal to grab the vectors again, but not broken,
       ;; because we have exclusive use of the table for writing.
@@ -1198,6 +1191,75 @@ implementation it is ~S." *!default-package-use-list*)
     (do-packages (package) (push package result))
     result))
 
+;;; Check internal and external symbols, then scan down the list
+;;; of hashtables for inherited symbols.
+(defun %find-symbol (string length package)
+  (declare (simple-string string)
+           (type index length))
+  (let ((hash (compute-symbol-hash string length)))
+    (declare (hash-code hash))
+    (with-symbol ((symbol) (package-internal-symbols package) string length hash)
+      (return-from %find-symbol (values symbol :internal)))
+    (with-symbol ((symbol) (package-external-symbols package) string length hash)
+      (return-from %find-symbol (values symbol :external)))
+    (let* ((tables (package-tables package))
+           (n (length tables)))
+      (unless (eql n 0)
+        ;; Try the most-recently-used table, then others.
+        ;; TABLES is treated as circular for this purpose.
+        (let* ((mru (package-mru-table-index package))
+               (start (if (< mru n) mru 0))
+               (i start))
+          (loop
+           (with-symbol ((symbol) (locally (declare (optimize (safety 0)))
+                                    (svref tables i))
+                         string length hash)
+             (setf (package-mru-table-index package) i)
+             (return-from %find-symbol (values symbol :inherited)))
+           (if (< (decf i) 0) (setq i (1- n)))
+           (if (= i start) (return)))))))
+  (values nil nil))
+
+;;; If the symbol named by the first LENGTH characters of NAME doesn't exist,
+;;; then create it, special-casing the keyword package.
+;;; If a new symbol is created, its print name will be an array of ELT-TYPE.
+;;; The fasloader always supplies NAME as a (SIMPLE-ARRAY <ELT-TYPE> 1),
+;;; but the reader uses a buffer of CHARACTER, which, based on a flag,
+;;; can be demoted to an array of BASE-CHAR.
+(defun %intern (name length package elt-type ignore-lock)
+  ;; No type declarations, %find-symbol will perform the checks
+  (multiple-value-bind (symbol where) (%find-symbol name length package)
+    (if where
+        (values symbol where)
+        ;; Double-checked lock pattern: the common case has the symbol already interned,
+        ;; but in case another thread is interning in parallel we need to check after
+        ;; grabbing the lock.
+        (with-package-graph ()
+          (setf (values symbol where) (%find-symbol name length package))
+          (if where
+              (values symbol where)
+              (let* ((symbol-name
+                       (logically-readonlyize
+                        (replace (make-string length :element-type elt-type) name)))
+                     ;; optimistically create the symbol
+                     (symbol ; Symbol kind: 1=keyword, 2=other interned
+                       (%make-symbol (if (eq package *keyword-package*) 1 2) symbol-name))
+                     (table (cond ((eq package *keyword-package*)
+                                   (%set-symbol-value symbol symbol)
+                                   (package-external-symbols package))
+                                  (t
+                                   (package-internal-symbols package)))))
+                ;; Set the symbol's package before storing it into the package
+                ;; so that (symbol-package (intern x #<pkg>)) = #<pkg>.
+                ;; This matters in the case of concurrent INTERN.
+                (%set-symbol-package symbol package)
+                (if ignore-lock
+                    (add-symbol table symbol)
+                    (with-single-package-locked-error
+                        (:package package "interning ~A" symbol-name)
+                      (add-symbol table symbol)))
+                (values symbol nil)))))))
+
 (macrolet ((find/intern (function package-lookup &rest more-args)
              ;; Both %FIND-SYMBOL and %INTERN require a SIMPLE-STRING,
              ;; but accept a LENGTH. Given a non-simple string,
@@ -1222,9 +1284,7 @@ implementation it is ~S." *!default-package-use-list*)
                             (values name end)
                             (values (subseq name start end)
                                     (- end start)))))
-                (truly-the
-                 (values symbol (member :internal :external :inherited nil))
-                 (,function name length ,package-lookup ,@more-args)))))
+                (,function name length ,package-lookup ,@more-args))))
 
   (defun intern (name &optional (package (sane-package)))
   "Return a symbol in PACKAGE having the specified NAME, creating it
@@ -1260,75 +1320,6 @@ implementation it is ~S." *!default-package-use-list*)
     (find/intern %find-symbol ; likewise
                  (if (packagep cell) cell (cached-find-undeleted-package cell)))))
 
-;;; If the symbol named by the first LENGTH characters of NAME doesn't exist,
-;;; then create it, special-casing the keyword package.
-;;; If a new symbol is created, its print name will be an array of ELT-TYPE.
-;;; The fasloader always supplies NAME as a (SIMPLE-ARRAY <ELT-TYPE> 1),
-;;; but the reader uses a buffer of CHARACTER, which, based on a flag,
-;;; can be demoted to an array of BASE-CHAR.
-(defun %intern (name length package elt-type ignore-lock)
-  (declare (simple-string name) (index length))
-  (multiple-value-bind (symbol where) (%find-symbol name length package)
-    (if where
-        (values symbol where)
-        ;; Double-checked lock pattern: the common case has the symbol already interned,
-        ;; but in case another thread is interning in parallel we need to check after
-        ;; grabbing the lock.
-        (with-package-graph ()
-         (setf (values symbol where) (%find-symbol name length package))
-         (if where
-             (values symbol where)
-             (let* ((symbol-name
-                     (logically-readonlyize
-                      (replace (make-string length :element-type elt-type) name)))
-                    ;; optimistically create the symbol
-                    (symbol ; Symbol kind: 1=keyword, 2=other interned
-                     (%make-symbol (if (eq package *keyword-package*) 1 2) symbol-name))
-                    (table (cond ((eq package *keyword-package*)
-                                  (%set-symbol-value symbol symbol)
-                                  (package-external-symbols package))
-                                 (t
-                                  (package-internal-symbols package)))))
-               ;; Set the symbol's package before storing it into the package
-               ;; so that (symbol-package (intern x #<pkg>)) = #<pkg>.
-               ;; This matters in the case of concurrent INTERN.
-               (%set-symbol-package symbol package)
-               (if ignore-lock
-                   (add-symbol table symbol)
-                   (with-single-package-locked-error
-                       (:package package "interning ~A" symbol-name)
-                     (add-symbol table symbol)))
-               (values symbol nil)))))))
-
-;;; Check internal and external symbols, then scan down the list
-;;; of hashtables for inherited symbols.
-(defun %find-symbol (string length package)
-  (declare (simple-string string)
-           (type index length))
-  (let ((hash (compute-symbol-hash string length)))
-    (declare (type hash hash))
-    (with-symbol ((symbol) (package-internal-symbols package) string length hash)
-      (return-from %find-symbol (values symbol :internal)))
-    (with-symbol ((symbol) (package-external-symbols package) string length hash)
-      (return-from %find-symbol (values symbol :external)))
-    (let* ((tables (package-tables package))
-           (n (length tables)))
-      (unless (eql n 0)
-        ;; Try the most-recently-used table, then others.
-        ;; TABLES is treated as circular for this purpose.
-        (let* ((mru (package-mru-table-index package))
-               (start (if (< mru n) mru 0))
-               (i start))
-          (loop
-             (with-symbol ((symbol) (locally (declare (optimize (safety 0)))
-                                             (svref tables i))
-                           string length hash)
-               (setf (package-mru-table-index package) i)
-               (return-from %find-symbol (values symbol :inherited)))
-             (if (< (decf i) 0) (setq i (1- n)))
-             (if (= i start) (return)))))))
-  (values nil nil))
-
 ;;; Similar to FIND-SYMBOL, but only looks for an external symbol.
 ;;; Return the symbol if found, otherwise 0.
 ;;; This is used for fast name-conflict checking in this file and symbol
@@ -1339,7 +1330,7 @@ implementation it is ~S." *!default-package-use-list*)
   (declare (simple-string string))
   (let* ((length (length string))
          (hash (compute-symbol-hash string length)))
-    (declare (type index length) (type hash hash))
+    (declare (type index length) (hash-code hash))
     (with-symbol ((symbol) (package-external-symbols package) string length hash)
       (return-from find-external-symbol symbol)))
   0)

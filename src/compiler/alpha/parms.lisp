@@ -109,6 +109,9 @@
 ;;; Where to put the different spaces.
 ;;;
 
+(defconstant linkage-table-space-start #x1000)
+(defconstant linkage-table-space-end   linkage-table-space-start) ; 0 size
+
 #+linux
 (progn
   (defconstant read-only-space-start #x20000000)
@@ -129,9 +132,6 @@
 ;; The space-register holding the C text segment.
 (defconstant c-text-space 4)
 
-;;; the X86 port defines *nil-value* as (+ *target-static-space-start* #xB)
-;;; here, but it seems to be the only port that needs to know the
-;;; location of NIL from lisp.
 
 ;;;; other miscellaneous constants
 

@@ -11,6 +11,9 @@
 ;;;; absolutely no warranty. See the COPYING and CREDITS files for
 ;;;; more information.
 
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (load "compiler-test-util.lisp"))
+
 (declaim (optimize (debug 3) (speed 2) (space 1)))
 
 ;;; this would fail an AVER in NOTE-POTENTIAL-CIRCULARITY
@@ -403,3 +406,43 @@
 (with-test (:name :dump-std-obj-literal-layout)
   (assert (eq (try-literal-layout)
               (sb-kernel:find-layout 'class-with-shared-slot))))
+
+(defparameter *some-hash-table*
+  #.(let ((ht (make-hash-table)))
+      (setf (gethash 'first ht) :a)
+      (setf (gethash 'second ht) :b)
+      ht))
+;;; In the interest of producing repeatable results from externalized
+;;; hash-tables, the make-load-form method iterates in such a way that
+;;; the k/v vector should be ordered the same as it originally was.
+;;; This also has implications on the order of items in each bucket
+;;; when there are collisions.
+(with-test (:name :reconstructed-hash-table)
+  (let ((pairs (sb-impl::hash-table-pairs *some-hash-table*)))
+    (assert (eq (aref pairs 2) 'first))
+    (assert (eq (aref pairs 4) 'second))))
+
+(defun list-coalescing-test-fun-1 ()
+  ;; base coalesces with base, non-base coalesces with non-base
+  (values '#.`(foo ,(coerce "a" 'base-string))
+          '#.`(foo ,(coerce "a" '(array character)))
+          '#.`(foo ,(coerce "a" 'base-string))
+          '#.`(foo ,(coerce "a" '(array character)))))
+
+(defun list-coalescing-test-fun-2 ()
+  (values '#.`(foo ,(coerce "a" '(array character)))
+          '#.`(foo ,(coerce "a" 'base-string))))
+
+(with-test (:name :more-code-constant-coalescing
+                  :skipped-on (:not :sb-unicode))
+  (let ((l1 (ctu:find-code-constants #'list-coalescing-test-fun-1))
+        (l2 (ctu:find-code-constants #'list-coalescing-test-fun-2)))
+    (assert (equal (length l1) 2))
+    (assert (equal (length l2) 2))
+    (multiple-value-bind (c1 c2 c3 c4) (list-coalescing-test-fun-1)
+      (assert (typep (second c1) 'simple-base-string))
+      (assert (typep (second c2) 'sb-kernel:simple-character-string))
+      (assert (typep (second c3) 'simple-base-string))
+      (assert (typep (second c4) 'sb-kernel:simple-character-string)))
+    (assert (or (equal l1 l2)
+                (equal l1 (reverse l2))))))

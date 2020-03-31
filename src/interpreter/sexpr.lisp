@@ -398,7 +398,7 @@
 ;;; forms, and an indicator of whether it is OK to create the block and bind
 ;;; variables at the same time. If not a block, return 0 and forms unaltered.
 ;;;
-;;; The optimization of eliding an extra ENV is performed only if no nontrival
+;;; The optimization of eliding an extra ENV is performed only if no nontrivial
 ;;; defaulting SEXPRs exist. A "trivial" one is either a constant or a reference
 ;;; to a variable (not a macro). Absent such a thing, nobody could notice that
 ;;; there aren't actually two different lexical contours, so creating variable
@@ -968,7 +968,7 @@ Test case.
 ;;; FNAME is the symbol at the head of the original form.
 ;;; Each element of KEYS is (#<FUNCTION> . SYM) or (SYM . SYMBOL-EXPANSION)
 ;;; The representation is unambiguous because a symbol is not a function,
-;;; whereas (SYM . EXPANSION|FUNCTION) is ambigious because through contortions
+;;; whereas (SYM . EXPANSION|FUNCTION) is ambiguous because through contortions
 ;;; it is possible to have a symbol's expansion be a function object.
 ;;; If any key is changed, restart using the original sexpr form.
 ;;;
@@ -1142,7 +1142,7 @@ Test case.
   ;; For user-defined functions declared inline, don't bother
   ;; checking for being redefined as a macro.
   ;; The globaldb cookie will take care of redefinition.
-  ;;  (neq (info :function :inlinep fname) :inline))
+  ;;  (neq (info :function :inlinep fname) 'inline))
 
   (when (symbolp fname)
     (when (eq (info :function :kind fname) :special-form)

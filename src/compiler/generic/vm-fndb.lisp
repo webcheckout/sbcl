@@ -65,7 +65,8 @@
            #+64-bit
            signed-byte-64-p
            weak-pointer-p code-component-p lra-p
-           sb-vm::unbound-marker-p
+           sb-int:unbound-marker-p
+           pointerp
            simple-fun-p
            closurep
            funcallable-instance-p
@@ -95,25 +96,34 @@
 
 ;;;; miscellaneous "sub-primitives"
 
-(defknown pointer-hash (t) hash (flushable))
+(defknown pointer-hash (t) fixnum (flushable))
 
 (defknown %sp-string-compare
-  (simple-string index index simple-string index index)
-  (or index null)
+  (simple-string index (or null index) simple-string index (or null index))
+  (values index fixnum)
   (foldable flushable))
 
-(defknown %sxhash-string (string) hash (foldable flushable))
-(defknown %sxhash-simple-string (simple-string) hash (foldable flushable))
+(defknown %sxhash-string (string) hash-code (foldable flushable))
+(defknown %sxhash-simple-string (simple-string) hash-code (foldable flushable))
 
-(defknown (%sxhash-simple-substring) (simple-string index index) hash
+(defknown (%sxhash-simple-substring) (simple-string index index) hash-code
   (foldable flushable))
-(defknown (compute-symbol-hash) (simple-string index) hash
+(defknown (compute-symbol-hash) (simple-string index) hash-code
   (foldable flushable))
 
-(defknown symbol-hash (symbol) hash
+(defknown symbol-hash (symbol) hash-code
   (flushable movable))
+;;; This unusual accessor will read the word at SYMBOL-HASH-SLOT in any
+;;; object, not only symbols. The result is meaningful only if the object
+;;; is a symbol. The second argument indicates a predicate that the first
+;;; argument is known to satisfy, if any.
+;;; There is one more case, but an uninteresting one: the object is known
+;;; to be anything except NIL. That predicate would be IDENTITY,
+;;; which is not terribly helpful from a code generation stance.
+(defknown symbol-hash* (t (member nil symbolp non-null-symbol-p))
+  hash-code (flushable movable always-translatable))
 
-(defknown %set-symbol-hash (symbol hash)
+(defknown %set-symbol-hash (symbol hash-code)
   t ())
 
 (defknown symbol-info-vector (symbol) (or null simple-vector))
@@ -153,6 +163,11 @@
 ;;; This unconventional setter returns its first arg, not the newval.
 (defknown set-header-data
     (t (unsigned-byte #.(- sb-vm:n-word-bits sb-vm:n-widetag-bits))) t)
+;;; Perform a bitwise OR or AND-not of the existing header data with
+;;; the new bits and return no value.
+(defknown (set-header-bits unset-header-bits)
+  (t (unsigned-byte #.(- sb-vm:n-word-bits sb-vm:n-widetag-bits))) (values)
+  ())
 #+64-bit
 (progn
 (defknown sb-vm::get-header-data-high (t) (unsigned-byte 32) (flushable))
@@ -179,6 +194,8 @@
   (flushable))
 (defknown %make-structure-instance (defstruct-description list &rest t) instance
   (flushable always-translatable))
+(defknown (%copy-instance %copy-instance-slots) (instance instance) instance
+  () :result-arg 0)
 (defknown %instance-layout (instance) layout
   (foldable flushable))
 (defknown %funcallable-instance-layout (funcallable-instance) layout
@@ -240,7 +257,8 @@
 ;;; Allocate an unboxed, non-fancy vector with type code TYPE, length LENGTH,
 ;;; and WORDS words long. Note: it is your responsibility to ensure that the
 ;;; relation between LENGTH and WORDS is correct.
-(defknown allocate-vector ((unsigned-byte 8) index
+;;; The extra bit beyond N_WIDETAG_BITS is for the vector weakness flag.
+(defknown allocate-vector ((unsigned-byte 9) index
                            ;; The number of words is later converted
                            ;; to bytes, make sure it fits.
                            (and index
@@ -274,7 +292,7 @@
 
 (defknown %make-complex (real real) complex
   (flushable movable))
-(defknown %make-ratio (rational rational) ratio
+(defknown %make-ratio (integer integer) ratio
   (flushable movable))
 (defknown make-value-cell (t) t
   (flushable movable))
@@ -529,9 +547,9 @@
   (flushable))
 
 ;; T argument is for the 'fun' slot.
-(defknown sb-vm::%copy-closure (index t) function (flushable))
+(defknown sb-vm::%alloc-closure (index t) function (flushable))
 
-(defknown %fun-fun (function) function (flushable recursive))
+(defknown %fun-fun (function) simple-fun (flushable recursive))
 
 (defknown %make-funcallable-instance (index) function
   ())
@@ -565,8 +583,11 @@
   (movable foldable flushable))
 
 #+64-bit
+(progn
+(defknown %make-double-float ((signed-byte 64)) double-float
+  (movable flushable))
 (defknown double-float-bits (double-float) (signed-byte 64)
-  (movable foldable flushable))
+  (movable foldable flushable)))
 
 (defknown double-float-high-bits (double-float) (signed-byte 32)
   (movable foldable flushable))
@@ -632,32 +653,3 @@
 
 (defknown (%unary-truncate %unary-round) (real) integer
   (movable foldable flushable))
-
-(macrolet
-    ((def (name kind width signedp)
-       (let ((type (ecase signedp
-                     ((nil) 'unsigned-byte)
-                     ((t) 'signed-byte))))
-         `(progn
-            (defknown ,name (integer (integer 0)) (,type ,width)
-                      (foldable flushable movable))
-            (define-modular-fun-optimizer ash ((integer count) ,kind ,signedp :width width)
-              (when (and (<= width ,width)
-                         (or (and (constant-lvar-p count)
-                                  (plusp (lvar-value count)))
-                             (csubtypep (lvar-type count)
-                                        (specifier-type '(and unsigned-byte fixnum)))))
-                (cut-to-width integer ,kind width ,signedp)
-                ',name))
-            (setf (gethash ',name (modular-class-versions (find-modular-class ',kind ',signedp)))
-                  `(ash ,',width))))))
-  ;; This should really be dependent on SB-VM:N-WORD-BITS, but since we
-  ;; don't have a true Alpha64 port yet, we'll have to stick to
-  ;; SB-VM:N-MACHINE-WORD-BITS for the time being.  --njf, 2004-08-14
-  #.`(progn
-       #+(or x86 x86-64 arm arm64)
-       (def sb-vm::ash-left-modfx
-           :tagged ,(- sb-vm:n-word-bits sb-vm:n-fixnum-tag-bits) t)
-       (def ,(intern (format nil "ASH-LEFT-MOD~D" sb-vm:n-machine-word-bits)
-                     "SB-VM")
-           :untagged ,sb-vm:n-machine-word-bits nil)))

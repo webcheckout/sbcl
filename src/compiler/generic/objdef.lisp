@@ -155,8 +155,8 @@ Code header representation:
   |            total words          | gc_gen | 0 | 0 | widetag |
   |            (4 bytes)            |        |   |   |         |
   +------------------------------------------------------------+  [64-bit words]
-  |            serial#              |   N boxed header bytes   |
-  |            (4 bytes)            |        (4 bytes)         |
+  |                                 |   N boxed header bytes   |
+  |                                 |        (4 bytes)         |
   +------------------------------------------------------------+
 
   the two zero bytes are reserved for future use
@@ -194,7 +194,6 @@ during backtrace.
   ;; This is the length of the boxed section, in bytes, not tagged.
   ;; It will be a multiple of the word size.
   ;; It can be accessed as a tagged value in Lisp by shifting.
-  ;; The upper 4 bytes store code-serial# on 64-bit words.
   (boxed-size :type fixnum ; see above figure
               :ref-known (flushable movable)
               :ref-trans %code-boxed-size)
@@ -203,7 +202,10 @@ during backtrace.
               :ref-trans %code-debug-info
               :set-known ()
               :set-trans (setf %code-debug-info))
-  #+(or x86 immobile-space)
+  ;; Define this slot if the architecture might ever use fixups.
+  ;; x86-64 doesn't necessarily use them, depending on the feature set,
+  ;; but this keeps things consistent.
+  #+(or x86 x86-64)
   (fixups :type t
           :ref-known (flushable)
           :ref-trans %code-fixups
@@ -239,35 +241,21 @@ during backtrace.
   ;; of x86, or the Lisp function to jump to, for everybody else.
   (self :set-known ()
         :set-trans (setf %simple-fun-self))
-  (name :ref-known (flushable)
-        :ref-trans %simple-fun-name
-        :set-known ()
-        :set-trans (setf %simple-fun-name))
-  (arglist :type list
-           :ref-known (flushable)
-           :ref-trans %simple-fun-arglist
-           :set-known ()
-           :set-trans (setf %simple-fun-arglist))
-  (type :ref-known (flushable)
-        ;; %%SIMPLE-FUN-TYPE is used only by %SIMPLE-FUN-TYPE.
-        ;; Nobody should care that %SIMPLE-FUN-TYPE isn't open-coded.
-        :ref-trans %%simple-fun-type
-        :set-known ()
-        :set-trans (setf %simple-fun-type))
-  ;; NIL for empty, STRING for a docstring, SIMPLE-VECTOR for XREFS, and (CONS
-  ;; STRING SIMPLE-VECTOR) for both.
-  (info :init :null
-        :ref-trans %simple-fun-info
-        :ref-known (flushable)
-        :set-trans (setf %simple-fun-info)
-        :set-known ())
-  ;; FIXME: This is a poor name for this slot, because SIMPLE-FUN-CODE
-  ;; ought to mean the code object in which this simple-fun is contained.
-  ;; Probably a better name would be INSTS, especially as SIMPLE-FUN-CODE-OFFSET
-  ;; is the constant naming the displacement of this slot from the beginning of
-  ;; the fun, but it ought to mean how far this fun is from the code header.
-  ;; This will be quite disastrous to clean up and not make mistakes about it.
-  (code :rest-p t :c-type "unsigned char"))
+  ;; This slot used to be named CODE, but that was misleaing because the
+  ;; generated constant SIMPLE-FUN-CODE-OFFSET did not mean the offset from here
+  ;; back to the containing object (which isn't constant), but instead the offset
+  ;; forward to the first instruction, i.e. what is now SIMPLE-FUN-INSTS-OFFSET.
+  (insts :rest-p t :c-type "unsigned char"))
+
+(defconstant code-slots-per-simple-fun 4)
+;;; These are word numbers beyond the base of the simple-fun's metadata
+;;; in the code header. The mnemonic device here is that the first 3 slots
+;;; essentially comprise the function-lambda-expression,
+;;; and the last is a derived piece of information.
+(defconstant simple-fun-name-slot    0)
+(defconstant simple-fun-arglist-slot 1)
+(defconstant simple-fun-source-slot  2) ; form and/or docstring
+(defconstant simple-fun-info-slot    3) ; type and possibly xref
 
 #-(or x86 x86-64)
 (define-primitive-object (return-pc :lowtag other-pointer-lowtag :widetag t)
@@ -275,11 +263,11 @@ during backtrace.
 
 (define-primitive-object (closure :lowtag fun-pointer-lowtag
                                    :widetag closure-widetag
-                                   ;; This allocator is %COPY-foo because it's only
-                                   ;; used when renaming a closure. The compiler has
-                                   ;; its own way of making closures, which requires
-                                   ;; that the length be a compile-time constant.
-                                   :alloc-trans %copy-closure)
+                                   ;; This allocator is used when renaming or cloning
+                                   ;; a closure. The compiler has its own way of making
+                                   ;; closures which requires that the length be
+                                   ;; a compile-time constant.
+                                   :alloc-trans %alloc-closure)
   (fun :init :arg :ref-trans #+(or x86 x86-64) %closure-callee
                              #-(or x86 x86-64) %closure-fun)
   (info :rest-p t))
@@ -367,14 +355,27 @@ during backtrace.
   ;; OTHER-POINTER-LOWTAG is 7, LIST-POINTER-LOWTAG is 3, so if you
   ;; subtract 3 from (SB-KERNEL:GET-LISP-OBJ-ADDRESS 'NIL) you get the
   ;; first data slot, and if you subtract 7 you get a symbol header.
+  ;; (The numbers mentioned pertain to the 32-bit machines, not 64-bit)
 
-  ;; also the CAR of NIL-as-end-of-list
+  ;; HASH and VALUE are the first two slots.
+  ;; Traditionally VALUE was the first slot, corresponding to the CAR of
+  ;; NIL-as-end-of-list; and HASH was the second, corresponding to CDR.
+  ;; Some architectures reverse the order because by storing HASH in the word
+  ;; after the object header it becomes a memory-safe operation to read
+  ;; SYMBOL-HASH-SLOT from _any_ object whatsoever (the minimum size is 2 words)
+  ;; using lisp code equivalent to "native_pointer(ptr)[1]".
+  ;; Either order should work on any backend; it is merely a question of checking
+  ;; that backend-specific files don't rely on a certain order.
+  ;; Also note that in general, accessing the hash requires masking off bits to
+  ;; yield a fixnum result, all the more so if the object is any random type.
+
+  #+(or arm arm64 ppc ppc64 x86 x86-64) (hash :set-trans %set-symbol-hash)
+
   (value :init :unbound
          :set-trans %set-symbol-global-value
          :set-known ())
-  ;; also the CDR of NIL-as-end-of-list.  Its reffer needs special
-  ;; care for this reason, as hash values must be fixnums.
-  (hash :set-trans %set-symbol-hash)
+
+  #-(or arm arm64 ppc ppc64 x86 x86-64) (hash :set-trans %set-symbol-hash)
 
   (info :ref-trans symbol-info :ref-known (flushable)
         :set-trans (setf symbol-info)
@@ -392,7 +393,9 @@ during backtrace.
   ;; makes it "off" by N-FIXNUM-TAG-BITS, which is bothersome,
   ;; so there's a transform on SYMBOL-TLS-INDEX to make it sane.
   #+(and sb-thread (not 64-bit))
-  (tls-index :ref-known (flushable) :ref-trans %symbol-tls-index))
+  (tls-index :type (and fixnum unsigned-byte) ; too generous still?
+             :ref-known (flushable)
+             :ref-trans %symbol-tls-index))
 
 (define-primitive-object (complex-single-float
                           :lowtag other-pointer-lowtag
@@ -439,7 +442,8 @@ during backtrace.
 ;;; If we can't do that for some reason - like, say, the safepoint page
 ;;; is located prior to 'struct thread', then these just become ordinary slots.
 (defglobal *thread-header-slot-names*
-  (append #+immobile-space '(function-layout
+  (append '(msan-xor-constant)
+          #+immobile-space '(function-layout
                              varyobj-space-addr
                              varyobj-card-count
                              varyobj-card-marks)))
@@ -462,7 +466,7 @@ during backtrace.
 ;;; can take care of maintaining Lisp and C versions.
 (define-primitive-object (thread :size primitive-thread-object-length)
   ;; no_tls_value_marker is borrowed very briefly at thread startup to
-  ;; pass the address of initial-function into new_thread_trampoline.
+  ;; pass the address of the start routine into new_thread_trampoline.
   ;; tls[0] = NO_TLS_VALUE_MARKER_WIDETAG because a the tls index slot
   ;; of a symbol is initialized to zero
   (no-tls-value-marker)
@@ -571,12 +575,6 @@ during backtrace.
   ;; then stuff them at the end, for lack of any place better.
   . #.*thread-trailer-slots*)
 
-;;; Compute the smallest TLS index that will be assigned to a special variable
-;;; that does not map onto a thread slot.
-;;; Given N thread slots, the tls indices are 0..N-1 scaled by word-shift.
-;;; This constant is the index prior to scaling.
-#+sb-thread (defconstant sb-thread::tls-index-start primitive-thread-object-length)
-
 (defconstant code-header-size-shift #+64-bit 32 #-64-bit n-widetag-bits)
 (declaim (inline code-object-size code-header-words %code-code-size))
 #-sb-xc-host
@@ -599,9 +597,24 @@ during backtrace.
     (declare (code-component code))
     (- (code-object-size code) (ash (code-header-words code) word-shift)))
 
+  ;; Possibly not the best place for this definition, but other accessors
+  ;; for primitive objects are here too.
+  (defun code-jump-table-words (code)
+    (declare (code-component code))
+    (if (eql (code-header-ref code code-boxed-size-slot) 0)
+        0
+        (with-pinned-objects (code)
+          (ldb (byte 14 0) (sap-ref-word (code-instructions code) 0)))))
+
+  ;; Serial# is stored in 18 bits of the first unboxed data word, the same word
+  ;; which holds the count of jump table entries. The primary purpose of the serial#
+  ;; is to uniquely identify code objects independent of any naming.
+  ;; The serial# is globally unique unless the global counter wraps around.
   (defun %code-serialno (code)
-    (declare (code-component code) (ignorable code))
-    #+64-bit ; extract high 4 bytes of boxed-size slot
-    (ash (%code-boxed-size code) (- n-fixnum-tag-bits 32)))
+    (declare (code-component code))
+    (if (eql (code-header-ref code code-boxed-size-slot) 0)
+        0
+        (with-pinned-objects (code)
+          (ldb (byte 18 14) (sap-ref-word (code-instructions code) 0)))))
 
 ) ; end PROGN

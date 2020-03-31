@@ -76,7 +76,10 @@
 
         (unless (eq :function kind)
           (assert-it)
-          (setf (info :function :kind name) :function)))))
+          ;; There's no reason to store (:FUNCTION :KIND) for names which
+          ;; could only be of kind :FUNCTION if anything.
+          (unless (pcl-methodfn-name-p name)
+            (setf (info :function :kind name) :function))))))
 
   ;; scrubbing old data II: dangling forward references
   ;;
@@ -85,8 +88,9 @@
   ;; in EVAL-WHEN (:COMPILE) inside something like DEFSTRUCT, in which
   ;; case it's reasonable style. Either way, NAME is no longer a free
   ;; function.)
-  (when (boundp '*free-funs*)       ; when compiling
-    (remhash name *free-funs*))
+  (when (boundp '*ir1-namespace*)       ; when compiling
+    (unless (block-compile *compilation*)
+      (remhash name (free-funs *ir1-namespace*))))
 
   (values))
 
@@ -148,7 +152,9 @@
 ;;; was explicit. See SAVE-INLINE-EXPANSION-P for why we care.
 ;;; (Essentially, once stored then always stored, lest inconsistency result)
 ;;; If we have just a DXABLE-ARGS, or nothing at all, return NIL and NIL.
-(declaim (ftype (sfunction ((or symbol cons)) (values list boolean))
+;;; If called on a string or anything that is not a function designator,
+;;; return NIL and NIL.
+(declaim (ftype (sfunction (t) (values list boolean))
                 fun-name-inline-expansion))
 (defun fun-name-inline-expansion (fun-name)
   (multiple-value-bind (answer winp) (info :function :inlining-data fun-name)

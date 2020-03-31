@@ -34,24 +34,28 @@
 (defstruct (boa-kid (:include boa-saux)))
 (defstruct (boa-grandkid (:include boa-kid)))
 (with-test (:name :defstruct-boa-typecheck)
-  (dolist (dsd (sb-kernel:dd-slots
-                (sb-kernel:find-defstruct-description 'boa-saux)))
-    (let ((name (sb-kernel:dsd-name dsd))
-          (always-boundp (sb-kernel::dsd-always-boundp dsd)))
-      (ecase name
-        ((a c) (assert (not always-boundp)))
-        (b (assert always-boundp)))))
-  (let ((dd (sb-kernel:find-defstruct-description 'boa-grandkid)))
-    (assert (not (sb-kernel::dsd-always-boundp (car (sb-kernel:dd-slots dd))))))
-  (let ((s (make-boa-saux)))
-    (locally (declare (optimize (safety 3))
-                      (inline boa-saux-a))
-      (assert-error (opaque-identity (boa-saux-a s)) type-error))
-    (setf (boa-saux-a s) 1)
-    (setf (boa-saux-c s) 5)
-    (assert (eql (boa-saux-a s) 1))
-    (assert (eql (boa-saux-b s) 3))
-    (assert (eql (boa-saux-c s) 5))))
+  (flet ((dsd-always-boundp (dsd)
+           ;; A copy of sb-kernel::dsd-always-boundp, which may not
+           ;; survive make-target-2's shake-packages.
+           (logbitp 3 (sb-kernel::dsd-bits dsd))))
+    (dolist (dsd (sb-kernel:dd-slots
+                  (sb-kernel:find-defstruct-description 'boa-saux)))
+      (let ((name (sb-kernel:dsd-name dsd))
+            (always-boundp (dsd-always-boundp dsd)))
+        (ecase name
+          ((a c) (assert (not always-boundp)))
+          (b (assert always-boundp)))))
+    (let ((dd (sb-kernel:find-defstruct-description 'boa-grandkid)))
+      (assert (not (dsd-always-boundp (car (sb-kernel:dd-slots dd))))))
+    (let ((s (make-boa-saux)))
+      (locally (declare (optimize (safety 3))
+                        (inline boa-saux-a))
+        (assert-error (opaque-identity (boa-saux-a s)) type-error))
+      (setf (boa-saux-a s) 1)
+      (setf (boa-saux-c s) 5)
+      (assert (eql (boa-saux-a s) 1))
+      (assert (eql (boa-saux-b s) 3))
+      (assert (eql (boa-saux-c s) 5)))))
 
 (with-test (:name :defstruct-boa-nice-error :skipped-on :interpreter)
   (let ((err (nth-value 1 (ignore-errors (boa-saux-a (make-boa-saux))))))
@@ -1431,3 +1435,16 @@ redefinition."
   ;; object (specifically NIL) meets the test for the slot.
   (assert (macroexpand-1
            '(defstruct strangestruct (a nil :type (satisfies plusp))))))
+
+
+(defstruct foo4130 bar)
+(test-util:with-test (:name :duplicated-slot-names)
+      (flet ((assert-that (expect form)
+               (multiple-value-bind (ret error) (ignore-errors (eval form))
+                 (assert (not ret))
+                 (assert (string= (princ-to-string error)
+                                  expect)))))
+    (assert-that "duplicate slot name BAR"
+                 `(defstruct foo4131 bar bar))
+    (assert-that "slot name BAR duplicated via included FOO4130"
+                 `(defstruct (foo4132 (:include foo4130)) bar))))

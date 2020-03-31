@@ -19,6 +19,7 @@
 
 (defstruct (arg-state (:copier nil))
   (stack-frame-size 0))
+(declaim (freeze-type arg-state))
 
 (define-alien-type-method (integer :arg-tn) (type state)
   (let ((stack-frame-size (arg-state-stack-frame-size state)))
@@ -58,6 +59,7 @@
 
 (defstruct (result-state (:copier nil))
   (num-results 0))
+(declaim (freeze-type result-state))
 
 (defun result-reg-offset (slot)
   (ecase slot
@@ -227,9 +229,8 @@
   (:results (res :scs (sap-reg)))
   (:result-types system-area-pointer)
   (:generator 2
-   (inst lea res (make-fixup foreign-symbol :foreign))))
+   (inst mov res (make-fixup foreign-symbol :foreign))))
 
-#+linkage-table
 (define-vop (foreign-symbol-dataref-sap)
   (:translate foreign-symbol-dataref-sap)
   (:policy :fast-safe)
@@ -239,7 +240,7 @@
   (:results (res :scs (sap-reg)))
   (:result-types system-area-pointer)
   (:generator 2
-   (inst mov res (make-fixup foreign-symbol :foreign-dataref))))
+   (inst mov res (make-ea :dword :disp (make-fixup foreign-symbol :foreign-dataref)))))
 
 (defun force-x87-to-mem (tn fp-temp)
   (aver (location= tn fr0-tn))

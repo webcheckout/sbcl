@@ -27,37 +27,10 @@
 #include "genesis/simple-fun.h"
 #include "thread.h"
 #include "interr.h" /* for lose() */
-
+#include "gc-assert.h"
+#include "code.h"
 extern const char *widetag_names[];
 extern struct weak_pointer *weak_pointer_chain; /* in gc-common.c */
-
-/// Enable extra debug-only checks if DEBUG
-#ifdef DEBUG
-# define gc_dcheck(ex) gc_assert(ex)
-#else
-# define gc_dcheck(ex) ((void)0)
-#endif
-
-/// Disable all assertions if NDEBUG
-#ifdef NDEBUG
-# define gc_assert(ex) ((void)0)
-# define gc_assert_verbose(ex, fmt, ...) ((void)0)
-#else
-# define gc_assert(ex)                                                 \
-do {                                                                   \
-    if (!(ex)) gc_abort();                                             \
-} while (0)
-# define gc_assert_verbose(ex, fmt, ...)                               \
-do {                                                                   \
-    if (!(ex)) {                                                       \
-        fprintf(stderr, fmt, ## __VA_ARGS__);                          \
-        gc_abort();                                                    \
-    }                                                                  \
-} while (0)
-#endif
-
-#define gc_abort()                                                     \
-  lose("GC invariant lost, file \"%s\", line %d\n", __FILE__, __LINE__)
 
 #ifdef LISP_FEATURE_GENCGC
 #include "gencgc-internal.h"
@@ -69,10 +42,13 @@ do {                                                                   \
 
 // Offset from an fdefn raw address to the underlying simple-fun,
 // if and only if it points to a simple-fun.
+// For those of us who are too memory-impaired to know how to use the value:
+//  - it is the amount to ADD to a tagged simple-fun pointer to get its entry address
+//  - or the amount to SUBTRACT from an entry address to get a tagged fun pointer
 #if defined(LISP_FEATURE_SPARC) || defined(LISP_FEATURE_ARM) || defined(LISP_FEATURE_RISCV)
 #define FUN_RAW_ADDR_OFFSET 0
 #else
-#define FUN_RAW_ADDR_OFFSET (offsetof(struct simple_fun, code) - FUN_POINTER_LOWTAG)
+#define FUN_RAW_ADDR_OFFSET (offsetof(struct simple_fun, insts) - FUN_POINTER_LOWTAG)
 #endif
 
 // For x86[-64], a simple-fun or closure's "self" slot is a fixum
@@ -83,6 +59,9 @@ do {                                                                   \
 #define FUN_SELF_FIXNUM_TAGGED 0
 #endif
 
+// Return only the lisp-visible vector header flag bits bits,
+// masking out subtype_VectorWeakVisited.
+#define vector_subtype(header) (HeaderValue(header) & 7)
 // Test for presence of a bit in vector's header.
 // As a special case, if 'val' is 0, then test for all bits clear.
 #define is_vector_subtype(header, val) \
@@ -96,9 +75,6 @@ do {                                                                   \
      | SIMPLE_VECTOR_WIDETAG)); \
   v->header ^= subtype_VectorWeakVisited << N_WIDETAG_BITS
 
-#define SIMPLE_FUN_SCAV_START(fun_ptr) &fun_ptr->name
-#define SIMPLE_FUN_SCAV_NWORDS(fun_ptr) ((lispobj*)fun_ptr->code - &fun_ptr->name)
-
 /* values for the *_alloc_* parameters, also see the commentary for
  * struct page in gencgc-internal.h. These constants are used in gc-common,
  * so they can't easily be made gencgc-only */
@@ -107,6 +83,17 @@ do {                                                                   \
 /* Note: MAP-ALLOCATED-OBJECTS expects this value to be 1 */
 #define BOXED_PAGE_FLAG       1
 #define UNBOXED_PAGE_FLAG     2
+/* CONS_PAGE_FLAG doesn't get stored in the page table, though I am considering
+ * doing that. If conses went on segregated pages, then testing for a valid
+ * conservative root on a cons page is as simple as seeing whether the address
+ * is correctly aligned and lowtagged.
+ * Also, we could reserve bytes at the end of each page to act as a mark bitmap
+ * which is useful since conses are headerless objects, and one GC strategy
+ * demands mark bitmaps which are currently placed in a side table.
+ * That would unfortunately complicate the task of allocating a huge list,
+ * because hitting the line of demarcation between conses and the mark bits would
+ * require chaining the final cons to another page of conses and so on. */
+#define CONS_PAGE_FLAG        4
 #define OPEN_REGION_PAGE_FLAG 8
 #define CODE_PAGE_TYPE        (BOXED_PAGE_FLAG|UNBOXED_PAGE_FLAG)
 
@@ -145,6 +132,8 @@ instance_scan(void (*proc)(lispobj*, sword_t, uword_t),
               lispobj *instance_ptr, sword_t n_words,
               lispobj bitmap, uword_t arg);
 
+extern int simple_fun_index(struct code*, struct simple_fun*);
+
 #ifdef LISP_FEATURE_COMPACT_INSTANCE_HEADER
 static inline lispobj funinstance_layout(lispobj* funinstance_ptr) { // native ptr
     return instance_layout(funinstance_ptr);
@@ -174,38 +163,7 @@ static inline void set_function_layout(lispobj __attribute__((unused)) *fun_ptr,
 #include "genesis/bignum.h"
 extern boolean positive_bignum_logbitp(int,struct bignum*);
 
-#ifdef LISP_FEATURE_IMMOBILE_CODE
-
-/* The callee_lispobj of an fdefn is the value in the 'raw_addr' slot to which
- * control transfer occurs, but cast as a simple-fun or code component.
- * It can momentarily disagree with the 'fun' slot when assigning a new value.
- * Pointer tracing should almost always examine both slots, as scav_fdefn() does.
- * If the raw_addr value points to read-only space, the callee is just raw_addr
- * itself, which either looks like a simple-fun or a fixnum depending on platform.
- * It is not critical that this exceptional situation be consistent by having
- * a pointer lowtag because it only affects print_otherptr() and verify_space()
- * neither of which materially impact garbage collection. */
-
 extern lispobj fdefn_callee_lispobj(struct fdefn *fdefn);
-extern lispobj virtual_fdefn_callee_lispobj(struct fdefn *fdefn,uword_t);
-
-#else
-
-static inline lispobj points_to_asm_routine_p(uword_t ptr) {
-# if defined(LISP_FEATURE_IMMOBILE_SPACE)
-    extern uword_t asm_routines_start, asm_routines_end;
-    // Lisp assembly routines are in varyobj space, not readonly space
-    return asm_routines_start <= ptr && ptr < asm_routines_end;
-# else
-    return READ_ONLY_SPACE_START <= ptr && ptr < READ_ONLY_SPACE_END;
-# endif
-}
-static inline lispobj fdefn_callee_lispobj(struct fdefn *fdefn) {
-    return (lispobj)fdefn->raw_addr -
-      (points_to_asm_routine_p((uword_t)fdefn->raw_addr) ? 0 : FUN_RAW_ADDR_OFFSET);
-}
-
-#endif
 
 boolean valid_widetag_p(unsigned char widetag);
 

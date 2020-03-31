@@ -12,9 +12,6 @@
 
 (in-package "SB-C")
 
-(declaim (type fixnum *compiler-sset-counter*))
-(defvar *compiler-sset-counter* 0)
-
 ;;; The front-end data structure (IR1) is composed of nodes,
 ;;; representing actual evaluations. Linear sequences of nodes in
 ;;; control-flow order are combined into blocks (but see
@@ -69,7 +66,7 @@
 
 (defmethod print-object ((x ctran) stream)
   (print-unreadable-object (x stream :type t :identity t)
-    (when (boundp '*compiler-ir-obj-map*)
+    (when (boundp '*compilation*)
       (format stream "~D" (cont-num x)))))
 
 ;;; Linear VARiable. Multiple-value (possibly of unknown number)
@@ -93,12 +90,14 @@
   (dynamic-extent nil :type (or null cleanup))
   ;; something or other that the back end annotates this lvar with
   (info nil)
-  (dependent-casts nil)
+  ;; Nodes to reoptimize together with the lvar
+  (dependent-nodes nil)
   (annotations nil)
   (dependent-annotations nil))
 
-;;; These are used for annottating a LVAR with information that can't
-;;; be expressed using types.
+;;; These are used for annotating a LVAR with information that can't
+;;; be expressed using types or if the CAST semantics are undesirable
+;;; (type derivation, runtime errors).
 ;;; Right now it's basically used for tracking constants and checking
 ;;; them for things like proper sequence, or valid type specifier.
 (defstruct lvar-annotation
@@ -142,15 +141,19 @@
   (result-specs nil :type list)
   type)
 
-(defstruct (lvar-function-annotation
-             (:include lvar-annotation)
-             (:copier nil))
+(defstruct (lvar-type-annotation
+            (:include lvar-annotation)
+            (:copier nil))
   type
   context)
 
+(defstruct (lvar-function-annotation
+            (:include lvar-type-annotation)
+            (:copier nil)))
+
 (defmethod print-object ((x lvar) stream)
   (print-unreadable-object (x stream :type t :identity t)
-    (when (boundp '*compiler-ir-obj-map*)
+    (when (boundp '*compilation*)
       (format stream "~D" (cont-num x)))))
 
 #-sb-fluid (declaim (inline lvar-has-single-use-p))
@@ -171,11 +174,9 @@
 
 (def!struct (node (:constructor nil)
                   (:include sset-element
-                            (number (unless (eql *compiler-sset-counter* 0)
-                                      (incf *compiler-sset-counter*))))
+                            (number (when (boundp '*compilation*)
+                                      (incf (sset-counter *compilation*)))))
                   (:copier nil))
-  ;; unique ID for debugging
-  #+sb-show (id (new-object-id) :read-only t)
   ;; True if this node needs to be optimized. This is set to true
   ;; whenever something changes about the value of an lvar whose DEST
   ;; is this node.
@@ -391,7 +392,7 @@
   ;; no cached value has been stored yet.
   (physenv-cache :none :type (or null physenv (member :none))))
 (defmethod print-object ((cblock cblock) stream)
-  (if (boundp '*compiler-ir-obj-map*)
+  (if (boundp '*compilation*)
       (print-unreadable-object (cblock stream :type t :identity t)
         (format stream "~W :START c~W"
             (block-number cblock)
@@ -436,9 +437,9 @@
                         (head
                          tail &aux
                          (last-block tail)
-                         (outer-loop (make-loop :kind :outer :head head)))))
-  ;; unique ID for debugging
-  #+sb-show (id (new-object-id) :read-only t)
+                         (outer-loop (make-loop :kind :outer
+                                                :head head
+                                                :tail (list tail))))))
   ;; space where this component will be allocated in
   ;; :auto won't make any codegen optimizations pertinent to immobile space,
   ;; but will place the code there given sufficient available space.
@@ -521,10 +522,6 @@
   ;;   on me (e.g. by using me as *CURRENT-COMPONENT*, or by pushing
   ;;   LAMBDAs onto my NEW-FUNCTIONALS, as in sbcl-0.pre7.115).
   (info :no-ir2-yet :type (or ir2-component (member :no-ir2-yet :dead)))
-  ;; count of the number of inline expansions we have done while
-  ;; compiling this component, to detect infinite or exponential
-  ;; blowups
-  (inline-expansions 0 :type index)
   ;; a map from combination nodes to things describing how an
   ;; optimization of the node failed. The description is an alist
   ;; (TRANSFORM . ARGS), where TRANSFORM is the structure describing
@@ -547,14 +544,12 @@
   (sset-number 0 :type fixnum)))
 (defprinter (component :identity t)
   name
-  #+sb-show id
   (reanalyze :test reanalyze))
 
 (declaim (inline reoptimize-component))
 (defun reoptimize-component (component kind)
   (declare (type component component)
-           (type (member nil :maybe t) kind))
-  (aver kind)
+           (type (member :maybe t) kind))
   (unless (eq (component-reoptimize component) t)
     (setf (component-reoptimize component) kind)))
 
@@ -728,12 +723,10 @@
 ;;; allows us to easily substitute one for the other without actually
 ;;; hacking the flow graph.
 (def!struct (leaf (:include sset-element
-                            (number (unless (eql *compiler-sset-counter* 0)
-                                      (incf *compiler-sset-counter*))))
+                            (number (when (boundp '*compilation*)
+                                      (incf (sset-counter *compilation*)))))
                   (:copier nil)
                   (:constructor nil))
-  ;; unique ID for debugging
-  #+sb-show (id (new-object-id) :read-only t)
   ;; (For public access to this slot, use LEAF-SOURCE-NAME.)
   ;;
   ;; the name of LEAF as it appears in the source, e.g. 'FOO or '(SETF
@@ -778,13 +771,13 @@
   ;; be true when REFS and SETS are null, since code can be deleted.
   (ever-used nil :type boolean)
   ;; is it declared dynamic-extent, or truly-dynamic-extent?
-  (extent nil :type (member nil :maybe-dynamic :always-dynamic :indefinite))
+  (extent nil :type (member nil truly-dynamic-extent dynamic-extent indefinite-extent))
   ;; some kind of info used by the back end
   (info nil))
 
 (defun leaf-dynamic-extent (leaf)
   (let ((extent (leaf-extent leaf)))
-    (unless (member extent '(nil :indefinite))
+    (unless (member extent '(nil indefinite-extent))
       extent)))
 
 ;;; LEAF name operations
@@ -821,7 +814,6 @@
              :pretty-ir-printer
              (pretty-print-global-var structure stream))
   %source-name
-  #+sb-show id
   (type :test (not (eq type *universal-type*)))
   (defined-type :test (not (eq defined-type *universal-type*)))
   (where-from :test (not (eq where-from :assumed)))
@@ -858,7 +850,6 @@
 (defprinter (defined-fun :identity t
              :pretty-ir-printer (pretty-print-global-var structure stream))
   %source-name
-  #+sb-show id
   inlinep
   (functionals :test functionals))
 
@@ -933,7 +924,7 @@
   ;;    Similar to NIL, but requires greater caution, since local call
   ;;    analysis may create new references to this function. Also, the
   ;;    function cannot be deleted even if it has *no* references. The
-  ;;    OPTIONAL-DISPATCH is in the LAMDBA-OPTIONAL-DISPATCH.
+  ;;    OPTIONAL-DISPATCH is in the LAMBDA-OPTIONAL-DISPATCH.
   ;;
   ;;    :EXTERNAL
   ;;    an external entry point lambda. The function it is an entry
@@ -1000,7 +991,7 @@
   ;; INLINEP will always be NIL as well.)
   (inline-expansion nil :type list)
   ;; the lexical environment that the INLINE-EXPANSION should be converted in
-  (lexenv *lexenv* :type lexenv)
+  (lexenv *lexenv* :type lexenv :read-only t)
   ;; the original function or macro lambda list, or :UNSPECIFIED if
   ;; this is a compiler created function
   (arg-documentation nil :type (or list (member :unspecified)))
@@ -1031,8 +1022,7 @@
 (defprinter (functional :identity t
              :pretty-ir-printer (pretty-print-functional structure stream))
   %source-name
-  %debug-name
-  #+sb-show id)
+  %debug-name)
 
 (defun leaf-debug-name (leaf)
   (if (functional-p leaf)
@@ -1141,9 +1131,6 @@
   ;; we will still have caller's lexenv to figure out which cleanup is
   ;; in effect.
   (call-lexenv nil :type (or lexenv null))
-  ;; list of embedded lambdas
-  (children nil :type list)
-  (parent nil :type (or clambda null))
   (allow-instrumenting *allow-instrumenting* :type boolean)
   ;; True if this is a system introduced lambda: it may contain user code, but
   ;; the lambda itself is not, and the bindings introduced by it are considered
@@ -1153,7 +1140,6 @@
              :pretty-ir-printer (pretty-print-functional structure stream))
   %source-name
   %debug-name
-  #+sb-show id
   kind
   (type :test (not (eq type *universal-type*)))
   (where-from :test (not (eq where-from :assumed)))
@@ -1209,6 +1195,7 @@
   ;; true if &KEY was specified (which doesn't necessarily mean that
   ;; there are any &KEY arguments..)
   (keyp nil :type boolean)
+  (source-path)
   ;; the number of required arguments. This is the smallest legal
   ;; number of arguments.
   (min-args 0 :type unsigned-byte)
@@ -1235,7 +1222,6 @@
              :pretty-ir-printer (pretty-print-functional structure stream))
   %source-name
   %debug-name
-  #+sb-show id
   (type :test (not (eq type *universal-type*)))
   (where-from :test (not (eq where-from :assumed)))
   arglist
@@ -1338,12 +1324,14 @@
   (eql-var-constraints     nil :type (or null (array t 1)))
   (inheritable-constraints nil :type (or null (array t 1)))
   (private-constraints     nil :type (or null (array t 1)))
+  (equality-constraints    nil :type (or null (array t 1)))
+
   ;; The FOP handle of the lexical variable represented by LAMBDA-VAR
   ;; in the fopcompiler.
-  (fop-value nil))
+  (fop-value nil)
+  source-form)
 (defprinter (lambda-var :identity t)
   %source-name
-  #+sb-show id
   (type :test (not (eq type *universal-type*)))
   (where-from :test (not (eq where-from :assumed)))
   (flags :test (not (zerop flags))
@@ -1382,7 +1370,6 @@
   ;; Constraints that cannot be expressed as NODE-DERIVED-TYPE
   constraints)
 (defprinter (ref :identity t)
-  #+sb-show id
   (%source-name :test (neq %source-name '.anonymous.))
   leaf)
 
@@ -1420,6 +1407,14 @@
   var
   (value :prin1 (lvar-uses value)))
 
+(defvar *inline-expansion-limit* 50
+  "an upper limit on the number of inline function calls that will be expanded
+   in any given code object (single function or block compilation)")
+
+(defvar *inline-expansions* nil)
+(declaim (list *inline-expansions*)
+         (always-bound *inline-expansions*))
+
 ;;; The BASIC-COMBINATION structure is used to represent both normal
 ;;; and multiple value combinations. In a let-like function call, this
 ;;; node appears at the end of its block and the body of the called
@@ -1427,8 +1422,8 @@
 (def!struct (basic-combination (:include valued-node)
                                (:constructor nil)
                                (:copier nil))
-  ;; LVAR for the function
-  (fun (missing-arg) :type lvar)
+    ;; LVAR for the function
+    (fun (missing-arg) :type lvar)
   ;; list of LVARs for the args. In a local call, an argument lvar may
   ;; be replaced with NIL to indicate that the corresponding variable
   ;; is unreferenced, and thus no argument value need be passed.
@@ -1451,7 +1446,9 @@
   ;; some kind of information attached to this node by the back end
   ;; or by CHECK-IMPORTANT-RESULT
   (info nil)
-  (step-info))
+  (step-info)
+  ;; A plist of inline expansions
+  (inline-expansions *inline-expansions* :type list :read-only t))
 
 ;;; The COMBINATION node represents all normal function calls,
 ;;; including FUNCALL. This is distinct from BASIC-COMBINATION so that
@@ -1460,7 +1457,6 @@
                          (:constructor make-combination (fun))
                          (:copier nil)))
 (defprinter (combination :identity t)
-  #+sb-show id
   (fun :prin1 (lvar-uses fun))
   (args :prin1 (mapcar (lambda (x)
                          (if x
@@ -1505,7 +1501,7 @@
   ;; the union of the node-derived-type of all uses of the result
   ;; other than by a local call, intersected with the result's
   ;; asserted-type. If there are no non-call uses, this is
-  ;; *EMPTY-TYPE*
+  ;; *EMPTY-TYPE*.
   (result-type *wild-type* :type ctype))
 (defprinter (creturn :conc-name return- :identity t)
   lambda
@@ -1583,8 +1579,7 @@
   (exits nil :type list)
   ;; The cleanup for this entry. NULL only temporarily.
   (cleanup nil :type (or cleanup null)))
-(defprinter (entry :identity t)
-  #+sb-show id)
+(defprinter (entry :identity t))
 
 ;;; The EXIT node marks the place at which exit code would be emitted,
 ;;; if necessary. This is interposed between the uses of the exit
@@ -1605,9 +1600,11 @@
   (value nil :type (or lvar null))
   (nlx-info nil :type (or nlx-info null)))
 (defprinter (exit :identity t)
-  #+sb-show id
   (entry :test entry)
   (value :test value))
+
+(def!struct (no-op (:include node)
+                   (:copier nil)))
 
 ;;; a helper for the POLICY macro, defined late here so that the
 ;;; various type tests can be inlined
@@ -1627,6 +1624,7 @@
     (policy thing)
     #+(and sb-fasteval (not sb-xc-host))
     (sb-interpreter:basic-env (sb-interpreter:env-policy thing))
+    ;; Why not *policy*?
     (null **baseline-policy**)
     (t (lexenv-policy (etypecase thing
                         (lexenv thing)

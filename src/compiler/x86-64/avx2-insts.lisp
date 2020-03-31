@@ -1,9 +1,5 @@
 (in-package "SB-X86-64-ASM")
 
-(defun !make-avx2-id (index)
-  (declare (type (mod 16) index))
-  (logior (ash index 3) 3))
-
 (defun get-avx2 (number)
   (svref (load-time-value
           (coerce (loop for i from 0 below 16
@@ -261,6 +257,8 @@
   (emit-bytes segment opcode)
   (when is4
     (incf remaining-bytes))
+  ;; FIXME: :xmm-index should be removed and we should alter the EA
+  ;; to have the proper FPR as the index reg when appropriate.
   (emit-ea segment thing reg :remaining-bytes remaining-bytes :xmm-index vm)
   (when is4
     (emit-byte segment (ash (reg-id-num (reg-id is4)) 4))))

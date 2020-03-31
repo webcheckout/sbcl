@@ -121,7 +121,7 @@
     (emit-label start-lab)
     ;; Allocate function header.
     (inst simple-fun-header-word)
-    (inst .skip (* (1- simple-fun-code-offset) n-word-bytes))
+    (inst .skip (* (1- simple-fun-insts-offset) n-word-bytes))
     (inst compute-code code-tn lip start-lab)))
 
 (define-vop (xep-setup-sp)
@@ -472,8 +472,29 @@
        (inst add temp context (lsl index (- word-shift n-fixnum-tag-bits)))
        (loadw value temp)))))
 
+(define-vop (more-arg-or-nil)
+  (:policy :fast-safe)
+  (:args (object :scs (descriptor-reg) :to (:result 1))
+         (count :scs (any-reg) :to (:result 1)))
+  (:arg-types * tagged-num)
+  (:info index)
+  (:results (value :scs (descriptor-reg any-reg)))
+  (:result-types *)
+  (:generator 3
+    (inst mov value null-tn)
+    (cond ((zerop index)
+           (inst cbz count done))
+          (t
+           (inst cmp count (fixnumize index))
+           (inst b :le done)))
+    (inst ldr value
+          (@ object
+             (load-store-offset
+              (ash index word-shift))))
+    done))
+
 ;;; Turn more arg (context, count) into a list.
-(define-vop (listify-rest-args)
+(define-vop ()
   (:args (context-arg :target context :scs (descriptor-reg))
          (count-arg :target count :scs (any-reg)))
   (:arg-types * tagged-num)
@@ -503,7 +524,7 @@
                          (t
                           (inst lsl temp count (1+ (- word-shift n-fixnum-tag-bits)))
                           temp))))
-        (allocation dst size list-pointer-lowtag
+        (allocation 'list size list-pointer-lowtag dst
                     :flag-tn pa-flag
                     :stack-allocate-p dx-p
                     :lip lip))
@@ -540,7 +561,7 @@
 ;;; preventing this info from being returned as values.  What we do is
 ;;; compute supplied - fixed, and return a pointer that many words
 ;;; below the current stack top.
-(define-vop (more-arg-context)
+(define-vop ()
   (:policy :fast-safe)
   (:translate sb-c::%more-arg-context)
   (:args (supplied :scs (any-reg)))
@@ -934,7 +955,7 @@
                       ;; CONTEXT-PC will be pointing here when the
                       ;; interrupt is handled, not after the
                       ;; DEBUG-TRAP.
-                      (note-this-location vop :step-before-vop)
+                      (note-this-location vop :internal-error)
                       (inst brk single-step-around-trap)
                       STEP-DONE-LABEL))))
            (declare (ignorable #'insert-step-instrumenting))
@@ -979,7 +1000,7 @@
                 `((inst ldr lip (@ null-tn (load-store-offset (static-fun-offset fun))))))
                ((nil)
                 `((inst add lip function
-                        (- (ash simple-fun-code-offset word-shift)
+                        (- (ash simple-fun-insts-offset word-shift)
                            fun-pointer-lowtag)))))
 
            (note-this-location vop :call-site)
@@ -1176,7 +1197,7 @@
     (inst cbz tmp-tn DONE)
     ;; CONTEXT-PC will be pointing here when the interrupt is handled,
     ;; not after the BREAK.
-    (note-this-location vop :step-before-vop)
+    (note-this-location vop :internal-error)
     ;; A best-guess effort at a debug trap suitable for a
     ;; single-step-before-trap.
     (inst brk single-step-before-trap)

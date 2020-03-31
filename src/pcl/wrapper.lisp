@@ -30,20 +30,10 @@
   `(classoid-pcl-class (layout-classoid ,wrapper)))
 
 (declaim (inline make-wrapper-internal))
-(defun make-wrapper-internal (&key (bitmap -1) length classoid)
-  (make-layout classoid :length length :invalid nil
+(defun make-wrapper-internal (hash &key (bitmap -1) length classoid)
+  (make-layout hash classoid
+               :length length :invalid nil
                :flags +pcl-object-layout-flag+ :bitmap bitmap))
-
-;;; With compact-instance-header and immobile-code, the primitive object has
-;;; 2 descriptor slots (fin-fun and CLOS slot vector) and 2 non-desriptor slots
-;;; containing machine instructions, after the self-pointer (trampoline) slot.
-;;; Scavenging the self-pointer is unnecessary though harmless.
-;;; This intricate calculation of #b110 makes it insensitive to the
-;;; index of the trampoline slot.
-#+(and immobile-code compact-instance-header)
-(defconstant +fsc-layout-bitmap+
-  (logxor (1- (ash 1 sb-vm:funcallable-instance-info-offset))
-          (ash 1 (1- sb-vm:funcallable-instance-trampoline-slot))))
 
 ;;; This is called in BRAID when we are making wrappers for classes
 ;;; whose slots are not initialized yet, and which may be built-in
@@ -59,15 +49,10 @@
         (aver layout)
         layout))
      (t
-      (make-wrapper-internal
-       :bitmap (cond #+(and immobile-code compact-instance-header)
-                     ((member name '(generic-function
-                                     standard-generic-function))
-                      +fsc-layout-bitmap+)
-                     (t -1))
-       :length length
-       :classoid (make-standard-classoid
-                  :name name :pcl-class class))))))
+      (make-wrapper-internal (randomish-layout-clos-hash name)
+                             :length length
+                             :classoid (make-standard-classoid
+                                        :name name :pcl-class class))))))
 
 ;;; In SBCL, as in CMU CL, the layouts (a.k.a wrappers) for built-in
 ;;; and structure classes already exist when PCL is initialized, so we
@@ -80,24 +65,22 @@
   (cond
     ((or (typep class 'std-class)
          (typep class 'forward-referenced-class))
-     (make-wrapper-internal
-      :bitmap (cond #+(and immobile-code compact-instance-header)
-                    ((eq (class-of class) *the-class-funcallable-standard-class*)
-                     +fsc-layout-bitmap+)
-                    (t -1))
-      :length length
-      :classoid
-      (let ((owrap (class-wrapper class)))
-        (cond (owrap
-               (layout-classoid owrap))
-              ((or (*subtypep (class-of class) *the-class-standard-class*)
-                   (*subtypep (class-of class) *the-class-funcallable-standard-class*)
-                   (typep class 'forward-referenced-class))
-               (let ((name (slot-value class 'name)))
-                 (make-standard-classoid :pcl-class class
-                                         :name (and (symbolp name) name))))
-              (t
-               (bug "Got to T branch in ~S" 'make-wrapper))))))
+     (let* ((name)
+            (classoid
+             (let ((owrap (class-wrapper class)))
+               (cond (owrap
+                      (layout-classoid owrap))
+                     ((or (*subtypep (class-of class) *the-class-standard-class*)
+                          (*subtypep (class-of class) *the-class-funcallable-standard-class*)
+                          (typep class 'forward-referenced-class))
+                      (setq name (slot-value class 'name))
+                      (make-standard-classoid :pcl-class class
+                                              :name (and (symbolp name) name)))
+                     (t
+                      (bug "Got to T branch in ~S" 'make-wrapper))))))
+       (make-wrapper-internal (randomish-layout-clos-hash name)
+                              :length length
+                              :classoid classoid)))
     (t
      (let* ((found (find-classoid (slot-value class 'name)))
             (layout (classoid-layout found)))

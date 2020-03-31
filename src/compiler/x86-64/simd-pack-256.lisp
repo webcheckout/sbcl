@@ -48,7 +48,7 @@
          (p2 (%simd-pack-256-2 x))
          (p3 (%simd-pack-256-3 x)))
     (cond ((= p0 p1 p2 p3 0)
-           (inst vxorps y y))
+           (inst vxorps y y y))
           ((= p0 p1 p2 p3 (ldb (byte 64 0) -1))
            (inst vpcmpeqd y y y))
           (t
@@ -89,7 +89,7 @@
   (:node-var node)
   (:note "AVX2 to pointer coercion")
   (:generator 13
-     (fixed-alloc y simd-pack-256-widetag simd-pack-256-size node)
+     (alloc-other y simd-pack-256-widetag simd-pack-256-size node)
        ;; see *simd-pack-element-types*
      (storew (fixnumize
               (sc-case x
@@ -98,7 +98,7 @@
                 (int-avx2-reg 0)
                 (t 0)))
          y simd-pack-256-tag-slot other-pointer-lowtag)
-     (let ((ea (make-ea-for-object-slot
+     (let ((ea (object-slot-ea
                 y simd-pack-256-p0-slot other-pointer-lowtag)))
        (if (float-avx2-p x)
            (inst vmovups ea x)
@@ -111,7 +111,7 @@
   (:results (y :scs (int-avx2-reg double-avx2-reg single-avx2-reg)))
   (:note "pointer to AVX2 coercion")
   (:generator 2
-    (let ((ea (make-ea-for-object-slot x simd-pack-256-p0-slot other-pointer-lowtag)))
+    (let ((ea (object-slot-ea x simd-pack-256-p0-slot other-pointer-lowtag)))
       (if (float-avx2-p y)
           (inst vmovups y ea)
           (inst vmovdqu y ea)))))
@@ -189,7 +189,7 @@
   (:policy :fast-safe)
   (:generator 3
     (inst vextracti128 tmp x 1)
-    (inst vpextrq dst x 1)))
+    (inst vpextrq dst tmp 1)))
 
 (define-vop (%make-simd-pack-256)
   (:translate %make-simd-pack-256)
@@ -204,7 +204,7 @@
   (:result-types t)
   (:node-var node)
   (:generator 13
-    (fixed-alloc dst simd-pack-256-widetag simd-pack-256-size node)
+    (alloc-other dst simd-pack-256-widetag simd-pack-256-size node)
     ;; see *simd-pack-element-types*
     (storew tag dst simd-pack-256-tag-slot other-pointer-lowtag)
     (storew p0 dst simd-pack-256-p0-slot other-pointer-lowtag)
@@ -370,4 +370,10 @@
   (values (%simd-pack-256-double-item pack 0)
           (%simd-pack-256-double-item pack 1)
           (%simd-pack-256-double-item pack 2)
-          (%simd-pack-256-double-item pack 3))))
+          (%simd-pack-256-double-item pack 3)))
+
+(defun %simd-pack-256-inline-constant (pack)
+  (list :avx2 (logior (%simd-pack-256-0 pack)
+                      (ash (%simd-pack-256-1 pack) 64)
+                      (ash (%simd-pack-256-2 pack) 128)
+                      (ash (%simd-pack-256-3 pack) 192)))))

@@ -15,6 +15,8 @@
            #:store-coverage-data))
 
 (in-package #:sb-cover)
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (setf (sb-int:system-package-p *package*) t))
 
 (defmacro code-coverage-hashtable () `(car sb-c:*code-coverage-info*))
 
@@ -36,13 +38,21 @@
         (when (typep map '(cons (eql sb-c::coverage-map)))
           (return-from %find-coverage-map (values (cdr map) code))))))))
 
+;;; Coverage marks are in the raw bytes following the jump tables
+;;; preceding any other unboxed constants. This way we don't have to store
+;;; a pointer to the coverage marks since their location is implicit.
+(defun code-coverage-marks (code)
+  (let ((insts (sb-kernel:code-instructions code)))
+    (sb-sys:sap+ insts (ash (sb-kernel:code-jump-table-words code)
+                            sb-vm:word-shift))))
+
 ;;; Retun just the list of soure paths in CODE that are marked covered.
 (defun get-coverage (code)
   (multiple-value-bind (map code) (%find-coverage-map code)
     (when map
       (sb-int:collect ((paths))
         (sb-sys:with-pinned-objects (code)
-          (let ((sap (sb-kernel:code-instructions code)))
+          (let ((sap (code-coverage-marks code)))
             (dotimes (i (length map) (paths))
               (unless (zerop (sb-sys:sap-ref-8 sap i))
                 (paths (svref map i))))))))))
@@ -82,10 +92,10 @@ image."
   (cond (object ; reset only this object
          (multiple-value-bind (map code) (%find-coverage-map object)
            (when map
-             (let ((header-length (sb-kernel:code-header-words code)))
-               (dotimes (i (ceiling (length map) sb-vm:n-word-bytes))
-                 (setf (sb-kernel:code-header-ref code (+ header-length i))
-                       0))))))
+             (sb-sys:with-pinned-objects (code)
+               (let ((sap (code-coverage-marks code)))
+                 (dotimes (i (ceiling (length map) sb-vm:n-word-bytes))
+                   (setf (sb-sys:sap-ref-word sap (ash i sb-vm:n-word-bytes)) 0)))))))
         (t ; reset everything
          (do-instrumented-code (code)
            (reset-coverage code))
@@ -96,6 +106,7 @@ image."
 ;;; Ideally we could report directly from the new data where applicable,
 ;;; however this is, for the time being, perfectly backward-compatibile.
 (defun refresh-coverage-info (&optional filename)
+  (declare (ignorable filename))
   ;; NAMESTRING->PATH-TABLES maps a namestring to a hashtable which maps
   ;; source paths to the legacy coverage record for that path in that file,
   ;;   e.g. (1 4 1) -> ((1 4 1) . SB-C::%CODE-COVERAGE-UNMARKED%)
@@ -123,7 +134,7 @@ image."
           (dolist (item legacy-coverage-marks)
             (setf (gethash (car item) path-lookup-table) item)))
         (sb-sys:with-pinned-objects (code)
-          (let ((sap (sb-kernel:code-instructions code)))
+          (let ((sap (code-coverage-marks code)))
             (dotimes (i (length map)) ; for each recorded mark
               (unless (zerop (sb-sys:sap-ref-8 sap i))
                 (incf n-marks)

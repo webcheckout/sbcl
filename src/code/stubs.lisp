@@ -50,6 +50,7 @@
   (def set-header-data (x val))
   (def widetag-of)
   (def %other-pointer-widetag)
+  (def pointer-hash)
   (def vector-sap)
   (def binding-stack-pointer-sap  ())
   ;; x86 uses a plain old inline function for 'dynamic_space_free_pointer'
@@ -59,11 +60,6 @@
   (def sb-c:safe-fdefn-fun)
   (def fun-subtype)
   (def simple-fun-p)
-  (def %simple-fun-arglist)
-  (def (setf %simple-fun-arglist) (new-value func))
-  (def %simple-fun-name)
-  (def (setf %simple-fun-name) (new-value func))
-  (def %simple-fun-info)
   (def closurep)
   (def %closure-fun)
   (def %closure-index-ref (closure index))
@@ -86,7 +82,8 @@
   (def %caller-frame ())
   (def %caller-pc ())
   (def %code-debug-info)
-  #+(or x86 immobile-space) (def sb-vm::%code-fixups)
+  #+(or x86 x86-64) (def sb-vm::%code-fixups)
+  #+x86-64 (def pointerp)
 
   ;; instances
   (def %make-instance) ; Allocate a new instance with X data slots.
@@ -141,7 +138,11 @@
   #+sb-thread (def sb-kernel:symbol-tls-index)
   #-(or x86 x86-64) (def lra-code-header)
   (def %make-lisp-obj)
-  (def get-lisp-obj-address))
+  (def get-lisp-obj-address)
+  #+x86-64
+  (def single-float-copysign (float float2))
+  #+x86-64
+  (def single-float-sign))
 
 (defun spin-loop-hint ()
   "Hints the processor that the current thread is spin-looping."
@@ -152,3 +153,21 @@
   (and (%other-pointer-p x)
        (member (%other-pointer-widetag x) choices)
        t))
+
+#+x86-64
+(defun symbol-hash* (x satisfies)
+  (declare (explicit-check)) ; actually, not
+  (declare (ignore satisfies))
+  (symbol-hash* x nil))
+
+;;; TYPECASE could expand to contain a call to this function.
+;;; The interpreter can ignore it, it is just compiler magic.
+(defun sb-c::%type-constraint (var type)
+  (declare (ignore var type))
+  nil)
+(eval-when (:compile-toplevel)
+  ;; Defining %TYPE-CONSTRAINT issues a full warning because TYPE's type
+  ;; is (OR TYPE-SPECIFIER CTYPE), and TYPE-SPECIFIER is
+  ;; (OR LIST SYMBOL CLASSOID CLASS), and CLASS isn't known, and you can't
+  ;; define it because it's a standard symbol.
+  (setq sb-c::*undefined-warnings* nil))

@@ -60,52 +60,42 @@
 #+#.(cl:if (cl:find-package "HOST-SB-POSIX") '(and) '(or))
 (defun parallel-make-host-1 (max-jobs)
   (let ((subprocess-count 0)
-        (subprocess-list nil))
+        (subprocess-list nil)
+        stop)
     (flet ((wait ()
              (multiple-value-bind (pid status) (host-sb-posix:wait)
                (format t "~&; Subprocess ~D exit status ~D~%"  pid status)
+               (unless (zerop status)
+                 (setf stop t))
                (setq subprocess-list (delete pid subprocess-list)))
              (decf subprocess-count)))
-      (do-stems-and-flags (stem flags 1)
-        (unless (position :not-host flags)
-          (when (>= subprocess-count max-jobs)
-            (wait))
-          (let ((pid (host-sb-posix:fork)))
-            (when (zerop pid)
-              (in-host-compilation-mode
-               (lambda () (compile-stem stem flags :host-compile)))
-              ;; FIXME: convey exit code based on COMPILE result.
-              (sb-cold::exit-process 0))
-            (push pid subprocess-list)
-            (incf subprocess-count)
-            ;; Do not wait for the compile to finish. Just load as source.
-            (let ((source (merge-pathnames (stem-remap-target stem)
-                                           (make-pathname :type "lisp"))))
-              (let ((host-sb-ext:*evaluator-mode* :interpret))
-                (in-host-compilation-mode
-                 (lambda ()
-                   (load source :verbose t :print nil))))))))
-      (loop (if (plusp subprocess-count) (wait) (return)))))
-
-  ;; We want to load compiled files, because that's what this function promises.
-  ;; Reloading is tricky because constructors for interned ctypes will construct
-  ;; new objects via their LOAD-TIME-VALUE forms, but globaldb already stored
-  ;; some objects from the interpreted pre-load.
-  ;; So wipe everything out that causes problems down the line.
-  ;; (Or perhaps we could make their effects idempotent)
-  (format t "~&; Parallel build: Clearing globaldb~%")
-  (funcall (intern "ANNIHILATE-GLOBALDB" "SB-C"))
-
-  (format t "~&; Parallel build: Reloading compilation artifacts~%")
-  ;; Now it works to load fasls.
-  (in-host-compilation-mode
-   (lambda ()
-     (handler-bind ((host-sb-kernel:redefinition-warning #'muffle-warning))
-       (do-stems-and-flags (stem flags 1)
-         (unless (position :not-host flags)
-           (load (stem-object-path stem flags :host-compile)
-                 :verbose t :print nil))))))
-  (format t "~&; Parallel build: Fasl loading complete~%"))
+      (host-sb-ext:disable-debugger)
+      (unwind-protect
+           (do-stems-and-flags (stem flags 1)
+             (unless (position :not-host flags)
+               (when (>= subprocess-count max-jobs)
+                 (wait))
+               (when stop
+                 (return))
+               (let ((pid (host-sb-posix:fork)))
+                 (when (zerop pid)
+                   (in-host-compilation-mode
+                    (lambda () (compile-stem stem flags :host-compile)))
+                   ;; FIXME: convey exit code based on COMPILE result.
+                   (sb-cold::exit-process 0))
+                 (push pid subprocess-list)
+                 (incf subprocess-count)
+                 ;; Do not wait for the compile to finish. Just load as source.
+                 (let ((source (merge-pathnames (stem-remap-target stem)
+                                                (make-pathname :type "lisp"))))
+                   (let ((host-sb-ext:*evaluator-mode* :interpret))
+                     (in-host-compilation-mode
+                      (lambda ()
+                        (load source :verbose t :print nil))))))))
+        (loop (if (plusp subprocess-count) (wait) (return)))
+        (when stop
+          (sb-cold::exit-process 1)))))
+  (format t "~&; Parallel build: Skipping fasl load~%"))
 
 ;;; Either load or compile-then-load the cross-compiler into the
 ;;; cross-compilation host Common Lisp.
@@ -161,5 +151,15 @@
   ;; (Except that purifying actually slows down GENCGC). -- JES, 2006-05-30
   #+(and sbcl (not gencgc))
   (host-sb-ext:purify)
+
+  ;; Let's check that the type system, and various other things, are
+  ;; reasonably sane. (It's easy to spend a long time wandering around
+  ;; confused trying to debug cross-compilation if it isn't.)
+  (let ((*readtable* *xc-readtable*)
+        (*load-verbose* t))
+    (with-math-journal
+       (load "tests/type.before-xc.lisp")
+       (load "tests/info.before-xc.lisp")
+       (load "tests/vm.before-xc.lisp")))
 
   (values))

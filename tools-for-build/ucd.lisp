@@ -1,5 +1,7 @@
 (in-package "SB-COLD")
 
+(declaim (optimize debug))
+
 ;;; Common functions
 
 (defvar *output-directory*
@@ -13,6 +15,7 @@
 (defmacro with-input-txt-file ((s name) &body body)
   `(with-open-file (,s (make-pathname :name ,name :type "txt"
                                       :defaults *unicode-character-database*))
+     (setf (gethash (format nil "tools-for-build/~A.txt" ,name) *ucd-inputs*) 'used)
      ,@body))
 
 (defmacro with-output-dat-file ((s name) &body body)
@@ -20,6 +23,7 @@
                                       :defaults *output-directory*)
                        :direction :output :element-type '(unsigned-byte 8)
                        :if-exists :supersede :if-does-not-exist :create)
+     (setf (gethash (format nil "output/~A.dat" ,name) *ucd-outputs*) 'made)
      ,@body))
 
 (defmacro with-ucd-output-syntax (&body body)
@@ -34,8 +38,9 @@
                                       :defaults *output-directory*)
                        :direction :output :element-type 'character
                        :if-exists :supersede :if-does-not-exist :create)
+     (setf (gethash (format nil "output/~A.lisp-expr" ,name) *ucd-outputs*) 'made)
      (with-ucd-output-syntax
-       ,@body)))
+         ,@body)))
 
 (defun split-string (line character)
   (loop for prev-position = 0 then (1+ position)
@@ -62,7 +67,16 @@
              head)))
       (list head tail))))
 
-(defun init-indices (strings)
+(defvar *slurped-random-constants*
+  (with-open-file (f (make-pathname :name "more-ucd-consts" :type "lisp-expr"
+                                    :defaults *unicode-character-database*))
+    (setf (gethash "tools-for-build/more-ucd-consts.lisp-expr" *ucd-inputs*) 'used)
+    (read f)))
+
+(defun init-indices (symbol &aux (strings
+                                  (or (cadr (assoc symbol *slurped-random-constants*))
+                                      (error "Missing entry in more-ucd-consts for ~S"
+                                             symbol))))
   (let ((hash (make-hash-table :test #'equal)))
     (loop for string in strings
        for index from 0
@@ -140,46 +154,11 @@ Length should be adjusted when the standard changes.")
 
 (defparameter *ucd-entries* (make-hash-table))
 
-;; Mappings of the general categories and bidi classes to integers
-;; Letter classes go first to optimize certain cl character type checks
-;; BN is the first BIDI class so that unallocated characters are BN
-;; Uppercase in the CL sense must have GC = 0, lowercase must GC = 1
-(defparameter *general-categories*
-  (init-indices '("Lu" "Ll" "Lt" "Lm" "Lo" "Cc" "Cf" "Co" "Cs" "Cn"
-                  "Mc" "Me" "Mn" "Nd" "Nl" "No" "Pc" "Pd" "Pe" "Pf"
-                  "Pi" "Po" "Ps" "Sc" "Sk" "Sm" "So" "Zl" "Zp" "Zs")))
-(defparameter *bidi-classes*
-  (init-indices '("BN" "AL" "AN" "B" "CS" "EN" "ES" "ET" "L" "LRE" "LRO"
-                  "NSM" "ON" "PDF" "R" "RLE" "RLO" "S" "WS" "LRI" "RLI"
-                  "FSI" "PDI")))
-(defparameter *east-asian-widths* (init-indices '("N" "A" "H" "W" "F" "Na")))
-(defparameter *scripts*
-  (init-indices
-   '("Unknown" "Common" "Latin" "Greek" "Cyrillic" "Armenian" "Hebrew" "Arabic"
-     "Syriac" "Thaana" "Devanagari" "Bengali" "Gurmukhi" "Gujarati" "Oriya"
-     "Tamil" "Telugu" "Kannada" "Malayalam" "Sinhala" "Thai" "Lao" "Tibetan"
-     "Myanmar" "Georgian" "Hangul" "Ethiopic" "Cherokee" "Canadian_Aboriginal"
-     "Ogham" "Runic" "Khmer" "Mongolian" "Hiragana" "Katakana" "Bopomofo" "Han"
-     "Yi" "Old_Italic" "Gothic" "Deseret" "Inherited" "Tagalog" "Hanunoo" "Buhid"
-     "Tagbanwa" "Limbu" "Tai_Le" "Linear_B" "Ugaritic" "Shavian" "Osmanya"
-     "Cypriot" "Braille" "Buginese" "Coptic" "New_Tai_Lue" "Glagolitic"
-     "Tifinagh" "Syloti_Nagri" "Old_Persian" "Kharoshthi" "Balinese" "Cuneiform"
-     "Phoenician" "Phags_Pa" "Nko" "Sundanese" "Lepcha" "Ol_Chiki" "Vai"
-     "Saurashtra" "Kayah_Li" "Rejang" "Lycian" "Carian" "Lydian" "Cham"
-     "Tai_Tham" "Tai_Viet" "Avestan" "Egyptian_Hieroglyphs" "Samaritan" "Lisu"
-     "Bamum" "Javanese" "Meetei_Mayek" "Imperial_Aramaic" "Old_South_Arabian"
-     "Inscriptional_Parthian" "Inscriptional_Pahlavi" "Old_Turkic" "Kaithi"
-     "Batak" "Brahmi" "Mandaic" "Chakma" "Meroitic_Cursive"
-     "Meroitic_Hieroglyphs" "Miao" "Sharada" "Sora_Sompeng" "Takri"
-     "Bassa_Vah" "Mahajani" "Pahawh_Hmong" "Caucasian_Albanian" "Manichaean"
-     "Palmyrene" "Duployan" "Mende_Kikakui" "Pau_Cin_Hau" "Elbasan" "Modi"
-     "Psalter_Pahlavi" "Grantha" "Mro" "Siddham" "Khojki" "Nabataean" "Tirhuta"
-     "Khudawadi" "Old_North_Arabian" "Warang_Citi" "Linear_A" "Old_Permic")))
-(defparameter *line-break-classes*
-  (init-indices
-   '("XX" "AI" "AL" "B2" "BA" "BB" "BK" "CB" "CJ" "CL" "CM" "CP" "CR" "EX" "GL"
-     "HL" "HY" "ID" "IN" "IS" "LF" "NL" "NS" "NU" "OP" "PO" "PR" "QU" "RI" "SA"
-     "SG" "SP" "SY" "WJ" "ZW")))
+(defparameter *general-categories* (init-indices '*general-categories*))
+(defparameter *bidi-classes* (init-indices '*bidi-classes*))
+(defparameter *east-asian-widths* (init-indices '*east-asian-widths*))
+(defparameter *scripts* (init-indices '*scripts*))
+(defparameter *line-break-classes* (init-indices '*line-break-classes*))
 
 (defparameter *east-asian-width-table*
   (with-input-txt-file (s "EastAsianWidth")
@@ -212,7 +191,7 @@ Length should be adjusted when the standard changes.")
 "Table of scripts. Used in the creation of misc entries.")
 
 (defparameter *line-break-class-table*
-  (with-input-txt-file (s "LineBreakProperty")
+  (with-input-txt-file (s "LineBreak")
     (loop with hash = (make-hash-table)
        for line = (read-line s nil nil) while line
        unless (or (not (position #\# line)) (= 0 (position #\# line)))
@@ -581,7 +560,50 @@ Length should be adjusted when the standard changes.")
              (setf (ucd-misc (gethash code-point *ucd-entries*)) new-misc))))))
 
 (defun fixup-casefolding ()
-  (with-input-txt-file (s "CaseFolding")
+  ;; KLUDGE: CaseFolding.txt as distributed by Unicode contains a
+  ;; non-ASCII character, an eszet, within a comment to act as an
+  ;; example.  We can't in general assume that our host lisp will let
+  ;; us read that, and we can't portably write that we don't care
+  ;; about the text content of anything on a line after a hash because
+  ;; text decoding happens at a lower level.  So here we rewrite the
+  ;; CaseFolding.txt file to exclude the UTF-8 sequence corresponding
+  ;; to the eszet character.
+  (with-open-file (in (make-pathname :name "CaseFolding" :type "txt"
+                                     :defaults *unicode-character-database*)
+                      :element-type '(unsigned-byte 8))
+    (setf (gethash "tools-for-build/CaseFolding.txt" *ucd-inputs*) 'used)
+    (with-open-file (out (make-pathname :name "CaseFolding" :type "txt"
+                                        :defaults *output-directory*)
+                         :direction :output
+                         :if-exists :supersede
+                         :if-does-not-exist :create
+                         :element-type '(unsigned-byte 8))
+      (setf (gethash "output/CaseFolding.txt" *ucd-outputs*) 'made)
+      ;; KLUDGE: it's inefficient, though simple, to do the I/O
+      ;; byte-by-bite.
+      (do ((inbyte (read-byte in nil nil) (read-byte in nil nil))
+           (eszet (map '(vector (unsigned-byte 8)) 'char-code "<eszet>"))
+           (eszet-count 0)
+           (filename "CaseFolding.txt"))
+          ((null inbyte)
+           (unless (= eszet-count 1)
+             (error "Unexpected number of eszets in ~A: ~D"
+                    filename eszet-count)))
+        (cond
+          ((= inbyte #xc3)
+           (let ((second (read-byte in nil nil)))
+              (cond
+                ((null second)
+                 (error "No continuation after #xc3 in ~A" filename))
+                ((= second #x9f) (incf eszet-count) (write-sequence eszet out))
+                (t (error "Unexpected continuation after #xc3 in ~A: #x~X"
+                          filename second)))))
+          ((>= inbyte #x7f)
+           (error "Unexpected octet in ~A: #x~X" filename inbyte))
+          (t (write-byte inbyte out))))))
+  (with-open-file (s (make-pathname :name "CaseFolding" :type "txt"
+                                    :defaults *output-directory*))
+    (setf (gethash "tools-for-build/CaseFolding.txt" *ucd-inputs*) 'used)
     (loop for line = (read-line s nil nil)
        while line
        unless (or (not (position #\; line)) (equal (position #\# line) 0))
@@ -734,7 +756,7 @@ Length should be adjusted when the standard changes.")
     (values code-points ret))))
 
 (defparameter *collation-table*
-  (with-input-txt-file (stream "Allkeys70")
+  (with-input-txt-file (stream "allkeys")
     (loop with hash = (make-hash-table :test #'equal)
        for line = (read-line stream nil nil) while line
        unless (eql 0 (position #\# line))
@@ -775,15 +797,20 @@ Length should be adjusted when the standard changes.")
            (split-string (subseq line 0 (position #\# line)) #\;))))
   "List of BIDI mirroring glyph pairs")
 
-(defparameter *block-ranges*
-  (with-input-txt-file (stream "Blocks")
-    (loop with result = (make-array (* 252 2) :fill-pointer 0)
-       for line = (read-line stream nil nil) while line
-       unless (or (string= line "") (position #\# line))
-       do
-         (map nil #'(lambda (x) (vector-push x result))
-              (parse-codepoint-range (car (split-string line #\;))))
-       finally (return result)))
+(defparameter *blocks*
+  (let (ranges names)
+    (with-input-txt-file (stream "Blocks")
+      (loop
+       (let ((line (read-line stream nil nil)))
+         (cond ((not line) (return))
+               ((or (string= line "") (position #\# line))) ; ignore
+               (t (let* ((split (split-string line #\;))
+                         (range (parse-codepoint-range (car split))))
+                    (setq ranges (list* (cadr range) (car range) ranges))
+                    (push (nsubstitute #\- #\Space
+                                       (string-left-trim " " (cadr split)))
+                          names)))))))
+    (cons (nreverse (coerce ranges 'vector)) (nreverse names)))
   "Vector of block starts and ends in a form acceptable to `ordered-ranges-position`.
 Used to look up block data.")
 
@@ -932,7 +959,12 @@ Used to look up block data.")
   (with-output-lisp-expr-file (*standard-output* "other-collation-info")
     (write-string ";;; The highest primary variable collation index")
     (terpri)
-    (prin1 *maximum-variable-key*) (terpri)))
+    (prin1 *maximum-variable-key*) (terpri))
+  (with-output-lisp-expr-file (*standard-output* "n-collation-entries")
+    (write-string ";;; The number of entries in the collation table")
+    (terpri)
+    (prin1 (hash-table-count *collation-table*))
+    (terpri)))
 
 (defun output (&optional (*output-directory* *output-directory*))
   (output-misc-data)
@@ -976,6 +1008,8 @@ Used to look up block data.")
     (prin1 *confusables*))
   (with-output-lisp-expr-file (*standard-output* "bidi-mirrors")
     (prin1 *bidi-mirroring-glyphs*))
-  (with-output-lisp-expr-file (*standard-output* "blocks")
-    (prin1 *block-ranges*))
+  (with-output-lisp-expr-file (*standard-output* "block-ranges")
+    (prin1 (car *blocks*)))
+  (with-output-lisp-expr-file (*standard-output* "block-names")
+    (format t "#(~{:~A~^~%  ~})" (cdr *blocks*)))
   (values))

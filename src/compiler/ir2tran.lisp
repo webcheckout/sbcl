@@ -970,7 +970,8 @@
   (declare (type combination node) (type ir2-block block))
   (let* ((fun (ref-leaf (lvar-uses (basic-combination-fun node))))
          (kind (functional-kind fun)))
-    (cond ((eq kind :let)
+    (cond ((eq kind :deleted))
+          ((eq kind :let)
            (ir2-convert-let node block fun))
           ((eq kind :assignment)
            (ir2-convert-assignment node block fun))
@@ -1010,14 +1011,15 @@
                         (= (length locs) 1)))
              (values loc nil)))
           ((lvar-fun-name lvar t)
-           (let ((name (lvar-fun-name lvar t)))
-             (values (cond ((sb-vm::static-fdefn-offset name)
-                            name)
-                           (t
-                            ;; Named call to an immobile fdefn from an immobile component
-                            ;; uses the FUN-TN only to preserve liveness of the fdefn.
-                            ;; The name becomes an info arg.
-                            (make-load-time-constant-tn :fdefinition name)))
+           ;; Uncross so that we don't create a constant for SB-XC:GENSYM
+           ;; and CL:GENSYM, in case a piece of code mentions both.
+           (let ((name (uncross (lvar-fun-name lvar t))))
+             ;; Static fdefns never need a code header constant.
+             (values (if (sb-vm::static-fdefn-offset name)
+                         name
+                         ;; Calls to immobile space fdefns won't use this constant,
+                         ;; but it needs to exist for GC's pointer tracing.
+                         (make-load-time-constant-tn :named-call name))
                      name)))
           (t
            (values (lvar-tn node block lvar) nil)))))
@@ -1218,30 +1220,31 @@
           (when (member stem *full-calls-to-warn-about* :test #'string=)
             (warn "Full call to ~S" fname)))))
 
-    (let* ((inlineable-p (not (let ((*lexenv* (node-lexenv node)))
-                                (fun-lexically-notinline-p fname))))
-           (inlineable-bit (if inlineable-p 1 0))
-           (cell (info :function :emitted-full-calls fname)))
-      (if (not cell)
-          ;; The low bit indicates whether any not-NOTINLINE call was seen.
-          ;; The next-lowest bit is magic. Refer to %COMPILER-DEFMACRO
-          ;; and WARN-IF-INLINE-FAILED/CALL for the pertinent logic.
-          (setf cell (list (logior 4 inlineable-bit))
-                (info :function :emitted-full-calls fname) cell)
-          (incf (car cell) (+ 4 (if (oddp (car cell)) 0 inlineable-bit))))
-      ;; If the full call was wanted, don't record anything.
-      ;; (This was originally for debugging SBCL self-compilation)
-      (when inlineable-p
-        (unless *failure-p*
-          (warn-if-inline-failed/call fname (node-lexenv node) cell))
-        (case *track-full-called-fnames*
-          (:detailed
-           (when (boundp 'sb-xc:*compile-file-pathname*)
-             (pushnew sb-xc:*compile-file-pathname* (cdr cell)
-                      :test #'equal)))
-          (:very-detailed
-           (pushnew (component-name *component-being-compiled*)
-                    (cdr cell) :test #'equalp)))))
+    (unless (pcl-methodfn-name-p fname)
+      (let* ((inlineable-p (not (let ((*lexenv* (node-lexenv node)))
+                                  (fun-lexically-notinline-p fname))))
+             (inlineable-bit (if inlineable-p 1 0))
+             (cell (info :function :emitted-full-calls fname)))
+        (if (not cell)
+            ;; The low bit indicates whether any not-NOTINLINE call was seen.
+            ;; The next-lowest bit is magic. Refer to %COMPILER-DEFMACRO
+            ;; and WARN-IF-INLINE-FAILED/CALL for the pertinent logic.
+            (setf cell (list (logior 4 inlineable-bit))
+                  (info :function :emitted-full-calls fname) cell)
+            (incf (car cell) (+ 4 (if (oddp (car cell)) 0 inlineable-bit))))
+        ;; If the full call was wanted, don't record anything.
+        ;; (This was originally for debugging SBCL self-compilation)
+        (when inlineable-p
+          (unless *failure-p*
+            (warn-if-inline-failed/call fname (node-lexenv node) cell))
+          (case *track-full-called-fnames*
+            (:detailed
+             (when (boundp 'sb-xc:*compile-file-pathname*)
+               (pushnew sb-xc:*compile-file-pathname* (cdr cell)
+                        :test #'equal)))
+            (:very-detailed
+             (pushnew (component-name *component-being-compiled*)
+                      (cdr cell) :test #'equalp))))))
 
     ;; Special mode, usually only for the cross-compiler
     ;; and only with the feature enabled.
@@ -1739,13 +1742,17 @@ not stack-allocated LVAR ~S." source-lvar)))))
              (2lvar (lvar-info lvar)))
     (ecase (ir2-lvar-kind 2lvar)
       (:fixed
-       ;; KLUDGE: this is very much unsafe, and can leak random stack values.
-       ;; OTOH, I think the :FIXED case can only happen with (safety 0) in the
-       ;; first place.
-       ;;  -PK
        (loop for loc in (ir2-lvar-locs 2lvar)
              for idx upfrom 0
-             do (vop sb-vm::more-arg node block
+             unless (eq (tn-kind loc) :unused)
+             do #+(vop-named sb-vm::more-arg-or-nil)
+                (vop sb-vm::more-arg-or-nil node block
+                     (lvar-tn node block context)
+                     (lvar-tn node block count)
+                     idx
+                     loc)
+                #-(vop-named sb-vm::more-arg-or-nil)
+                (vop sb-vm::more-arg node block
                      (lvar-tn node block context)
                      (emit-constant idx)
                      loc)))
@@ -1824,7 +1831,7 @@ not stack-allocated LVAR ~S." source-lvar)))))
                           (dolist (var vars)
                             ;; CLHS says "bound and then made to have no value" -- user
                             ;; should not be able to tell the difference between that and this.
-                            (about-to-modify-symbol-value var 'progv)
+                            (about-to-modify-symbol-value var 'makunbound)
                             (%primitive dynbind unbound-marker var))))
                       (,bind (vars vals)
                         (declare (optimize (speed 2) (debug 0)
@@ -1839,6 +1846,7 @@ not stack-allocated LVAR ~S." source-lvar)))))
                                  (%primitive dynbind val var))
                                (,bind (cdr vars) (cdr vals))))))
                (,bind ,vars ,vals)
+               nil
                ,@body)
           ;; Technically ANSI CL doesn't allow declarations at the
           ;; start of the cleanup form. SBCL happens to allow for

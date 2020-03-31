@@ -83,19 +83,14 @@
 (defconstant epipe 32) ; #x20
 (defconstant ewouldblock 35) ; #x23
 
-;;; for wait3(2) in run-program.lisp
+;;; for waitpid() in run-program.lisp
 (defconstant wnohang 1) ; #x1
 (defconstant wuntraced 2) ; #x2
 
 ;;; various ioctl(2) flags
 (defconstant tiocgpgrp 1074033783) ; #x40047477
-(defconstant tiocspgrp 2147775606) ; #x80047476
-(defconstant tiocgwinsz 1074295912) ; #x40087468
-(defconstant tiocswinsz 2148037735) ; #x80087467
 
 ;;; signals
-(defconstant sig-dfl 0) ; #x0
-(defconstant sig-ign 1) ; #x1
 (defconstant sigalrm 14) ; #xe
 (defconstant sigbus 10) ; #xa
 (defconstant sigchld 20) ; #x14
@@ -106,7 +101,6 @@
 (defconstant sigill 4) ; #x4
 (defconstant sigint 2) ; #x2
 (defconstant sigio 23) ; #x17
-(defconstant sigiot 6) ; #x6
 (defconstant sigkill 9) ; #x9
 (defconstant sigpipe 13) ; #xd
 (defconstant sigprof 27) ; #x1b

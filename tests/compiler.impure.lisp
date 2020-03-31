@@ -641,7 +641,7 @@
     (assert (equal (check-embedded-thes 0 3  :a 2.5f0) '(:a 2.5f0)))
     (assert (typep (check-embedded-thes 0 3  2 3.5f0) 'type-error))
 
-    (assert (equal (check-embedded-thes 0 1  :a 3.5f0) '(:a 3.5f0)))
+    (assert (equal (check-embedded-thes 0 1  :a 3f0) '(:a 3f0)))
     (assert (typep (check-embedded-thes 0 1  2 2.5d0) 'type-error))
 
     (assert (equal (check-embedded-thes 3 0  2 :a) '(2 :a)))
@@ -955,7 +955,7 @@
 
 ;;;; MUFFLE-CONDITIONS test (corresponds to the test in the manual)
 ; FIXME: make a better test!
-(with-test (:name muffle-conditions :skipped-on (or :alpha :x86-64))
+(with-test (:name muffle-conditions :skipped-on (or :alpha :ppc64 :x86-64))
   (multiple-value-bind (fun failure-p warnings style-warnings notes)
       (checked-compile
        '(lambda (x)
@@ -966,7 +966,7 @@
               (declare (sb-ext:unmuffle-conditions sb-ext:compiler-note))
             ;; this one gives a compiler note
             (* x -5)))))
-    (declare (ignore failure-p warnings))
+    (declare (ignore failure-p warnings style-warnings))
     (assert (= (length notes) 1))
     (assert (equal (multiple-value-list (funcall fun 1)) '(5 -5)))))
 
@@ -2951,3 +2951,64 @@
                                       0)
                                      0))))))))
     (assert (eql (funcall f337 17) 0))))
+
+(defstruct dump-me)
+(defmethod make-load-form ((self dump-me) &optional e)
+  (declare (notinline typep) (ignore e))
+  ;; This error in bad usage of TYPEP would cause SB-C::COMPUTE-ENTRY-INFO
+  ;; to encounter another error:
+  ;; The value
+  ;;   #<SB-FORMAT::FMT-CONTROL "bad thing to be a type specifier: ~/SB-IMPL:PRINT-TYPE-SPECIFIER/">
+  ;; is not of type SEQUENCE
+  ;;
+  (if (typep 'foo (cons 1 2))
+      (make-load-form-saving-slots self)
+      ''i-cant-even))
+
+(with-test (:name :failed-dump-fun-source)
+  (with-scratch-file (fasl "fasl")
+    (let ((error-stream (make-string-output-stream)))
+      (multiple-value-bind (fasl warnings errors)
+          (let ((*error-output* error-stream))
+            (compile-file "bad-mlf-test.lisp" :output-file fasl))
+        (assert (and fasl warnings (not errors)))
+        (assert (search "bad thing to be" (get-output-stream-string error-stream)))
+        (load fasl)
+        (assert (eq (zook) 'hi))))))
+
+(with-test (:name :block-compile)
+  (with-scratch-file (fasl "fasl")
+    (compile-file "block-compile-test.lisp" :output-file fasl :block-compile t)
+    (load fasl)
+    ;; Make sure the defuns all get compiled into the same code
+    ;; component.
+    (assert (and (eq (sb-kernel::fun-code-header #'baz2)
+                     (sb-kernel::fun-code-header #'bar2))
+                 (eq (sb-kernel::fun-code-header #'baz2)
+                     (sb-kernel::fun-code-header #'foo2))))))
+
+(with-test (:name (:block-compile :entry-point))
+  (with-scratch-file (fasl "fasl")
+    (compile-file "block-compile-test-2.lisp" :output-file fasl :block-compile t :entry-points '(foo1))
+    (load fasl)
+    ;; Ensure bar1 gets let-converted into FOO1 and disappears.
+    (assert (not (fboundp 'bar1)))
+    (assert (eql (foo1 10 1) 3628800))
+    (let ((code (sb-kernel::fun-code-header #'foo1)))
+      (assert (= (sb-kernel::code-n-entries code) 1))
+      (assert (eq (aref (sb-kernel::code-entry-points code) 0)
+                  #'foo1)))))
+
+(with-test (:name :symbol-value-constant)
+  (let* ((package-name (gensym "SYMBOL-VALUE-CONSTANT-TEST"))
+         (*package* (make-package package-name :use '(cl))))
+    (ctu:file-compile
+     "(defconstant +constant+
+       (let (*)
+         (if (boundp '+constant+)
+             (symbol-value '+constant+)
+             (complex 0.0 0.0))))"
+     :load t
+     :before-load (lambda ()
+                    (delete-package *package*)
+                    (setf *package* (make-package package-name :use '(cl)))))))

@@ -89,7 +89,7 @@
          (do-referenced-object (object rewrite)
            (simple-vector
             :extend
-            (when (and (= (get-header-data object) vector-valid-hashing-subtype)
+            (when (and (logtest (get-header-data object) vector-addr-hashing-subtype)
                        touchedp)
               (setf (svref object 1) 1)))
            (code-component
@@ -185,14 +185,19 @@
          (= (%code-code-size code1) (%code-code-size code2))
          (= (code-n-unboxed-data-bytes code1)
             (code-n-unboxed-data-bytes code2))
-         ;; Compare boxed constants. (Ignore debug-info and fixups)
-         (loop for i from code-constants-offset
+         ;; Compare boxed constants. Ignore debug-info, fixups, and all
+         ;; the simple-fun metadata (name, args, type, info) which will be compared
+         ;; later based on how similar we require them to be.
+         (loop for i from (+ code-constants-offset
+                             (* code-slots-per-simple-fun (code-n-entries code1)))
                below (code-header-words code1)
                always (eq (code-header-ref code1 i) (code-header-ref code2 i)))
-         ;; Compare unboxed constants
-         (let ((nwords (ceiling (code-n-unboxed-data-bytes code1) n-word-bytes))
-               (sap1 (code-instructions code1))
-               (sap2 (code-instructions code2)))
+         ;; jump table word contains serial# which is arbitrary; don't compare it
+         (= (code-jump-table-words code1) (code-jump-table-words code2))
+         ;; Compare unboxed constants less 1 word which was already compared
+         (let ((nwords (1- (ceiling (code-n-unboxed-data-bytes code1) n-word-bytes)))
+               (sap1 (sap+ (code-instructions code1) n-word-bytes))
+               (sap2 (sap+ (code-instructions code2) n-word-bytes)))
            (dotimes (i nwords t)
              (unless (= (sap-ref-word sap1 (ash i word-shift))
                         (sap-ref-word sap2 (ash i word-shift)))
@@ -231,11 +236,12 @@
              (dotimes (i (code-n-entries code) (offs))
                (offs (%code-fun-offset code i)
                      (%simple-fun-text-len (%code-entry-point code i) i))))
-           (collect ((consts))
-             ;; Ignore the fixups and the debug info
-             (do ((i (1- (code-header-words code)) (1- i)))
-                 ((< i code-constants-offset) (consts))
-               (consts (code-header-ref code i)))))))
+           ;; Ignore the debug-info, fixups, and simple-fun metadata.
+           ;; (Same things that are ignored by the CODE-EQUIVALENT-P predicate)
+           (loop for i from (+ code-constants-offset
+                               (* code-slots-per-simple-fun (code-n-entries code)))
+                   below (code-header-words code)
+                   collect (code-header-ref code i)))))
 
 (declaim (inline default-allow-icf-p))
 (defun default-allow-icf-p (code)
@@ -273,7 +279,7 @@
                            (plusp (code-n-entries obj)))
                   (incf count)))
               :all)
-             (make-weak-vector count)))
+             (make-array count)))
           (referenced-objects
            (make-hash-table :test #'eq)))
       ;; Pass 2: collect them.
@@ -358,16 +364,7 @@
                                                                             (symbol-package name)))
                                                   :external))))
                                      (keyfn (x)
-                                       #+64-bit
-                                       (%code-serialno x)
-                                       ;; Creation time is an estimate of order, but
-                                       ;; frankly we shouldn't be storing times anyway,
-                                       ;; as it causes irreproducible builds.
-                                       ;; But I don't know what else to do.
-                                       #-64-bit
-                                       (sb-c::debug-source-compiled
-                                        (sb-c::compiled-debug-info-source
-                                         (%code-debug-info x))))
+                                       (%code-serialno x))
                                      (compare (a b)
                                        (let ((exported-a (exported-p a))
                                              (exported-b (exported-p b) ))

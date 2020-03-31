@@ -300,20 +300,26 @@
 ;;; IR1 might potentially transform EQL into %EQL/INTEGER.
 #+integer-eql-vop
 (defun %eql/integer (obj1 obj2)
-  ;; This is just for constant folding, no need to transform into the %EQL/INTEGER VOP
-  (eql obj1 obj2))
+  ;; This is just for constant folding, there's no real need to transform
+  ;; into the %EQL/INTEGER VOP. But it's confusing if it becomes identical to
+  ;; EQL, and then due to ICF we find that #'EQL => #<FUNCTION %EQL/INTEGER>.
+  ;; Type declarations don't suffice because we don't know which arg is an integer
+  ;; (if not both). We could ensure selection of the vop by using %PRIMITIVE.
+  ;; Anyway it suffices to disable type checking and pretend its the always
+  ;; the first arg that's an integer, but that won't work on the host because
+  ;; it might enforce the type since we can't portably unenforce after declaring.
+  #-sb-xc-host (declare (optimize (sb-c::type-check 0)))
+  (eql #+sb-xc-host obj1 #-sb-xc-host (the integer obj1) obj2))
 
 (declaim (inline %eql))
 (defun %eql (obj1 obj2)
   "Return T if OBJ1 and OBJ2 represent the same object, otherwise NIL."
+  #+x86-64 (eql obj1 obj2) ; vop fully implements all cases of EQL
+  #-x86-64 ; else this is the only full implementation of EQL
   (or (eq obj1 obj2)
       (if (or (typep obj2 'fixnum)
               (not (typep obj2 'number)))
           nil
-          ;; I would think that we could do slightly better here by testing that
-          ;; both objs are OTHER-POINTER-P with equal %OTHER-POINTER-WIDETAGs.
-          ;; Then dispatch on obj2 and elide the TYPEP on obj1 using TRULY-THE.
-          ;; Also would need to deal with immediate single-float for 64-bit.
           (macrolet ((foo (&rest stuff)
                        `(typecase obj2
                           ,@(mapcar (lambda (foo)
@@ -349,7 +355,9 @@
                      (eql (imagpart x) (imagpart y))))))))))
 
 (defun eql (x y)
-  (%eql x y))
+  ;; On x86-64, EQL is just an interpreter stub for a vop.
+  ;; For others it's a call to the implementation of generic EQL.
+  (#+x86-64 eql #-x86-64 %eql x y))
 
 (defun bit-vector-= (x y)
   (declare (type bit-vector x y))
@@ -435,7 +443,7 @@ length and have identical components. Other arrays must be EQ to be EQUAL."
                          (y-el (%instance-ref y i)))
                      (or (eq x-el y-el) (equalp x-el y-el)))))
        (let ((n (%instance-length x)))
-         (if (eql (layout-bitmap layout-x) sb-kernel::+layout-all-tagged+)
+         (if (eql (layout-bitmap layout-x) sb-kernel:+layout-all-tagged+)
              (loop for i downfrom (1- n) to sb-vm:instance-data-start
                    always (slot-ref-equalp))
              (let ((comparators (layout-equalp-tests layout-x)))
@@ -495,13 +503,12 @@ length and have identical components. Other arrays must be EQ to be EQUAL."
                                 (equalp x-el y-el)))))))))
 
 (defun equalp (x y)
-  #+nil ; KLUDGE: If doc string, should be accurate: Talk about structures
-  ; and HASH-TABLEs.
-  "This is like EQUAL, except more liberal in several respects.
+  "Just like EQUAL, but more liberal in several respects.
   Numbers may be of different types, as long as the values are identical
   after coercion. Characters may differ in alphabetic case. Vectors and
   arrays must have identical dimensions and EQUALP elements, but may differ
-  in their type restriction."
+  in their type restriction. The elements of structured components
+  are compared with EQUALP."
   (cond ((eq x y) t)
         ((characterp x) (and (characterp y) (char-equal x y)))
         ((numberp x) (and (numberp y) (= x y)))

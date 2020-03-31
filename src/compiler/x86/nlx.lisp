@@ -117,7 +117,7 @@
       (storew (make-fixup 'uwp-seh-handler :assembly-routine)
               uwp unwind-block-seh-frame-handler-slot)
       (inst lea seh-frame
-            (make-ea-for-object-slot uwp
+            (object-slot-ea uwp
                                      unwind-block-next-seh-frame-slot 0))
       (inst mov (make-ea :dword :disp 0) seh-frame :fs))
     (store-tl-symbol-value uwp *current-unwind-protect-block* tls)))
@@ -164,7 +164,8 @@
           ((= nvals 1)
            (let ((no-values (gen-label)))
              (inst mov (tn-ref-tn values) nil-value)
-             (inst jecxz no-values)
+             (inst test ecx-tn ecx-tn)
+             (inst jmp :z no-values)
              (loadw (tn-ref-tn values) start -1)
              (emit-label no-values)))
           (t
@@ -210,6 +211,7 @@
   (:temporary (:sc unsigned-reg :offset ecx-offset :from (:argument 2)) ecx)
   (:temporary (:sc unsigned-reg :offset esi-offset) esi)
   (:temporary (:sc unsigned-reg :offset edi-offset) edi)
+  (:temporary (:sc descriptor-reg) temp-dword)
   (:results (result :scs (any-reg) :from (:argument 0))
             (num :scs (any-reg control-stack)))
   (:save-p :force-to-stack)
@@ -228,14 +230,17 @@
     (inst sub edi n-word-bytes)
     (move ecx count)                    ; fixnum words == bytes
     (move num ecx)
-    (inst shr ecx word-shift)           ; word count for <rep movs>
+    (inst shr ecx word-shift)
     ;; If we got zero, we be done.
-    (inst jecxz DONE)
+    (inst jmp :z DONE)
     ;; Copy them down.
-    (inst std)
-    (inst rep)
-    (inst movs :dword)
-    (inst cld)
+    COPY-LOOP
+    (inst mov temp-dword (make-ea :dword :base esi))
+    (inst sub esi n-word-bytes)
+    (inst mov (make-ea :dword :base edi) temp-dword)
+    (inst sub edi n-word-bytes)
+    (inst sub ecx 1)
+    (inst jmp :nz copy-loop)
     DONE
     ;; Reset the CSP at last moved arg.
     (inst lea esp-tn (make-ea :dword :base edi :disp n-word-bytes))))

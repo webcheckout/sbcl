@@ -301,7 +301,7 @@
   ;; if we're finding something in the real lexenv, we don't have a
   ;; bound declaration and so we specifically don't want to return
   ;; a special object that declarations can attach to, just the name.
-  (and env (find var (mapcar #'car (sb-c::lexenv-vars env)))))
+  (and env (find var (sb-c::lexenv-vars env) :key #'car)))
 
 (defun variable-symbol-macro-p (var env)
   ;; FIXME: crufty return convention
@@ -413,16 +413,13 @@
 ;;;       interface to its walker which looks like the interface to this
 ;;;       walker.
 
-(defmacro get-walker-template-internal (x)
-  `(get ,x 'walker-template))
-
 (defmacro define-walker-template (name
                                   &optional (template '(nil repeat (eval))))
-  `(setf (get-walker-template-internal ',name) ',template))
+  `(setf (info :function :walker-template ',name) ',template))
 
 (defun get-walker-template (x context)
   (cond ((symbolp x)
-         (get-walker-template-internal x))
+         (info :function :walker-template x))
         ((and (listp x) (eq (car x) 'lambda))
          '(lambda repeat (eval)))
         (t
@@ -470,11 +467,13 @@
 ;;; SBCL-only special forms
 (define-walker-template truly-the (nil quote eval))
 (define-walker-template sb-kernel:the* (nil quote eval))
+(define-walker-template sb-c::with-source-form (nil nil eval))
 ;;; FIXME: maybe we don't need this one any more, given that
 ;;; NAMED-LAMBDA now expands into (FUNCTION (NAMED-LAMBDA ...))?
 (define-walker-template named-lambda walk-named-lambda)
 
 (defvar *walk-form-expand-macros-p* nil)
+(defvar *walk-form-preserve-source* nil)
 
 #+sb-fasteval
 (declaim (ftype (sfunction (sb-interpreter:basic-env &optional t) sb-kernel:lexenv)
@@ -553,9 +552,12 @@
                         (let ((newnewnewform (walk-form-internal newnewform
                                                                  context
                                                                  env)))
-                          (if (eq newnewnewform newnewform)
-                              (if *walk-form-expand-macros-p* newnewform newform)
-                              newnewnewform)))
+                          (cond ((eq newnewnewform newnewform)
+                                 (if *walk-form-expand-macros-p* newnewform newform))
+                                (*walk-form-preserve-source*
+                                 `(sb-c::with-source-form ,newform
+                                    ,newnewnewform))
+                                (t newnewnewform))))
                        ((and (symbolp fn)
                              (special-operator-p fn))
                         ;; This shouldn't happen, since this walker is now

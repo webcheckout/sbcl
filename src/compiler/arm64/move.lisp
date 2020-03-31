@@ -90,7 +90,7 @@
 
 (define-move-fun (load-constant 5) (vop x y)
   ((constant) (descriptor-reg))
-  (let ((offset (- (* (tn-offset x) n-word-bytes) other-pointer-lowtag)))
+  (let ((offset (- (tn-byte-offset x) other-pointer-lowtag)))
     (cond
       ((ldr-str-offset-encodable offset)
        (inst ldr y (@ code-tn offset)))
@@ -168,7 +168,6 @@
 (defun load-store-two-words (vop1 vop2)
   (let ((register-sb (sb-or-lose 'sb-vm::registers))
         used-load-tn)
-    (declare (notinline sb-c::vop-name)) ; too late
     (labels ((register-p (tn)
                (and (tn-p tn)
                     (eq (sc-sb (tn-sc tn)) register-sb)))
@@ -263,7 +262,7 @@
                         (load-stack-tn fp-load-tn fp)
                         (setf fp fp-load-tn))
                       (inst stp source1 source2
-                            (@ fp (* (tn-offset dest1) n-word-bytes)))
+                            (@ fp (tn-byte-offset dest1)))
                       t)
                      ((and (stack-p source1)
                            (stack-p source2)
@@ -276,7 +275,7 @@
                         (rotatef dest1 dest2)
                         (rotatef source1 source2))
                       (inst ldp dest1 dest2
-                            (@ fp (* (tn-offset source1) n-word-bytes)))
+                            (@ fp (tn-byte-offset source1)))
                       t))))
       (case (sb-c::vop-name vop1)
         (move

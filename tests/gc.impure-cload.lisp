@@ -27,12 +27,16 @@
 ;;; page on which the open flag should be removed.
 ;;; Strangely, the assertion that caught this was far removed from the
 ;;; point of failure, in conservative_root_p()
-(with-test (:name :gc-region-pickup :skipped-on (not (or :x86 :x86-64)))
+(with-test (:name :gc-region-pickup :skipped-on (not (or :x86 :x86-64))
+                  ;; (and apparently can also fail on linux with larger card size)
+                  :fails-on :win32)
   (flet ((allocate-code-bytes (nbytes)
            ;; Make a code component occupying exactly NBYTES bytes in total.
            (assert (zerop (mod nbytes (* 2 sb-vm:n-word-bytes))))
            (assert (>= nbytes min-code-header-bytes))
-           (sb-c:allocate-code-object nil sb-vm:code-constants-offset (- nbytes min-code-header-bytes)))
+           (sb-c:allocate-code-object nil 0
+                                      sb-vm:code-constants-offset
+                                      (- nbytes min-code-header-bytes)))
          (get-code-region (a)
            (declare (type (simple-array sb-ext:word (4)) a))
            ;; Return array of 4: free-ptr, end-addr, last-page, start-addr
@@ -56,7 +60,7 @@
         (get-code-region a)
         (assert (= free-ptr end-addr))
         ;; Allocate a teency amount to start a new region
-        (sb-c:allocate-code-object nil sb-vm:code-constants-offset 0)
+        (sb-c:allocate-code-object nil 0 sb-vm:code-constants-offset 0)
         (get-code-region a)
         (setq saved-region-start start-addr
               saved-region-end end-addr)
@@ -96,7 +100,7 @@
             c))))))
 
 ;;; This test pertains only to the compact-instance-header feature.
-#-compact-instance-header (exit :code 104)
+;;; It should pass regardless of the feature presence though.
 
 ;;; Everything from here down to the WITH-TEST is the setup to try
 ;;; to hit "implausible layout" in verify_gc() which would occur
@@ -115,7 +119,8 @@
   (flet ((copy-layout (layout)
            ;; don't just COPY-STRUCTURE - that would place it in dynamic space
            (let ((new-layout
-                  (sb-kernel:make-layout (sb-kernel:layout-classoid layout))))
+                  (sb-kernel:make-layout (sb-kernel::randomish-layout-clos-hash nil)
+                                         (sb-kernel:layout-classoid layout))))
              (sb-kernel:%byte-blt
               (sb-sys:int-sap
                (- (sb-kernel:get-lisp-obj-address layout)

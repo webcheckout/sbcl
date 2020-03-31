@@ -204,27 +204,15 @@
     (mapcar (lambda (kernel-bic-entry)
               (/noshow "setting up" kernel-bic-entry)
               (let* ((name (car kernel-bic-entry))
-                     (class (find-classoid name))
-                     (prototype-form
-                      (getf (cdr kernel-bic-entry) :prototype-form)))
+                     (class (find-classoid name)))
                 (/noshow name class)
                 `(,name
                   ,(mapcar #'classoid-name (direct-supers class))
                   ,(mapcar #'classoid-name (direct-subs class))
                   ,(map 'list
-                        (lambda (x)
-                          (classoid-name
-                           (layout-classoid x)))
-                        (reverse
-                         (layout-inherits
-                          (classoid-layout class))))
-                  ,(if prototype-form
-                       (eval prototype-form)
-                       ;; This is the default prototype value which
-                       ;; was used, without explanation, by the CMU CL
-                       ;; code we're derived from. Evidently it's safe
-                       ;; in all relevant cases.
-                       42))))
+                        (lambda (x) (classoid-name (layout-classoid x)))
+                        (reverse (layout-inherits (classoid-layout class))))
+                  ,(eval (getf (cdr kernel-bic-entry) :prototype-form)))))
             (remove-if (lambda (kernel-bic-entry)
                          (member (first kernel-bic-entry)
                                  ;; remove special classes (T and our
@@ -372,12 +360,17 @@
 (defclass method-combination (metaobject)
   ((%documentation :initform nil :initarg :documentation)))
 
+(defun make-gf-hash-table ()
+  (make-hash-table :test 'eq
+                   :hash-function #'sb-impl::fsc-instance-hash ; stable hash
+                   :weakness :key
+                   :synchronized t))
+
 (defclass standard-method-combination (definition-source-mixin
                                        method-combination)
   ((type-name :reader method-combination-type-name :initarg :type-name)
    (options :reader method-combination-options :initarg :options)
-   (%generic-functions :initform (make-hash-table :weakness :key
-                                                   :synchronized t)
+   (%generic-functions :initform (make-gf-hash-table)
                        :reader method-combination-%generic-functions)))
 
 (defclass long-method-combination (standard-method-combination)
@@ -472,14 +465,17 @@
 (defstruct (slot-info
             (:copier nil)
             (:constructor make-slot-info
-                (&key slotd typecheck
+                (&key slotd typecheck allocation location
                  (reader (uninitialized-accessor-function :reader slotd))
                  (writer (uninitialized-accessor-function :writer slotd))
                  (boundp (uninitialized-accessor-function :boundp slotd)))))
   (typecheck nil :type (or null function))
+  (allocation nil)
+  (location nil)
   (reader (missing-arg) :type function)
   (writer (missing-arg) :type function)
   (boundp (missing-arg) :type function))
+(declaim (freeze-type slot-info))
 
 (defclass standard-direct-slot-definition (standard-slot-definition
                                            direct-slot-definition)
@@ -547,10 +543,16 @@
                            specializer-with-object)
   ((object :initarg :object :reader specializer-object
            :reader eql-specializer-object)
+   ;; created on demand (if and when needed), the CTYPE is the representation
+   ;; of this metaobject as an internalized type object understood by the
+   ;; kernel's type machinery. The CLOS object is really just a MEMBER-TYPE,
+   ;; but the type system doesn't know that.
+   (sb-kernel:ctype)
    ;; Because EQL specializers are interned, any two putative instances
    ;; of EQL-specializer referring to the same object are in fact EQ to
    ;; each other. Therefore a list of direct methods in the specializer can
    ;; reliably track all methods that are specialized on the identical object.
+   ;; FIXME: explain why this is a cons of two NILs.
    (direct-methods :initform (cons nil nil))))
 
 ;; Why is this weak-value, not weak-key: suppose the value is unreachable (dead)

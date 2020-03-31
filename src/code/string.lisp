@@ -175,53 +175,37 @@
                                  (rotatef string1 string2)
                                  t)))
                  (char-loop character base-char))))))
-    (not (%sp-string-compare string1 start1 end1 string2 start2 end2))))
+    (zerop (nth-value 1 (%sp-string-compare string1 start1 end1 string2 start2 end2)))))
 
 (defun string/=* (string1 string2 start1 end1 start2 end2)
   (with-two-strings string1 string2 start1 end1 offset1 start2 end2
-    (let ((comparison (%sp-string-compare string1 start1 end1
-                                          string2 start2 end2)))
-      (if comparison (- (the fixnum comparison) offset1)))))
+    (multiple-value-bind (index diff)
+        (%sp-string-compare string1 start1 end1 string2 start2 end2)
+      (if (zerop diff)
+          nil
+          (- index offset1)))))
 
-;;; LESSP is true if the desired expansion is for STRING<* or STRING<=*.
-;;; EQUALP is true if the desired expansion is for STRING<=* or STRING>=*.
-(defmacro string<>=*-body (lessp equalp)
-  (let ((offset1 (gensym)))
-    `(with-two-strings string1 string2 start1 end1 ,offset1 start2 end2
-       (let ((index (%sp-string-compare string1 start1 end1
-                                        string2 start2 end2)))
-         (if index
-             (cond ((= (the fixnum index) (the fixnum end1))
-                    ,(if lessp
-                         `(- (the fixnum index) ,offset1)
-                       `nil))
-                   ((= (+ (the fixnum index) (- start2 start1))
-                       (the fixnum end2))
-                    ,(if lessp
-                         `nil
-                       `(- (the fixnum index) ,offset1)))
-                   ((,(if lessp 'char< 'char>)
-                     (schar string1 index)
-                     (schar string2 (+ (the fixnum index) (- start2 start1))))
-                    (- (the fixnum index) ,offset1))
-                   (t nil))
-             ,(if equalp `(- (the fixnum end1) ,offset1) nil))))))
+(defmacro string<>=*-body (test index)
+  `(with-two-strings string1 string2 start1 end1 offset1 start2 end2
+     (multiple-value-bind (index diff)
+         (%sp-string-compare string1 start1 end1
+                             string2 start2 end2)
+       (if (,test diff 0)
+           ,(if index '(- index offset1) nil)
+           ,(if index nil '(- index offset1))))))
 
 (defun string<* (string1 string2 start1 end1 start2 end2)
-  (declare (fixnum start1 start2))
-  (string<>=*-body t nil))
+  (string<>=*-body < t))
 
 (defun string>* (string1 string2 start1 end1 start2 end2)
-  (declare (fixnum start1 start2))
-  (string<>=*-body nil nil))
+  (string<>=*-body > t))
 
 (defun string<=* (string1 string2 start1 end1 start2 end2)
-  (declare (fixnum start1 start2))
-  (string<>=*-body t t))
+  (string<>=*-body > nil))
 
 (defun string>=* (string1 string2 start1 end1 start2 end2)
   (declare (fixnum start1 start2))
-  (string<>=*-body nil t))
+  (string<>=*-body < nil))
 
 (defun string< (string1 string2 &key (start1 0) end1 (start2 0) end2)
   "Given two strings, if the first string is lexicographically less than
@@ -470,36 +454,75 @@ new string COUNT long filled with the fill character."
                          :initial-element (the character fill-char))
       (make-string count :element-type element-type)))
 
-(flet ((%upcase (string start end)
-         (declare (string string) (index start) (type sequence-end end))
-         (let ((saved-header string))
-           (with-one-string (string start end)
-             (do ((index start (1+ index)))
-                 ((= index (the fixnum end)))
-               (declare (fixnum index))
-               (setf (schar string index) (char-upcase (schar string index)))))
-           saved-header)))
-(defun string-upcase (string &key (start 0) end)
-  (%upcase (copy-seq (string string)) start end))
+(declaim (inline nstring-upcase))
 (defun nstring-upcase (string &key (start 0) end)
-  (%upcase string start end))
-) ; FLET
+  (declare (explicit-check))
+  (if (typep string '(array nil (*)))
+      (if (zerop (length string))
+          string
+          (data-nil-vector-ref string 0))
+      (locally
+          (declare ((or base-string
+                        (array character (*)))
+                    string))
+        (with-one-string (string start end)
+          (do ((index start (1+ index))
+               (cases **character-cases**)
+               (case-pages **character-case-pages**))
+              ((>= index end))
+            (declare (optimize (sb-c::insert-array-bounds-checks 0)))
+            (let ((char (schar string index)))
+              (with-case-info (char case-index cases
+                               :cases cases
+                               :case-pages case-pages)
+                (let ((code (aref cases (1+ case-index))))
+                  (unless (zerop code)
+                    (setf (schar string index)
+                          (code-char (truly-the char-code code)))))))))
+        string)))
+(declaim (notinline nstring-upcase))
 
-(flet ((%downcase (string start end)
-         (declare (string string) (index start) (type sequence-end end))
-         (let ((saved-header string))
-           (with-one-string (string start end)
-             (do ((index start (1+ index)))
-                 ((= index (the fixnum end)))
-               (declare (fixnum index))
-               (setf (schar string index)
-                     (char-downcase (schar string index)))))
-           saved-header)))
-(defun string-downcase (string &key (start 0) end)
-  (%downcase (copy-seq (string string)) start end))
+(defun string-upcase (string &key (start 0) end)
+  (declare (explicit-check)
+           (inline nstring-upcase))
+  (nstring-upcase (copy-seq (%string string)) :start start :end end))
+
+(declaim (inline nstring-downcase))
 (defun nstring-downcase (string &key (start 0) end)
-  (%downcase string start end))
-) ; FLET
+  (declare (explicit-check))
+  (if (typep string '(array nil (*)))
+      (if (zerop (length string))
+          string
+          (data-nil-vector-ref string 0))
+      (locally
+          (declare ((or base-string
+                        (array character (*)))
+                    string))
+        (with-one-string (string start end)
+          (do ((index start (1+ index))
+               (cases **character-cases**)
+               (case-pages **character-case-pages**))
+              ((>= index end))
+            (declare (optimize (sb-c::insert-array-bounds-checks 0)))
+            (let ((char (schar (truly-the (or simple-base-string
+                                              simple-character-string)
+                                          string)
+                               index)))
+              (with-case-info (char case-index cases
+                               :cases cases
+                               :case-pages case-pages)
+                (let ((code (aref cases case-index)))
+                  (unless (zerop code)
+                    (setf (schar string index)
+                          (code-char (truly-the char-code code)))))))))
+        string)))
+(declaim (notinline nstring-downcase))
+
+(defun string-downcase (string &key (start 0) end)
+  (declare (explicit-check)
+           (inline nstring-downcase))
+  (nstring-downcase (copy-seq (%string string)) :start start :end end))
+
 (flet ((%capitalize (string start end)
          (declare (string string) (index start) (type sequence-end end))
          (let ((saved-header string))

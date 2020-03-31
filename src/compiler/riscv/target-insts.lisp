@@ -150,7 +150,7 @@ about function addresses and register values.")
     (#.sb-vm::code-offset
      (note-code-constant offset dstate))
     (#.sb-vm::null-offset
-     (let ((offset (+ sb-vm::nil-value offset)))
+     (let ((offset (+ sb-vm:nil-value offset)))
        (maybe-note-assembler-routine offset nil dstate)
        (maybe-note-static-symbol (logior offset other-pointer-lowtag)
                                  dstate)))
@@ -211,8 +211,7 @@ about function addresses and register values.")
         (nt "single-step trap (before)"))
        (#.invalid-arg-count-trap
         (nt "Invalid argument count trap"))
-       (#.cerror-trap
-        (nt "cerror trap")
-        (handle-break-args #'snarf-error-junk trap stream dstate))
        (t
-        (handle-break-args #'snarf-error-junk trap stream dstate))))))
+        (when (or (and (= trap error-trap) (progn (nt "cerror trap") t))
+                  (>= trap error-trap))
+          (handle-break-args #'snarf-error-junk trap stream dstate)))))))

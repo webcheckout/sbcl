@@ -9,13 +9,6 @@
 ;;;; absolutely no warranty. See the COPYING and CREDITS files for
 ;;;; more information.
 
-;;; +MAGIC-HASH-VECTOR-VALUE+ is used to mark empty entries in the slot
-;;; HASH-VECTOR of hash tables. It must be a value outside of the range
-;;; of SXHASH. The range of SXHASH is the non-negative fixnums.
-(with-test (:name :magic-hash-vector-value)
-  (assert (not (typep sb-impl::+magic-hash-vector-value+
-                      '(and fixnum unsigned-byte)))))
-
 ;;; The return value of SXHASH on non-string/bitvector arrays should not
 ;;; change when the contents of the array change.
 (with-test (:name (sxhash array :independent-of-contents))
@@ -143,11 +136,161 @@
       (setf (gethash (cons 'foo (gensym)) tbl) 1))
     (gc)
     ;; The need-to-rehash bit is set
-    (assert (eql 1 (svref (sb-impl::hash-table-table tbl) 1)))
+    (assert (eql 1 (svref (sb-impl::hash-table-pairs tbl) 1)))
     (clrhash tbl)
     ;; The need-to-rehash bit is not set
-    (assert (eql 0 (svref (sb-impl::hash-table-table tbl) 1)))))
+    (assert (eql 0 (svref (sb-impl::hash-table-pairs tbl) 1)))))
 
 (with-test (:name :sxhash-signed-floating-point-zeros)
   (assert (not (eql (sxhash -0f0) (sxhash 0f0))))
   (assert (not (eql (sxhash -0d0) (sxhash 0d0)))))
+
+(with-test (:name :sxhash-simple-bit-vector)
+  (let (hashes)
+    (let ((v (make-array sb-vm:n-word-bits :element-type 'bit)))
+      (dotimes (i sb-vm:n-word-bits)
+        (setf (aref v i) 1)
+        (push (sxhash v) hashes)
+        (setf (aref v i) 0)))
+    (assert (= (length (remove-duplicates hashes)) sb-vm:n-word-bits))))
+
+(with-test (:name :eq-hash-nonpointers-not-address-sensitive)
+  (let ((tbl (make-hash-table :test 'eq)))
+    (setf (gethash #\a tbl) 1)
+    #+64-bit (setf (gethash 1.0f0 tbl) 1) ; single-float is a nonpointer
+    (let ((data (sb-kernel:get-header-data (sb-impl::hash-table-pairs tbl))))
+      (assert (not (logtest data sb-vm:vector-addr-hashing-subtype))))))
+
+(with-test (:name (hash-table :small-rehash-size))
+  (let ((ht (make-hash-table :rehash-size 2)))
+    (dotimes (i 100)
+      (setf (gethash (gensym) ht) 10)))
+  (let ((ht (make-hash-table :rehash-size 1.0001)))
+    (dotimes (i 100)
+      (setf (gethash (gensym) ht) 10))))
+
+(with-test (:name (hash-table :custom-hashfun-with-standard-test))
+  (flet ((kv-flag-bits (ht)
+           (sb-kernel:get-header-data (sb-impl::hash-table-pairs ht))))
+    ;; verify that EQ hashing on symbols is address-sensitive
+    (let ((h (make-hash-table :test 'eq)))
+      (setf (gethash 'foo h) 1)
+      (assert (logtest (kv-flag-bits h) sb-vm:vector-addr-hashing-subtype)))
+    (let ((h (make-hash-table :test 'eq :hash-function 'sb-kernel:symbol-hash)))
+      (setf (gethash 'foo h) 1)
+      (assert (not (logtest (kv-flag-bits h) sb-vm:vector-addr-hashing-subtype))))
+
+    ;; Verify that any standard hash-function on a function is address-sensitive,
+    ;; but a custom hash function makes it not so.
+    ;; Require 64-bit since this uses %CODE-SERIALNO as the hash,
+    ;; and that function doesn't exist on 32-bit (but should!)
+    #+64-bit
+    (dolist (test '(eq eql equal equalp))
+      (let ((h (make-hash-table :test test)))
+        (setf (gethash #'car h) 1)
+        (assert (logtest (kv-flag-bits h) sb-vm:vector-addr-hashing-subtype)))
+      (let ((h (make-hash-table :test test :hash-function
+                                (lambda (x)
+                                  (sb-kernel:%code-serialno
+                                   (sb-kernel:fun-code-header x))))))
+        (setf (gethash #'car h) 1)
+        (assert (not (logtest (kv-flag-bits h) sb-vm:vector-addr-hashing-subtype)))))))
+
+(defun hash-table-freelist (tbl)
+  (sb-int:named-let chain ((index (sb-impl::hash-table-next-free-kv tbl)))
+    (when (plusp index)
+      (nconc (list index)
+             (chain (aref (sb-impl::hash-table-next-vector tbl) index))))))
+
+(defvar *tbl* (make-hash-table :weakness :key))
+
+(import 'sb-impl::hash-table-smashed-cells)
+;;; We have a bunch of tests of weakness, but this is testing the new algorithm
+;;; which has two different freelists - one of cells that REMHASH has made available
+;;; and one of cells that GC has marked as empty. Since we no longer inhibit GC
+;;; during table operations, we need to give GC a list of its own to manipulate.
+(with-test (:name (hash-table :gc-smashed-cell-list))
+  (flet ((f ()
+           (dotimes (i 20000) (setf (gethash i *tbl*) (- i)))
+           (setf (gethash (cons 1 2) *tbl*) 'foolz)
+           (assert (= (sb-impl::kv-vector-high-water-mark (sb-impl::hash-table-pairs *tbl*))
+                      20001))
+           (loop for i from 10 by 10 repeat 20 do (remhash i *tbl*))))
+    ;; Ensure the values remain outside of the stack pointer for scrub-control-stack to work
+    (declare (notinline f))
+    (f))
+  (sb-sys:scrub-control-stack)
+  (gc)
+  ;; There were 20 items REMHASHed plus the freelist contains a pointer
+  ;; to a cell which is one past the high-water-mark, for 21 cells in all.
+  (assert (= (length (hash-table-freelist *tbl*)) 21))
+  ;; The (1 . 2) cons was removed
+  (assert (= (length (hash-table-smashed-cells *tbl*)) 1))
+  ;; And its representation in the list of smashed cells doesn't
+  ;; fit in a packed integer (because the cell index is 20001)
+  (assert (and (consp (hash-table-smashed-cells *tbl*))
+               (consp (car (hash-table-smashed-cells *tbl*)))))
+  (setf (gethash 'jeebus *tbl*) 9)
+  ;; Freelist should not have changed at all.
+  (assert (= (length (hash-table-freelist *tbl*)) 21))
+  ;; And the smashed cell was used.
+  (assert (null (hash-table-smashed-cells *tbl*)))
+  (setf (gethash (make-symbol "SANDWICH") *tbl*) 8)
+  ;; Now one item should have been popped
+  (assert (= (length (hash-table-freelist *tbl*)) 20))
+  ;; should have used up the smashed cell
+  (sb-sys:scrub-control-stack)
+  (gc)
+  ;; Should have smashed the uninterned symbol
+  (assert (hash-table-smashed-cells *tbl*)))
+
+;;; Immediate values are address-based but not motion-sensitive.
+;;; The hash function returns address-based = NIL.
+;;; The specialized function GETHASH/EQ never compares hashes,
+;;; but the generalized FINDHASH-WEAK forgot to not compare them.
+(with-test (:name (hash-table :weak-eq-table-fixnum-key))
+  (let ((table (make-hash-table :test 'eq :weakness :key)))
+    (setf (gethash 42 table) t)
+    (gethash 42 table)))
+
+(with-test (:name :write-hash-table-readably)
+  (let ((h1 (make-hash-table)))
+    (setf (gethash :a h1) 1
+          (gethash :b h1) 2
+          (gethash :c h1) 3)
+    (let* ((s1 (write-to-string h1 :readably t))
+           (h2 (read-from-string s1))
+           (s2 (write-to-string h2 :readably t)))
+      ;; S1 and S2 used to be STRING/= prior to making
+      ;; %HASH-TABLE-ALIST iterate backwards.
+      (assert (string= s1 s2)))))
+
+(defun test-this-object (table-kind object)
+  (let ((store (make-hash-table :test table-kind)))
+    (setf (gethash object store) '(1 2 3))
+    (assert (equal (gethash object store) '(1 2 3)))
+    (assert (remhash object store))
+    (assert (= (hash-table-count store) 0))))
+
+;; https://bugs.launchpad.net/sbcl/+bug/1865094
+(with-test (:name :remhash-eq-comparable-in-equal-table)
+  ;; These objects are all hashed by their address,
+  ;; so their stored hash value is the magic marker.
+  (test-this-object 'equal (make-hash-table))
+  (test-this-object 'equal (sb-kernel:find-defstruct-description 'sb-c::node))
+  (test-this-object 'equal #'car)
+  (test-this-object 'equal (sb-sys:int-sap 0))
+  ;; a CLASS is not hashed address-sensitively, so this wasn't
+  ;; actually subject to the bug. Try it anyway.
+  (test-this-object 'equal (find-class 'class)))
+
+(with-test (:name :remhash-eq-comparable-in-equalp-table)
+  ;; EQUALP tables worked a little better, because more objects have
+  ;; are hashed non-address-sensitively by EQUALP-HASH relative to EQUAL-HASH,
+  ;; and those objects have comparators that descend.
+  ;; However, there are still some things hashed by address:
+  (test-this-object 'equalp (make-weak-pointer "bleep"))
+  (test-this-object 'equalp (sb-kernel::find-fdefn 'cons))
+  (test-this-object 'equalp #'car)
+  (test-this-object 'equalp (constantly 5))
+  (test-this-object 'equal (sb-sys:int-sap 0)))

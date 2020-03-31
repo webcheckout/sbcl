@@ -166,7 +166,8 @@
           ((= nvals 1)
            (let ((no-values (gen-label)))
              (inst mov (tn-ref-tn values) nil-value)
-             (inst jrcxz no-values)
+             (inst test rcx-tn rcx-tn)
+             (inst jmp :z no-values)
              (loadw (tn-ref-tn values) start -1)
              (emit-label no-values)))
           (t
@@ -203,32 +204,35 @@
     (inst mov rsp-tn sp)))
 
 (define-vop (nlx-entry-multiple)
-  (:args (top :target result)
+  (:args (top :target result
+              :scs (any-reg))
          (source :to :save)
          (count :target rcx))
-  ;; Again, no SC restrictions for the args, 'cause the loading would
-  ;; happen before the entry label.
   (:info label)
+  (:before-load
+    (emit-label label)
+    (note-this-location vop :non-local-entry))
   (:temporary (:sc unsigned-reg :offset rcx-offset :from (:argument 2)) rcx)
   (:temporary (:sc unsigned-reg) loop-index temp)
   (:results (result :scs (any-reg))
             (num :scs (any-reg control-stack)))
   (:save-p :force-to-stack)
+  (:args-var top-tn-ref)
   (:vop-var vop)
   (:generator 30
-    (emit-label label)
-    (note-this-location vop :non-local-entry)
-
     ;; The 'top' arg contains the %esp value saved at the time the
     ;; catch block was created and points to where the thrown values
     ;; should sit.
-    (move result top)
+    (if (eq (tn-kind result) :unused)
+        (setf result top)
+        (move result top))
 
     (unless (eq (tn-kind num) :unused)
       (move num count))
     (move rcx count)
     (zeroize loop-index)
-    (inst jrcxz DONE)
+    (inst test rcx rcx)
+    (inst jmp :z DONE)
     LOOP
     (inst sub loop-index n-word-bytes)
     (inst mov temp (ea source loop-index))

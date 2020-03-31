@@ -53,10 +53,11 @@
 
 ;;; For each named function with an XEP, note the definition of that
 ;;; name, and add derived type information to the INFO environment. We
-;;; also delete the FUNCTIONAL from *FREE-FUNS* to eliminate the
+;;; also delete the FUNCTIONAL from (FREE-FUNS *IR1-NAMESPACE*) to eliminate the
 ;;; possibility that new references might be converted to it.
 (defun finalize-xep-definition (fun)
   (let* ((leaf (functional-entry-fun fun))
+         (ns *ir1-namespace*)
          (defined-ftype (definition-type leaf)))
     (setf (leaf-type leaf) defined-ftype)
     (when (and (leaf-has-source-name-p leaf)
@@ -65,11 +66,11 @@
       (let ((source-name (leaf-source-name leaf)))
         (let* ((where (info :function :where-from source-name))
                (*compiler-error-context* (lambda-bind (main-entry leaf)))
-               (global-def (gethash source-name *free-funs*))
+               (global-def (gethash source-name (free-funs ns)))
                (global-p (defined-fun-p global-def)))
           (note-name-defined source-name :function)
           (when global-p
-            (remhash source-name *free-funs*))
+            (remhash source-name (free-funs ns)))
           (ecase where
             (:assumed
              (let ((approx-type (info :function :assumed-type source-name)))
@@ -104,7 +105,7 @@
 (defun note-assumed-types (component name var)
   (when (and (eq (leaf-where-from var) :assumed)
              (not (and (defined-fun-p var)
-                       (eq (defined-fun-inlinep var) :notinline)))
+                       (eq (defined-fun-inlinep var) 'notinline)))
              (eq (info :function :where-from name) :assumed)
              (eq (info :function :kind name) :function))
     (let ((atype (info :function :assumed-type name)))
@@ -143,10 +144,10 @@
                (delete-filter node lvar (cast-value node))))))))
 
 (defglobal *two-arg-functions*
-    '((* two-arg-*)
+    `((* two-arg-*)
       (+ two-arg-+)
       (- two-arg--)
-      (/ two-arg-/)
+      (/ two-arg-/ (,(specifier-type 'integer) ,(specifier-type 'integer)) sb-kernel::integer-/-integer)
       (< two-arg-<)
       (= two-arg-=)
       (> two-arg->)
@@ -242,16 +243,23 @@
 (defun rewrite-full-call (combination)
   (let ((combination-name (lvar-fun-name (combination-fun combination) t))
         (args (combination-args combination)))
-    (let ((two-arg (cadr (assoc combination-name *two-arg-functions*)))
+    (let ((two-arg (assoc combination-name *two-arg-functions*))
           (ref (lvar-uses (combination-fun combination))))
       (when (and two-arg
                  (ref-p ref)
                  (= (length args) 2)
                  (not (fun-lexically-notinline-p combination-name
                                                  (node-lexenv combination))))
-        (change-ref-leaf
-         ref
-         (find-free-fun two-arg "rewrite-full-call"))))))
+        (destructuring-bind (name two-arg &optional types typed-two-arg) two-arg
+          (declare (ignore name))
+          (when (and types
+                     (loop for arg in args
+                           for type in types
+                           always (csubtypep (lvar-type arg) type)))
+            (setf two-arg typed-two-arg))
+          (change-ref-leaf
+           ref
+           (find-free-fun two-arg "rewrite-full-call")))))))
 
 ;;; Do miscellaneous things that we want to do once all optimization
 ;;; has been done:
@@ -273,7 +281,7 @@
 
   (maphash (lambda (k v)
              (note-assumed-types component k v))
-           *free-funs*)
+           (free-funs *ir1-namespace*))
 
   (ir1-merge-casts component)
   (ir1-optimize-functional-arguments component)

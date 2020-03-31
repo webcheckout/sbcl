@@ -18,6 +18,10 @@
       (ash num n-fixnum-tag-bits)
       (error "~W is too big for a fixnum." num)))
 
+(declaim (inline tn-byte-offset))
+(defun tn-byte-offset (tn)
+  (ash (tn-offset tn) word-shift))
+
 ;;; Determining whether a constant offset fits in an addressing mode.
 #+(or x86 x86-64)
 (defun foldable-constant-offset-p (element-size lowtag data-offset offset)
@@ -44,6 +48,21 @@
            other-pointer-lowtag
            (- list-pointer-lowtag)))
       0))
+
+;;; the address of the linkage table entry for table index I.
+#+linkage-table
+(defun linkage-table-entry-address (i)
+  (ecase linkage-table-growth-direction
+    (:up   (+ (* i linkage-table-entry-size) linkage-table-space-start))
+    (:down (- linkage-table-space-end (* (1+ i) linkage-table-entry-size)))))
+
+#+linkage-table
+(defun linkage-table-index-from-address (addr)
+  (ecase linkage-table-growth-direction
+    (:up
+     (floor (- addr linkage-table-space-start) linkage-table-entry-size))
+    (:down
+     (1- (floor (- linkage-table-space-end addr) linkage-table-space-end)))))
 
 (defconstant-eqx +all-static-fdefns+
     #.(concatenate 'vector +c-callable-fdefns+ +static-fdefns+) #'equalp)
@@ -130,25 +149,19 @@
 
 ;;; Return a list of TNs that can be used to represent an unknown-values
 ;;; continuation within a function.
-(defun make-unknown-values-locations (&optional unused-count)
-  (declare (ignorable unused-count))
-  (list (make-stack-pointer-tn)
-        (cond #+x86-64 ;; needs support from receive-unknown-values
+(defun make-unknown-values-locations (&optional unused-count unused-sp)
+  (declare (ignorable unused-count unused-sp))
+  (list (cond #+x86-64
+              ;; needs support from receive-unknown-values, push-values, %more-arg-values
+              (unused-sp
+               (sb-c::make-unused-tn))
+              (t
+               (make-stack-pointer-tn)))
+        (cond #+x86-64
               (unused-count
                (sb-c::make-unused-tn))
               (t
                (make-normal-tn *fixnum-primitive-type*)))))
-
-;;; This function is called by the ENTRY-ANALYZE phase, allowing
-;;; VM-dependent initialization of the IR2-COMPONENT structure. We
-;;; push placeholder entries in the CONSTANTS to leave room for
-;;; additional noise in the code object header.
-(defun select-component-format (component)
-  (declare (type component component))
-  (dotimes (i code-constants-offset)
-    (vector-push-extend nil
-                        (ir2-component-constants (component-info component))))
-  (values))
 
 (defun error-call (vop error-code &rest values)
   "Cause an error.  ERROR-CODE is the error to cause."
@@ -176,3 +189,9 @@
                                list
                                instance
                                character))))))
+
+(defun compute-object-header (size widetag)
+  (logior (case widetag
+            (#.fdefn-widetag 0)
+            (t (ash (1- size) n-widetag-bits)))
+          widetag))

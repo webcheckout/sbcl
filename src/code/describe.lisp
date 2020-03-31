@@ -396,6 +396,8 @@
                 (format stream "~@:_No subclasses.")))
           (unless (sb-mop:class-finalized-p class)
             (format stream "~@:_Not yet finalized."))
+          (when (eq :sealed (classoid-state (sb-pcl::class-classoid class)))
+            (format stream "~@:_Sealed."))
           (if (eq 'structure-class metaclass-name)
               (let* ((dd (find-defstruct-description name))
                      (slots (dd-slots dd)))
@@ -525,13 +527,13 @@
 (defun describe-lambda-list (lambda-list stream)
   (let ((*print-circle* nil)
         (*print-level* 24)
-        (*print-length* 24))
+        (*print-length* 100))
     (format stream "~@:_Lambda-list: ~:S" lambda-list)))
 
 (defun describe-argument-precedence-order (argument-list stream)
   (let ((*print-circle* nil)
         (*print-level* 24)
-        (*print-length* 24))
+        (*print-length* 100))
     (format stream "~@:_Argument precedence order: ~:A" argument-list)))
 
 (defun describe-function-source (function stream)
@@ -735,7 +737,7 @@
                                 maybe-inline
                                 deprecated))
                  "an SBCL-specific")
-                ((info :declaration :recognized name)
+                ((info :declaration :known name)
                  "a user-defined"))))
     (when kind
       (describe-block (stream "~A names ~A declaration." name kind)))))

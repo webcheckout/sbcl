@@ -51,7 +51,6 @@ static inline int set_thread_area(struct user_desc *u_info)
 }
 
 #include "validate.h"
-size_t os_vm_page_size;
 
 int arch_os_thread_init(struct thread *thread) {
     stack_t sigstack;
@@ -90,7 +89,7 @@ int arch_os_thread_init(struct thread *thread) {
     sigstack.ss_flags = 0;
     sigstack.ss_size  = calc_altstack_size(thread);
     if(sigaltstack(&sigstack,0)<0)
-        lose("Cannot sigaltstack: %s\n",strerror(errno));
+        lose("Cannot sigaltstack: %s",strerror(errno));
 #endif
     return 1;
 }
@@ -181,3 +180,10 @@ void
 os_flush_icache(os_vm_address_t address, os_vm_size_t length)
 {
 }
+
+// To avoid "Missing required foreign symbol" errors in os_link_runtime()
+// the executable must actually depend on libm. It would not require libm,
+// despite -lm in the link step, if there is no reference to a libm symbol
+// observable to the linker. Any one symbol suffices to resolve all of them.
+#include <math.h>
+const long libm_anchor = (long)acos;

@@ -9,7 +9,7 @@
 # provided with absolutely no warranty. See the COPYING and CREDITS
 # files for more information.
 
-CFLAGS += -arch i386 -g -Wall -O2 -fdollars-in-identifiers -fno-omit-frame-pointer
+CFLAGS += -arch i386 -g -Wall -O2 -fdollars-in-identifiers -fno-omit-frame-pointer -DOS_THREAD_STACK
 
 LINKFLAGS += -arch i386
 ifdef SBCL_MACOSX_VERSION_MIN
@@ -34,15 +34,12 @@ endif
 ifdef LISP_FEATURE_SB_CORE_COMPRESSION
   OS_LIBS += -lz
 endif
-ifndef LISP_FEATURE_SB_DYNAMIC_CORE
-  LINKFLAGS +=-Wl,-no_pie
-endif
 ifdef LISP_FEATURE_SB_LINKABLE_RUNTIME
   LIBSBCL = libsbcl.a
   USE_LIBSBCL = -Wl,-force_load libsbcl.a
 endif
 
-ASSEM_SRC = x86-assem.S ldso-stubs.S
+ASSEM_SRC = x86-assem.S
 ARCH_SRC = x86-arch.c
 
 CPPFLAGS += -no-cpp-precomp

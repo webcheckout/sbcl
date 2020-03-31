@@ -126,8 +126,7 @@
   (:results (res :scs (any-reg descriptor-reg)))
   (:policy :fast-safe)
   (:generator 1
-    (inst bic res ptr lowtag-mask)
-    (inst mov res (lsr res 1))))
+    (inst bic res ptr fixnum-tag-mask)))
 
 ;;;; Allocation
 
@@ -254,7 +253,7 @@
     (emit-alignment word-shift)))
 
 ;;;; Dummy definition for a spin-loop hint VOP
-(define-vop (spin-loop-hint)
+(define-vop ()
   (:translate spin-loop-hint)
   (:policy :fast-safe)
   (:generator 0))

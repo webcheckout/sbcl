@@ -23,7 +23,7 @@
 #endif
 
 #ifdef LISP_FEATURE_GENCGC
-#include "gencgc-internal.h"
+#include "gc-internal.h"
 #endif
 
 #ifdef LISP_FEATURE_SB_WTIMER
@@ -32,28 +32,20 @@
 # include <errno.h>
 #endif
 
-os_vm_size_t os_vm_page_size=0;
-
 void
 os_init(char *argv[], char *envp[])
 {
-    /*
-     * historically, this used sysconf to select the runtime page size
-     * per recent changes on other arches and discussion on sbcl-devel,
-     * however, this is not necessary -- the VM page size need not match
-     * the OS page size (and the default backend page size has been
-     * ramped up accordingly for efficiency reasons).
-     */
-    os_vm_page_size = BACKEND_PAGE_BYTES;
 }
 
-os_vm_address_t os_validate(int movable, os_vm_address_t addr, os_vm_size_t len)
+os_vm_address_t os_validate(int attributes, os_vm_address_t addr, os_vm_size_t len)
 {
+    int protection = attributes & IS_GUARD_PAGE ? OS_VM_PROT_NONE : OS_VM_PROT_ALL;
+    attributes &= ~IS_GUARD_PAGE;
     int flags = MAP_PRIVATE | MAP_NORESERVE | MAP_ANON;
     if (addr)
         flags |= MAP_FIXED;
 
-    addr = mmap(addr, len, OS_VM_PROT_ALL, flags, -1, 0);
+    addr = mmap(addr, len, protection, flags, -1, 0);
 
     if (addr == MAP_FAILED) {
         perror("mmap");

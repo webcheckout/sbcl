@@ -289,7 +289,7 @@ bootstrapping.
                                     not allowed inside DEFGENERIC."
                                   spec))
                  (if (or (eq 'optimize (first spec))
-                         (info :declaration :recognized (first spec)))
+                         (info :declaration :known (first spec)))
                      (push spec (initarg :declarations))
                      (warn "Ignoring unrecognized declaration in DEFGENERIC: ~S"
                            spec))))
@@ -527,7 +527,11 @@ bootstrapping.
               (with-current-source-form (lambda-list)
                 (parse-specialized-lambda-list lambda-list)))
              (*method-name* `(,name ,@qualifiers ,specializers))
-             (method-lambda `(lambda ,unspecialized-lambda-list ,@body))
+             (method-lambda `(lambda ,unspecialized-lambda-list
+                               (declare (sb-c::source-form
+                                         (lambda ,unspecialized-lambda-list
+                                           ,@body)))
+                               ,@body))
              ((method-function-lambda initargs new-lambda-list)
               (make-method-lambda-using-specializers
                proto-gf proto-method qualifiers specializers method-lambda env))
@@ -567,9 +571,6 @@ bootstrapping.
                              (class-name (class-of proto-method))
                              'standard-method)
                          initargs-form)))
-
-(defun interned-symbol-p (x)
-  (and (symbolp x) (symbol-package x)))
 
 (defun make-defmethod-form
     (name qualifiers specializers unspecialized-lambda-list
@@ -1826,11 +1827,13 @@ bootstrapping.
                                  (slot-value #'optimize-slot-value)
                                  (set-slot-value #'optimize-set-slot-value)
                                  (slot-boundp #'optimize-slot-boundp))))
-                      (funcall fun form slots required-parameters env))
+                      `(sb-c::with-source-form ,form
+                        ,(funcall fun form slots required-parameters env)))
                     form))
                (t form))))
 
-      (let ((walked-lambda (walk-form method-lambda env #'walk-function)))
+      (let* ((sb-walker::*walk-form-preserve-source* t)
+             (walked-lambda (walk-form method-lambda env #'walk-function)))
         ;;; FIXME: the walker's rewriting of the source code causes
         ;;; trouble when doing code coverage. The rewrites should be
         ;;; removed, and the same operations done using
@@ -2357,8 +2360,7 @@ bootstrapping.
 (defun make-early-gf (name &optional lambda-list lambda-list-p
                       function argument-precedence-order source-location
                       documentation)
-  (let ((fin (allocate-standard-funcallable-instance-immobile
-              *sgf-wrapper* name)))
+  (let ((fin (allocate-standard-funcallable-instance *sgf-wrapper* name)))
     (replace (fsc-instance-slots fin) *sgf-slots-init*)
     (when function
       (set-funcallable-instance-function fin function))
@@ -2862,16 +2864,15 @@ bootstrapping.
                         (sb-c::compiled-debug-info-tlf-number debug-info)
                         (sb-c::compiled-debug-fun-form-number debug-fun))))
                    (debug-info-debug-function (function debug-info)
+
                      (let ((map (sb-c::compiled-debug-info-fun-map debug-info))
                            (name (sb-kernel:%simple-fun-name (sb-kernel:%fun-fun function))))
-                       (or
-                        (find-if
-                         (lambda (x)
-                           (and
-                            (sb-c::compiled-debug-fun-p x)
-                            (eq (sb-c::compiled-debug-fun-name x) name)))
-                         map)
-                        (elt map 0))))
+                       (or (loop for fmap-entry = map then next
+                                 for next = (sb-c::compiled-debug-fun-next fmap-entry)
+                                 when (eq (sb-c::compiled-debug-fun-name fmap-entry) name)
+                                 return fmap-entry
+                                 while next)
+                           map)))
                    (make-method (spec)
                      (destructuring-bind
                          (lambda-list specializers qualifiers fun-name) spec

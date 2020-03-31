@@ -35,3 +35,26 @@
            (ctu:find-code-constants (symbol-function symbol)
                                     :type 'sb-kernel:layout)))
       (assert (= (length constants) 3)))))
+
+;;; Check an organic (not contrived) use of mutually referential types.
+;;; NEWLINE is defined after SECTION-START, because it is a subtype.
+;;; One of SECTION-START's slot setters refers to type NEWLINE.
+(with-test (:name :pretty-stream-structs)
+  (let ((layouts
+         (ctu:find-code-constants #'(setf sb-pretty::section-start-section-end)
+                                  :type 'sb-kernel:layout)))
+    ;; expect 3 layouts: one for SECTION-START to check the instance itself,
+    ;; one for NEWLINE and one for BLOCK-END.
+    ;; It's entirely coincidental that the above test also has 3.
+    (assert (= (length layouts) 3))
+    (assert (find (sb-kernel:find-layout 'sb-pretty::newline)
+                  layouts))))
+
+(with-test (:name :mutex-owner-typecheck)
+  (let ((layouts
+         (ctu:find-code-constants #'(setf sb-thread::mutex-%owner)
+                                  :type 'sb-kernel:layout)))
+    ;; expect 2 layouts: one for THREAD, one for MUTEX
+    (assert (= (length layouts) 2))
+    (assert (find (sb-kernel:find-layout 'sb-thread:thread)
+                  layouts))))

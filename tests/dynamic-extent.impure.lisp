@@ -338,6 +338,18 @@
 
 ;;; MAKE-STRUCTURE
 
+;; :stack-allocatable-fixed-objects is necessary but not sufficient
+(with-test (:name :copy-structure-dx :skipped-on (not (or :x86 :x86-64)))
+  (let ((thing sb-impl::*external-formats*))
+    ;; check some preconditions
+    (assert (typep thing 'hash-table))
+    (assert (/= (sb-kernel:layout-bitmap (sb-kernel:%instance-layout thing))
+                sb-kernel:+layout-all-tagged+))
+    (assert-no-consing
+     (sb-int:dx-let ((x (copy-structure thing)))
+       (opaque-identity x)
+       0))))
+
 (declaim (inline make-fp-struct-1))
 (defstruct fp-struct-1
   (s 0.0 :type single-float)
@@ -1546,4 +1558,30 @@
         (let ((v (list (vector 0 c 0 0) (catch 'ct5 (throw 'ct5 0)) 0)))
           (declare (dynamic-extent v))
           (elt (elt v 0) 1))))
-   ((33) 33)))
+    ((33) 33)))
+
+(with-test (:name :dominators-recomputation)
+  (let (sb-c::*check-consistency*)
+    (checked-compile-and-assert
+     ()
+     `(lambda (x)
+        (let ((m (if x
+                     (make-array 2 :initial-element 1)
+                     (make-array 2 :initial-element 2))))
+          (declare (dynamic-extent m))
+          (elt m 0)))
+     ((t) 1)
+     ((nil) 2))))
+
+(with-test (:name :notes-in-deleted-code)
+  (checked-compile
+   '(lambda ()
+     (labels ((z ()
+                (list 1))
+              (fn (&key)
+                (let ((x (z)))
+                  (declare (dynamic-extent x))
+                  (print x)
+                  1)))
+       (declare (ignorable #'fn))))
+   :allow-notes nil))

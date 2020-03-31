@@ -11,6 +11,80 @@
 
 (in-package "SB-VM")
 
+;;;; Notinline allocators
+;;;; Allocate bytes and return the start of the allocated space
+;;;; in the specified destination register.
+;;;;
+;;;; In the general case the size will be in the destination register.
+;;;;
+;;;; All registers must be preserved except the destination.
+;;;; The C conventions will preserve ebx, esi, edi, and ebp.
+;;;; So only eax, ecx, and edx need special care here.
+;;;;
+;;;; ALLOC factors out the logic of calling alloc(): stack alignment, etc.
+#+sb-assembling
+(macrolet ((alloc (reg size)
+             `(progn
+                (inst push ebp-tn)
+                (inst mov ebp-tn esp-tn)
+                (inst push 0)                 ; reserve space for arg
+                (inst and esp-tn #xfffffff0)  ; align stack to 16 bytes
+                (inst mov (make-ea :dword :base esp-tn) ,size)
+                (inst call (make-fixup "alloc" :foreign))
+                (inst mov esp-tn ebp-tn)
+                (inst pop ebp-tn)
+                ,@(unless (eq reg 'eax-tn)
+                    `((inst mov ,reg eax-tn)))))
+           (preserving ((r1 r2 &optional r3) &body body)
+             `(progn (inst push ,r1) (inst push ,r2)
+                     ,@(when r3 `((inst push ,r3)))
+                     ,@body
+                     ,@(when r3 `((inst pop ,r3)))
+                     (inst pop ,r2) (inst pop ,r1)))
+           (alloc-to-reg (reg size)
+             (let ((size-calc
+                     (unless size
+                       (setq size reg)
+                       #+win32 ; use edx-tn as a scratch reg unless REG is edx, then use ecx-tn
+                       (let ((scratch-tn (if (eq reg 'edx-tn) 'ecx-tn 'edx-tn)))
+                         `((inst mov ,scratch-tn
+                                 (make-ea :dword :disp +win32-tib-arbitrary-field-offset+)
+                                 :fs)
+                           (inst sub ,reg (make-ea :dword :disp (ash thread-alloc-region-slot 2)
+                                                          :base ,scratch-tn))))
+                       #-win32
+                       `(#+sb-thread (inst sub ,reg
+                                           (make-ea :dword :disp (ash thread-alloc-region-slot 2))
+                                           :fs)
+                         #-sb-thread (inst sub ,reg
+                                           (make-ea :dword :disp (+ 8 static-space-start)))))))
+             (case reg
+               (eax-tn `(preserving (ecx-tn edx-tn) ,@size-calc (alloc eax-tn ,size)))
+               (ecx-tn `(preserving (eax-tn edx-tn) ,@size-calc (alloc ecx-tn ,size)))
+               (edx-tn `(preserving (eax-tn ecx-tn) ,@size-calc (alloc edx-tn ,size)))
+               (t      `(preserving (eax-tn ecx-tn edx-tn)
+                          ,@size-calc
+                          (alloc ,reg ,size))))))
+           (def-allocators (tn &aux (reg (subseq (string tn) 0 3)))
+             `(progn
+                (define-assembly-routine (,(symbolicate "ALLOC-OVERFLOW-" reg)) ()
+                  (alloc-to-reg ,tn nil))
+                ;; FIXME: having decided (based on policy) not to use the inline allocator
+                ;; in Lisp, why does the assembly code not try to inline it?
+                ;; There's no reason to call into C for everything. This is horrible.
+                (define-assembly-routine (,(symbolicate "ALLOC-TO-" reg)) ()
+                  (alloc-to-reg ,tn ,tn))
+                (define-assembly-routine (,(symbolicate "ALLOC-8-TO-" reg)) ()
+                  (alloc-to-reg ,tn 8))
+                (define-assembly-routine (,(symbolicate "ALLOC-16-TO-" reg)) ()
+                  (alloc-to-reg ,tn 16)))))
+  (def-allocators eax-tn)
+  (def-allocators ecx-tn)
+  (def-allocators edx-tn)
+  (def-allocators ebx-tn)
+  (def-allocators esi-tn)
+  (def-allocators edi-tn))
+
 ;;;; Signed and unsigned bignums from word-sized integers. Argument
 ;;;; and return in the same register. No VOPs, as these are only used
 ;;;; as out-of-line versions: MOVE-FROM-[UN]SIGNED VOPs handle the
@@ -24,7 +98,7 @@
              (let ((tn (symbolicate reg "-TN")))
                `(define-assembly-routine (,(symbolicate "ALLOC-SIGNED-BIGNUM-IN-" reg)) ()
                   (inst push ,tn)
-                  (fixed-alloc ,tn bignum-widetag (+ bignum-digits-offset 1) nil)
+                  (alloc-other ,tn bignum-widetag (+ bignum-digits-offset 1) nil)
                   (popw ,tn bignum-digits-offset other-pointer-lowtag)))))
   (def eax)
   (def ebx)
@@ -43,11 +117,11 @@
                   ;; here we minimize garbage.
                   (inst jmp :ns one-word-bignum)
                   ;; Two word bignum
-                  (fixed-alloc ,tn bignum-widetag (+ bignum-digits-offset 2) nil)
+                  (alloc-other ,tn bignum-widetag (+ bignum-digits-offset 2) nil)
                   (popw ,tn bignum-digits-offset other-pointer-lowtag)
                   (inst ret)
                   ONE-WORD-BIGNUM
-                  (fixed-alloc ,tn bignum-widetag (+ bignum-digits-offset 1) nil)
+                  (alloc-other ,tn bignum-widetag (+ bignum-digits-offset 1) nil)
                   (popw ,tn bignum-digits-offset other-pointer-lowtag)))))
   (def eax)
   (def ebx)
@@ -57,23 +131,14 @@
   (def esi))
 
 #+sb-assembling
-(defun frob-allocation-assembly-routine (obj lowtag arg-tn)
-  `(define-assembly-routine (,(intern (format nil "ALLOCATE-~A-TO-~A" obj arg-tn)))
-     ((:temp ,arg-tn descriptor-reg ,(intern (format nil "~A-OFFSET" arg-tn))))
-     (pseudo-atomic ()
-      (allocation ,arg-tn (pad-data-block ,(intern (format nil "~A-SIZE" obj))) nil)
-      (inst lea ,arg-tn (make-ea :byte :base ,arg-tn :disp ,lowtag)))))
-
-#+sb-assembling
-(macrolet ((frob-cons-routines ()
-             (let ((routines nil))
-               (dolist (tn-offset *dword-regs*
-                        `(progn ,@routines))
-                 (push (frob-allocation-assembly-routine 'cons
-                                                         list-pointer-lowtag
-                                                         (intern (aref +dword-register-names+ tn-offset)))
-                       routines)))))
-  (frob-cons-routines))
+(macrolet ((def (tn-name &aux (reg (subseq (string tn-name) 0 3)))
+             `(define-assembly-routine (,(symbolicate "ALLOCATE-CONS-TO-" reg))
+                  ((:temp result descriptor-reg ,(tn-offset (symbol-value tn-name))))
+                (pseudo-atomic ()
+                 (allocation 'list (* 2 n-word-bytes)
+                             list-pointer-lowtag nil nil result)))))
+  (progn (def eax-tn) (def ebx-tn) (def ecx-tn)
+         (def edx-tn) (def esi-tn) (def edi-tn)))
 
 #+sb-thread
 (define-assembly-routine (alloc-tls-index

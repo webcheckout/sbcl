@@ -34,7 +34,6 @@
 
 (in-package "SB-IMPL")
 
-#-no-ansi-print-object
 (defmethod print-object ((x meta-info) stream)
   (print-unreadable-object (x stream)
     (format stream "~S ~S, ~D" (meta-info-category x) (meta-info-kind x)
@@ -168,6 +167,8 @@
   ;; to be certain that it's not supposed to happen when building the xc.
   #+sb-xc-xhost (error "Strange CLEAR-INFO building the xc: ~S ~S"
                        name info-numbers)
+  (when (pcl-methodfn-name-p name)
+    (error "Can't SET-INFO-VALUE on PCL-internal function"))
   (let (new)
     (with-globaldb-name (key1 key2) name
       :simple
@@ -251,8 +252,7 @@
       (values answer nil))))
 
 ;;;; ":FUNCTION" subsection - Data pertaining to globally known functions.
-
-(define-info-type (:function :definition) :type-spec (or #-sb-xc-host fdefn null))
+(define-info-type (:function :definition) :type-spec #-sb-xc-host (or fdefn null) #+sb-xc-host t)
 
 ;;; the kind of functional object being described. If null, NAME isn't
 ;;; a known functional object.
@@ -266,7 +266,10 @@
   ;; 19990330
   :default
   #+sb-xc-host nil
-  #-sb-xc-host (lambda (name) (if (fboundp name) :function nil)))
+  #-sb-xc-host (lambda (name)
+                 (if (or (fboundp name) (pcl-methodfn-name-p name))
+                     :function
+                     nil)))
 
 ;;; The deferred mode processor for fasteval special operators.
 ;;; Immediate processors are hung directly off symbols in a dedicated slot.
@@ -277,8 +280,9 @@
 (define-info-type (:function :deprecated)
   :type-spec (or null deprecation-info))
 
-(declaim (ftype (sfunction (t) ctype)
-                specifier-type ctype-of sb-kernel::ctype-of-array))
+;;; Why are these here? It seems like the wrong place.
+(declaim (ftype (sfunction (t &optional t symbol) ctype) specifier-type)
+         (ftype (sfunction (t) ctype) ctype-of sb-kernel::ctype-of-array))
 
 ;;; the ASSUMED-TYPE for this function, if we have to infer the type
 ;;; due to not having a declaration or definition
@@ -361,6 +365,9 @@
 ;;; If a function is "known" to the compiler, then this is a FUN-INFO
 ;;; structure containing the info used to special-case compilation.
 (define-info-type (:function :info) :type-spec (or sb-c::fun-info null))
+
+;;; For PCL code walker
+(define-info-type (:function :walker-template) :type-spec (or list symbol))
 
 ;;; This is a type specifier <t> such that if an argument X to the function
 ;;; does not satisfy (TYPEP x <t>) then the function definitely returns NIL.
@@ -446,7 +453,7 @@
                        ;; The compiler-macro signals an error
                        ;; on forward-referenced info-types.
                        #+sb-xc-host (declare (notinline info))
-                       (when (info :declaration :recognized name)
+                       (when (info :declaration :known name)
                          (error 'declaration-type-conflict-error
                                 :format-arguments (list name)))))
 
@@ -488,8 +495,8 @@
 ;; Therefore maintain a list of recognized declarations. This list makes the
 ;; globaldb storage of same redundant, but oh well.
 (defglobal *recognized-declarations* nil)
-(define-info-type (:declaration :recognized)
-  :type-spec boolean
+(define-info-type (:declaration :known)
+  :type-spec (or function boolean)
   ;; There's no portable way to unproclaim that a symbol is a declaration,
   ;; but at the low-level permit new-value to be NIL.
   :validate-function (lambda (name new-value)
@@ -502,8 +509,6 @@
                              (t
                               (setq *recognized-declarations*
                                     (delete name *recognized-declarations*))))))
-
-(define-info-type (:declaration :handler) :type-spec (or function null))
 
 ;;;; ":ALIEN-TYPE" subsection - Data pertaining to globally known alien-types.
 (define-info-type (:alien-type :kind)

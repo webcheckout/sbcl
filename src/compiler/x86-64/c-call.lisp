@@ -21,6 +21,7 @@
   (register-args 0)
   (xmm-args 0)
   (stack-frame-size 0))
+(declaim (freeze-type arg-state))
 
 (defconstant max-int-args #.(length *c-call-register-arg-offsets*))
 (defconstant max-xmm-args #+win32 4 #-win32 8)
@@ -68,6 +69,7 @@
 
 (defstruct (result-state (:copier nil))
   (num-results 0))
+(declaim (freeze-type result-state))
 
 (defun result-reg-offset (slot)
   (ecase slot
@@ -228,7 +230,6 @@
   (:generator 2
    (inst mov res (make-fixup foreign-symbol :foreign))))
 
-#+linkage-table
 (define-vop (foreign-symbol-dataref-sap)
   (:translate foreign-symbol-dataref-sap)
   (:policy :fast-safe)
@@ -238,7 +239,7 @@
   (:results (res :scs (sap-reg)))
   (:result-types system-area-pointer)
   (:generator 2
-   (inst mov res (make-fixup foreign-symbol :foreign-dataref))))
+   (inst mov res (ea (make-fixup foreign-symbol :foreign-dataref)))))
 
 #+sb-safepoint
 (defconstant thread-saved-csp-offset -1)
@@ -280,7 +281,6 @@
 
 ;;; Calls to C can generally be made without loading a register
 ;;; with the function. We receive the function name as an info argument.
-#+sb-dynamic-core ;; broken when calling ldso-stubs
 (define-vop (call-out-named)
   (:args (args :more t))
   (:results (results :more t))
@@ -303,7 +303,7 @@
     (inst lea rax (rip-relative-ea label))
     (emit-label label)
     (move pc-save rax))
-  (when sb-c::*msan-unpoison*
+  (when (sb-c:msan-unpoison sb-c:*compilation*)
     (inst mov rax (thread-slot-ea thread-msan-param-tls-slot))
     ;; Unpoison parameters
     (do ((n 0 (+ n n-word-bytes))
@@ -338,7 +338,7 @@
   #+win32 (inst add rsp-tn #x20)       ;MS_ABI: remove shadow space
   #+sb-safepoint
   ;; Zero the saved CSP
-  (inst xor (make-ea-for-object-slot thread-base-tn thread-saved-csp-offset 0)
+  (inst xor (object-slot-ea thread-base-tn thread-saved-csp-offset 0)
         rsp-tn))
 
 (define-vop (alloc-number-stack-space)

@@ -68,6 +68,14 @@
 
 (defknown alien-funcall (alien-value &rest *) *
   (any recursive))
+
+(defknown sb-alien::string-to-c-string (simple-string t) (or (simple-array (unsigned-byte 8) (*))
+                                                             simple-base-string)
+    (movable flushable))
+(defknown sb-alien::c-string-to-string (system-area-pointer t t) simple-string
+    (movable flushable))
+(defknown sb-alien::c-string-external-format * *
+        (movable flushable))
 
 ;;;; cosmetic transforms
 
@@ -164,10 +172,7 @@
   (let ((alien-type (lvar-type alien)))
     (unless (alien-type-type-p alien-type)
       (give-up-ir1-transform))
-    (let ((alien-type (alien-type-type-alien-type alien-type)))
-      (if (alien-type-p alien-type)
-          alien-type
-          (give-up-ir1-transform)))))
+    (alien-type-type-alien-type alien-type)))
 
 (defun find-deref-element-type (alien)
   (let ((alien-type (find-deref-alien-type alien)))
@@ -495,93 +500,6 @@
   (deftransform (setf %alien-value) ((value sap offset type))
     (%computed-lambda #'compute-deposit-lambda type)))
 
-;;;; a hack to clean up divisions
-
-(defun count-low-order-zeros (thing)
-  (typecase thing
-    (lvar
-     (if (constant-lvar-p thing)
-         (count-low-order-zeros (lvar-value thing))
-         (count-low-order-zeros (lvar-uses thing))))
-    (combination
-     (case (let ((name (lvar-fun-name (combination-fun thing))))
-             (or (modular-version-info name :untagged nil) name))
-       ((+ -)
-        (let ((min sb-xc:most-positive-fixnum)
-              (itype (specifier-type 'integer)))
-          (dolist (arg (combination-args thing) min)
-            (if (csubtypep (lvar-type arg) itype)
-                (setf min (min min (count-low-order-zeros arg)))
-                (return 0)))))
-       (*
-        (let ((result 0)
-              (itype (specifier-type 'integer)))
-          (dolist (arg (combination-args thing) result)
-            (if (csubtypep (lvar-type arg) itype)
-                (setf result (+ result (count-low-order-zeros arg)))
-                (return 0)))))
-       (ash
-        (let ((args (combination-args thing)))
-          (if (= (length args) 2)
-              (let ((amount (second args)))
-                (if (constant-lvar-p amount)
-                    (max (+ (count-low-order-zeros (first args))
-                            (lvar-value amount))
-                         0)
-                    0))
-              0)))
-       (t
-        0)))
-    (integer
-     (if (zerop thing)
-         sb-xc:most-positive-fixnum
-         (do ((result 0 (1+ result))
-              (num thing (ash num -1)))
-             ((logbitp 0 num) result))))
-    (cast
-     (count-low-order-zeros (cast-value thing)))
-    (t
-     0)))
-
-(deftransform / ((numerator denominator) (integer integer))
-  "convert x/2^k to shift"
-  (unless (constant-lvar-p denominator)
-    (give-up-ir1-transform))
-  (let* ((denominator (lvar-value denominator))
-         (bits (1- (integer-length denominator))))
-    (unless (and (> denominator 0) (= (ash 1 bits) denominator))
-      (give-up-ir1-transform))
-    (let ((alignment (count-low-order-zeros numerator)))
-      (unless (>= alignment bits)
-        (give-up-ir1-transform))
-      `(ash numerator ,(- bits)))))
-
-(deftransform ash ((value amount))
-  (let ((value-node (lvar-uses value)))
-    (unless (combination-p value-node)
-      (give-up-ir1-transform))
-    (let ((inside-fun-name (lvar-fun-name (combination-fun value-node))))
-      (multiple-value-bind (prototype width)
-          (modular-version-info inside-fun-name :untagged nil)
-        (unless (eq (or prototype inside-fun-name) 'ash)
-          (give-up-ir1-transform))
-        (when (and width (not (constant-lvar-p amount)))
-          (give-up-ir1-transform))
-        (let ((inside-args (combination-args value-node)))
-          (unless (= (length inside-args) 2)
-            (give-up-ir1-transform))
-          (let ((inside-amount (second inside-args)))
-            (unless (and (constant-lvar-p inside-amount)
-                         (not (minusp (lvar-value inside-amount))))
-              (give-up-ir1-transform)))
-          (splice-fun-args value inside-fun-name 2)
-          (if width
-              `(lambda (value amount1 amount2)
-                 (logand (ash value (+ amount1 amount2))
-                         ,(1- (ash 1 (+ width (lvar-value amount))))))
-              `(lambda (value amount1 amount2)
-                 (ash value (+ amount1 amount2)))))))))
-
 ;;;; ALIEN-FUNCALL support
 
 (deftransform alien-funcall ((function &rest args)
@@ -810,11 +728,19 @@
         (cond
           #+arm-softfp
           ((and lvar
-                (proper-list-of-length-p result-tns 3)
-                (symbolp (third result-tns)))
+                (fourth result-tns))
            (emit-template call block
-                          (template-or-lose (third result-tns))
-                          (reference-tn-list (butlast result-tns) nil)
-                          (reference-tn (car (ir2-lvar-locs (lvar-info lvar))) t)))
+                          (template-or-lose (fourth result-tns))
+                          (reference-tn-list (butlast result-tns 2) nil)
+                          (reference-tn (third result-tns) t))
+           (move-lvar-result call block (list (third result-tns)) lvar))
           (t
            (move-lvar-result call block result-tns lvar)))))))
+
+(deftransform sb-alien::c-string-external-format ((type)
+                                                  ((constant-arg sb-alien::alien-c-string-type)))
+  (let ((format (sb-alien::alien-c-string-type-external-format
+                 (lvar-value type))))
+    (if (eq format :default)
+        `(sb-alien::default-c-string-external-format)
+        `',format)))

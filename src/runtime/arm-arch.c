@@ -24,11 +24,6 @@
 #include "breakpoint.h"
 #include "monitor.h"
 
-void arch_init(void)
-{
-    return;
-}
-
 os_vm_address_t arch_get_bad_addr(int sig, siginfo_t *code, os_context_t *context)
 {
     return (os_vm_address_t)code->si_addr;
@@ -73,6 +68,7 @@ boolean arch_pseudo_atomic_atomic(os_context_t *context)
 
 void arch_set_pseudo_atomic_interrupted(os_context_t *context)
 {
+    extern void do_pending_interrupt();
     SetSymbolValue(PSEUDO_ATOMIC_INTERRUPTED, (lispobj)do_pending_interrupt, 0);
 }
 
@@ -125,8 +121,6 @@ arch_handle_single_step_trap(os_context_t *context, int trap)
 
 
 
-#ifdef LISP_FEATURE_LINKAGE_TABLE
-
 /* Linkage tables
  *
  * Linkage entry size is 16, because we need 4 instructions.
@@ -134,8 +128,11 @@ arch_handle_single_step_trap(os_context_t *context, int trap)
 
 #define LINKAGE_TEMP_REG        reg_NFP
 
-void arch_write_linkage_table_entry(char *reloc_addr, void *target_addr, int datap)
+void arch_write_linkage_table_entry(int index, void *target_addr, int datap)
 {
+  // allocate successive entries downward
+  char *reloc_addr =
+      (char*)LINKAGE_TABLE_SPACE_END - (index + 1) * LINKAGE_TABLE_ENTRY_SIZE;
   if (datap) {
     *(unsigned long *)reloc_addr = (unsigned long)target_addr;
     return;
@@ -172,4 +169,3 @@ void arch_write_linkage_table_entry(char *reloc_addr, void *target_addr, int dat
 
   os_flush_icache((os_vm_address_t) reloc_addr, (char*) inst_ptr - reloc_addr);
 }
-#endif

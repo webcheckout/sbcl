@@ -56,9 +56,11 @@
   (:result-types fixnum)
   (:temporary (:scs (non-descriptor-reg)) temp)
   (:generator 1
-    (inst lr temp (- (ash (+ instance-slots-offset
-                             (get-dsd-index layout sb-kernel::%bits))
-                          word-shift) instance-pointer-lowtag))
+    (inst lr temp (- (+ #+little-endian 4
+                        (ash (+ instance-slots-offset
+                                (get-dsd-index layout sb-kernel::%bits))
+                             word-shift))
+                     instance-pointer-lowtag))
     (inst lwax res object temp)))
 
 (define-vop (%other-pointer-widetag)
@@ -120,8 +122,7 @@
   (:results (res :scs (any-reg descriptor-reg)))
   (:policy :fast-safe)
   (:generator 1
-    (inst andi. res ptr lowtag-mask)
-    (inst sldi res res 1)))
+    (inst clrrdi res ptr n-fixnum-tag-bits)))
 
 
 ;;;; Allocation
@@ -161,8 +162,9 @@
   (:results (sap :scs (sap-reg)))
   (:result-types system-area-pointer)
   (:generator 10
-    ;; FIXME: should be zero-extending 4 byte load
-    (loadw ndescr code code-boxed-size-slot other-pointer-lowtag)
+    (inst lwz ndescr code
+          (- (+ (ash code-boxed-size-slot word-shift) #+big-endian 4)
+             other-pointer-lowtag))
     (inst subi ndescr ndescr other-pointer-lowtag)
     (inst add sap code ndescr)))
 
@@ -173,8 +175,9 @@
   (:results (func :scs (descriptor-reg)))
   (:temporary (:scs (non-descriptor-reg)) ndescr)
   (:generator 10
-    ;; FIXME: should be zero-extending 4 byte load
-    (loadw ndescr code code-boxed-size-slot other-pointer-lowtag)
+    (inst lwz ndescr code
+          (- (+ (ash code-boxed-size-slot word-shift) #+big-endian 4)
+             other-pointer-lowtag))
     (inst add ndescr ndescr offset)
     (inst addi ndescr ndescr (- fun-pointer-lowtag other-pointer-lowtag))
     (inst add func code ndescr)))
@@ -200,8 +203,8 @@
   (:arg-types signed-num)
   (:policy :fast-safe)
   (:generator 2
-    (inst slwi n n word-shift)
-    (inst lwzx sap thread-base-tn n)))
+    (inst sldi n n word-shift)
+    (inst ldx sap thread-base-tn n)))
 
 (define-vop (halt)
   (:generator 1
@@ -252,7 +255,7 @@
   (:generator 3))
 
 ;;;; Dummy definition for a spin-loop hint VOP
-(define-vop (spin-loop-hint)
+(define-vop ()
   (:translate spin-loop-hint)
   (:policy :fast-safe)
   (:generator 0))

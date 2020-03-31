@@ -21,7 +21,8 @@
       (format t "~6d TOTAL TIME (~a)~%" actual-total file))))
 
 (defun clear-test-status ()
-  (with-open-file (stream "test-status.lisp-expr"
+  (with-open-file (stream #.(merge-pathnames "test-status.lisp-expr"
+                                             *load-pathname*)
                           :direction :output
                           :if-exists :supersede)
     (write-line "NIL" stream)))
@@ -36,7 +37,8 @@
         (start-time (get-internal-real-time)))
     (declare (special test-util::*deferred-test-forms*))
     (makunbound 'test-util::*deferred-test-forms*)
-    (load file :external-format :utf-8)
+    (let ((*features* (append *features* sb-impl:+internal-features+)))
+      (load file :external-format :utf-8))
     (when (boundp 'test-util::*deferred-test-forms*)
       ;; Execute all tests that were wrapped in WITH-TEST
       (let ((holder test-util::*deferred-test-forms*))
@@ -63,7 +65,8 @@
   (let ((test-util:*elapsed-times*)
         (start-time (get-internal-real-time)))
     (with-scratch-file (fasl "fasl")
-      (compile-file file :print nil :output-file fasl)
+      (let ((*features* (append *features* sb-impl:+internal-features+)))
+        (compile-file file :print nil :output-file fasl))
       (test-util::record-test-elapsed-time "(compile-file)" start-time)
       (load fasl)
       ;; TODO: as above, execute queued tests if within-file concurrency was enabled.

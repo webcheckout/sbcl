@@ -54,6 +54,8 @@
 ;;     prior to static page.
 (defmacro !gencgc-space-setup
     (small-spaces-start
+          ;; These keywords variables have to be careful not to overlap with the
+          ;; the DEFCONSTANT of the same name, hence the suffix.
           &key ((:dynamic-space-start dynamic-space-start*))
                ((:dynamic-space-size dynamic-space-size*))
                ;; The immobile-space START parameters should not be used
@@ -63,7 +65,8 @@
                ((:fixedobj-space-size  fixedobj-space-size*) (* 24 1024 1024))
                ((:varyobj-space-start  varyobj-space-start*))
                ((:varyobj-space-size   varyobj-space-size*) (* 104 1024 1024))
-               (small-space-size #x100000))
+               (small-space-size #x100000)
+               ((:read-only-space-size ro-space-size) small-space-size))
   (declare (ignorable dynamic-space-start*)) ; might be unused in make-host-2
   (flet ((defconstantish (relocatable symbol value)
            (if (not relocatable) ; easy case
@@ -75,13 +78,12 @@
                ;; but can't be due to dependency order problem.
                )))
     (let*
-        ((spaces (append `((read-only ,small-space-size)
+        ((spaces (append `((read-only ,ro-space-size)
+                           (linkage-table ,small-space-size)
                            #+sb-safepoint
-                           (safepoint ,(symbol-value '+backend-page-bytes+)
-                                      gc-safepoint-page-addr)
+                           ;; Must be just before NIL.
+                           (safepoint ,(symbol-value '+backend-page-bytes+) gc-safepoint-page-addr)
                            (static ,small-space-size))
-                         #+linkage-table
-                         `((linkage-table ,small-space-size))
                          #+immobile-space
                          `((fixedobj ,fixedobj-space-size*)
                            (varyobj ,varyobj-space-size*))))
@@ -93,7 +95,7 @@
                           ;; TODO: linkage-table could move with code, if the CPU
                           ;; prefers PC-relative jumps, and we emit better code
                           ;; (which we don't- for x86 we jmp via RBX always)
-                          #+relocatable-heap (member space '(fixedobj varyobj)))
+                          (member space '(fixedobj varyobj)))
                         (start ptr)
                         (end (+ ptr size)))
                    (setf ptr end)
@@ -116,7 +118,7 @@
                                       ,(- end start)))))))))))
       `(progn
          ,@small-space-forms
-         ,(defconstantish (or #+relocatable-heap t) 'dynamic-space-start
+         ,(defconstantish t 'dynamic-space-start
             (or dynamic-space-start* ptr))
          (defconstant default-dynamic-space-size
            ;; Build-time make-config.sh option "--dynamic-space-size" overrides
@@ -150,11 +152,13 @@
     sb-unix::signal-handler-callback)
   #'equal)
 
-;;; Static symbols that C code must be able to assign to,
+;;; (potentially) static symbols that C code must be able to assign to,
 ;;; as contrasted with static for other reasons such as:
 ;;;  - garbage collections roots (namely NIL)
 ;;;  - other symbols that Lisp codegen must hardwire (T)
 ;;;  - static for efficiency of access but need not be
+;;; On #+sb-thread builds, these are not static, because access to them
+;;; is via the TLS, not the symbol.
 (defconstant-eqx !per-thread-c-interface-symbols
   `((*free-interrupt-context-index* 0)
     (sb-sys:*allow-with-interrupts* t)
@@ -204,16 +208,12 @@
 
     ;; threading support
     #+sb-thread *free-tls-index*
-    ;; Keep in sync with 'compiler/early-backend.lisp':
+    ;; Keep in sync with 'code/target-thread.lisp':
     ;;  "only PPC uses a separate symbol for the TLS index lock"
-    #+(and sb-thread ppc) *tls-index-lock*
+    #+(and sb-thread (or ppc ppc64)) *tls-index-lock*
 
     ;; dynamic runtime linking support
-    #+sb-dynamic-core +required-foreign-symbols+
-
-    ;; List of Lisp specials bindings made by create_thread_struct()
-    ;; excluding the names in !PER-THREAD-C-INTERFACE-SYMBOLS.
-    sb-thread::*thread-initial-bindings*
+    #+linkage-table +required-foreign-symbols+
 
     ;;; The following symbols aren't strictly required to be static
     ;;; - they are not accessed from C - but we make them static in order
@@ -247,6 +247,7 @@
   (defconstant +pseudo-static-generation+ 6))
 
 (defparameter *runtime-asm-routines* nil)
+(defparameter *linkage-space-predefined-entries* nil)
 
 (push '("SB-VM" +c-callable-fdefns+ +common-static-symbols+)
       *!removable-symbols*)

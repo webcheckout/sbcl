@@ -118,7 +118,7 @@
     (emit-label start-lab)
     ;; Allocate function header.
     (inst simple-fun-header-word)
-    (inst .skip (* (1- simple-fun-code-offset) n-word-bytes))
+    (inst .skip (* (1- simple-fun-insts-offset) n-word-bytes))
     ;; The start of the actual code.
     ;; Fix CODE, cause the function object was passed in.
     (inst compute-code-from-fn code-tn code-tn start-lab temp)))
@@ -731,7 +731,7 @@ default-value-8
                     (inst b :eq step-done-label)
                     (inst nop)
                     ;; FIXME: this doesn't look right.
-                    (note-this-location vop :step-before-vop)
+                    (note-this-location vop :internal-error)
                     ;; Construct a trap code with the low bits from
                     ;; SINGLE-STEP-AROUND-TRAP and the high bits from
                     ;; the register number of CALLABLE-TN.
@@ -778,7 +778,7 @@ default-value-8
 
            (note-this-location vop :call-site)
            (inst j function
-                 (- (ash simple-fun-code-offset word-shift)
+                 (- (ash simple-fun-insts-offset word-shift)
                     fun-pointer-lowtag))
            (inst move code-tn function))
 
@@ -1062,7 +1062,7 @@ default-value-8
   (:translate %more-arg))
 
 ;;; Turn more arg (context, count) into a list.
-(define-vop (listify-rest-args)
+(define-vop ()
   (:args (context-arg :target context :scs (descriptor-reg))
          (count-arg :target count :scs (any-reg)))
   (:arg-types * tagged-num)
@@ -1090,7 +1090,7 @@ default-value-8
       (pseudo-atomic ()
         ;; Allocate a cons (2 words) for each item.
         (inst sll temp count 1)
-        (allocation result temp list-pointer-lowtag
+        (allocation 'list temp list-pointer-lowtag result
                     :stack-p dx-p
                     :temp-tn dst)
         (inst b enter)
@@ -1128,7 +1128,7 @@ default-value-8
 ;;; info from being returned as values.  What we do is compute
 ;;; supplied - fixed, and return a pointer that many words below the current
 ;;; stack top.
-(define-vop (more-arg-context)
+(define-vop ()
   (:policy :fast-safe)
   (:translate sb-c::%more-arg-context)
   (:args (supplied :scs (any-reg)))
@@ -1182,6 +1182,6 @@ default-value-8
     (inst cmp stepping zero-tn)
     (inst b :eq DONE)
     (inst nop)
-    (note-this-location vop :step-before-vop)
+    (note-this-location vop :internal-error)
     (inst unimp single-step-before-trap)
     DONE))

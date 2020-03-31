@@ -35,12 +35,10 @@ extern int foreign_function_call_active;
 extern os_vm_size_t dynamic_space_size;
 extern os_vm_size_t thread_control_stack_size;
 
-#if defined(LISP_FEATURE_RELOCATABLE_HEAP)
 #ifdef LISP_FEATURE_CHENEYGC
 extern uword_t DYNAMIC_0_SPACE_START, DYNAMIC_1_SPACE_START;
 #else
 extern uword_t DYNAMIC_SPACE_START;
-#endif
 #endif
 #ifdef LISP_FEATURE_IMMOBILE_SPACE
 extern uword_t FIXEDOBJ_SPACE_START, VARYOBJ_SPACE_START;
@@ -48,6 +46,11 @@ extern uword_t immobile_space_lower_bound, immobile_space_max_offset;
 extern uword_t immobile_range_1_max_offset, immobile_range_2_min_offset;
 extern unsigned int varyobj_space_size;
 #endif
+extern uword_t asm_routines_start, asm_routines_end;
+
+static inline lispobj points_to_asm_code_p(uword_t ptr) {
+    return asm_routines_start <= ptr && ptr < asm_routines_end;
+}
 
 extern boolean alloc_profiling;
 extern os_vm_address_t alloc_profile_buffer;
@@ -87,7 +90,9 @@ extern lispobj *current_binding_stack_pointer;
  *  moment, it is also used by the GENCGC, to hold the pseudo_atomic
  *  bits, and is tightly coupled to reg_ALLOC by the assembly
  *  routines. */
+#if !(defined LISP_FEATURE_ARM || defined LISP_FEATURE_ARM64 || defined LISP_FEATURE_RISCV)
 extern lispobj *dynamic_space_free_pointer;
+#endif
 extern lispobj *read_only_space_free_pointer;
 extern lispobj *static_space_free_pointer;
 #ifdef LISP_FEATURE_IMMOBILE_SPACE
@@ -171,7 +176,9 @@ EXTERN(current_control_frame_pointer, POINTERSIZE)
 # if !defined(LISP_FEATURE_X86) && !defined(LISP_FEATURE_X86_64)
 EXTERN(current_binding_stack_pointer, POINTERSIZE)
 # endif
-# ifndef LISP_FEATURE_GENCGC
+// don't want an undefined C symbol for this in 'nm' output, it's confusing
+# if defined LISP_FEATURE_CHENEYGC && \
+  !(defined LISP_FEATURE_ARM || defined LISP_FEATURE_ARM64 || defined LISP_FEATURE_RISCV)
 EXTERN(dynamic_space_free_pointer, POINTERSIZE)
 # endif
 

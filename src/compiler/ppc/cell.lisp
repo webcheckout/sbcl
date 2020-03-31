@@ -224,7 +224,7 @@
   (:result-types positive-fixnum)
   (:generator 2
     ;; The symbol-hash slot of NIL holds NIL because it is also the
-    ;; cdr slot, so we have to strip off the two low bits to make sure
+    ;; car slot, so we have to strip off the two low bits to make sure
     ;; it is a fixnum.  The lowtag selection magic that is required to
     ;; ensure this is explained in the comment in objdef.lisp
     (loadw res symbol symbol-hash-slot other-pointer-lowtag)
@@ -264,9 +264,9 @@
       (inst cmpwi type simple-fun-widetag)
       ;;(inst mr lip function)
       (inst addi lip function
-            (- (ash simple-fun-code-offset word-shift) fun-pointer-lowtag))
+            (- (ash simple-fun-insts-offset word-shift) fun-pointer-lowtag))
       (inst beq normal-fn)
-      (inst lr lip (make-fixup 'closure-tramp :assembly-routine))
+      (load-asm-rtn-addr lip 'closure-tramp)
       (emit-label normal-fn)
       (storew lip fdefn fdefn-raw-addr-slot other-pointer-lowtag)
       (storew function fdefn fdefn-fun-slot other-pointer-lowtag)
@@ -280,7 +280,7 @@
   (:results (result :scs (descriptor-reg)))
   (:generator 38
     (storew null-tn fdefn fdefn-fun-slot other-pointer-lowtag)
-    (inst lr temp (make-fixup 'undefined-tramp :assembly-routine))
+    (load-asm-rtn-addr temp 'undefined-tramp)
     (storew temp fdefn fdefn-raw-addr-slot other-pointer-lowtag)
     (move result fdefn)))
 
@@ -463,18 +463,15 @@
 
 ;;;; Instance hackery:
 
-(define-vop (instance-length)
+(define-vop ()
   (:policy :fast-safe)
   (:translate %instance-length)
   (:args (struct :scs (descriptor-reg)))
-  (:temporary (:scs (non-descriptor-reg)) temp)
   (:results (res :scs (unsigned-reg)))
   (:result-types positive-fixnum)
   (:generator 4
-    (loadw temp struct 0 instance-pointer-lowtag)
-    ;; shift right 8 and mask 15 low bits =
-    ;; rotate left 24, take bit indices 17 through 31.
-    (inst rlwinm res temp (- 32 n-widetag-bits) 17 31)))
+    (loadw res struct 0 instance-pointer-lowtag)
+    (inst srwi res res n-widetag-bits)))
 
 (define-vop (instance-index-ref word-index-ref)
   (:policy :fast-safe)

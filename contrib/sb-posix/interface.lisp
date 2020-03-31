@@ -100,8 +100,8 @@
 ;;; variable.
 (eval-when (:compile-toplevel :load-toplevel)
   (setf *c-functions-in-runtime*
-        #+netbsd '("stat" "lstat" "fstat" "readdir" "opendir")
-        #-netbsd '()))
+        (append #+netbsd '("stat" "lstat" "fstat" "readdir" "opendir")
+                #+(and (or arm64 riscv ppc ppc64) linux) '("stat" "lstat" "fstat"))))
 
 
 ;;; filesystem access

@@ -86,7 +86,7 @@
   (:node-var node)
   (:note "SSE to pointer coercion")
   (:generator 13
-     (fixed-alloc y simd-pack-widetag simd-pack-size node)
+     (alloc-other y simd-pack-widetag simd-pack-size node)
        ;; see *simd-pack-element-types*
      (storew (fixnumize
               (sc-case x
@@ -95,8 +95,7 @@
                 (int-sse-reg 0)
                 (t 0)))
          y simd-pack-tag-slot other-pointer-lowtag)
-     (let ((ea (make-ea-for-object-slot
-                y simd-pack-lo-value-slot other-pointer-lowtag)))
+     (let ((ea (object-slot-ea y simd-pack-lo-value-slot other-pointer-lowtag)))
        (if (float-sse-p x)
            (inst movaps ea x)
            (inst movdqa ea x)))))
@@ -108,8 +107,7 @@
   (:results (y :scs (int-sse-reg double-sse-reg single-sse-reg)))
   (:note "pointer to SSE coercion")
   (:generator 2
-    (let ((ea (make-ea-for-object-slot
-               x simd-pack-lo-value-slot other-pointer-lowtag)))
+    (let ((ea (object-slot-ea x simd-pack-lo-value-slot other-pointer-lowtag)))
       (if (float-sse-p y)
           (inst movaps y ea)
           (inst movdqa y ea)))))
@@ -189,7 +187,7 @@
   (:result-types t)
   (:node-var node)
   (:generator 13
-    (fixed-alloc dst simd-pack-widetag simd-pack-size node)
+    (alloc-other dst simd-pack-widetag simd-pack-size node)
       ;; see *simd-pack-element-types*
     (storew tag dst simd-pack-tag-slot other-pointer-lowtag)
     (storew lo dst simd-pack-lo-value-slot other-pointer-lowtag)

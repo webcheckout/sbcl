@@ -175,12 +175,27 @@
     (inst mov :byte temp (ea (- other-pointer-lowtag) x))
     (storew temp x 0 other-pointer-lowtag)
     (move res x)))
-;;; Set the bit indicating that instances of this type require
-;;; special treatment of slot index 0.
-(define-vop (set-custom-gc-scavenge-bit)
+(define-vop (set-header-bits)
+  (:translate set-header-bits)
+  (:policy :fast-safe)
   (:args (x :scs (descriptor-reg)))
+  (:arg-types t (:constant t))
+  (:info bits)
   (:generator 1
-    (inst or :byte (ea (- 3 instance-pointer-lowtag) x) #x80)))
+    (if (typep bits '(unsigned-byte 8))
+        (inst or :byte (ea (- 1 other-pointer-lowtag) x) bits)
+        (inst or :dword (ea (- other-pointer-lowtag) x) (ash bits n-widetag-bits)))))
+(define-vop (unset-header-bits)
+  (:translate unset-header-bits)
+  (:policy :fast-safe)
+  (:args (x :scs (descriptor-reg)))
+  (:arg-types t (:constant t))
+  (:info bits)
+  (:generator 1
+    (if (typep bits '(unsigned-byte 8))
+        (inst and :byte (ea (- 1 other-pointer-lowtag) x) (lognot bits))
+        (inst and :dword (ea (- other-pointer-lowtag) x)
+              (lognot (ash bits n-widetag-bits))))))
 
 (define-vop (get-header-data-high)
   (:translate get-header-data-high)
@@ -217,8 +232,7 @@
   (:policy :fast-safe)
   (:generator 1
     (move res ptr)
-    (inst and res (constantize (dpb -1 (byte (- n-word-bits n-fixnum-tag-bits 1)
-                                             n-fixnum-tag-bits) 0)))))
+    (inst and res (lognot fixnum-tag-mask))))
 
 ;;;; allocation
 
@@ -294,7 +308,7 @@
   (:generator 3
     (loadw result function closure-fun-slot fun-pointer-lowtag)
     (inst lea result
-          (ea  (- fun-pointer-lowtag (* simple-fun-code-offset n-word-bytes))
+          (ea  (- fun-pointer-lowtag (* simple-fun-insts-offset n-word-bytes))
                result))))
 
 ;;;; symbol frobbing
@@ -308,7 +322,7 @@
   (inst lea :dword temp (ea (- list-pointer-lowtag) result))
   (inst test :byte temp lowtag-mask)
   (inst cmov :e result
-        (make-ea-for-object-slot result cons-cdr-slot list-pointer-lowtag)))
+        (object-slot-ea result cons-cdr-slot list-pointer-lowtag)))
 
 (define-vop (symbol-info-vector)
   (:policy :fast-safe)
@@ -444,10 +458,17 @@ number of CPU cycles elapsed as secondary value. EXPERIMENTAL."
 
 ;;;; Memory barrier support
 
+;;; Some of these might not really have to inhibit 'instcombine'
+;;; but conservatively it's always the right choice.
+;;; Certainly for redundant move elimination of the reg->reg, reg->reg form
+;;; the barrier is irrelevant, but (a) that won't happen, and (b) we never
+;;; had an instcombine pass so who cares if occasionally it fails to apply?
 (define-vop (%compiler-barrier)
   (:policy :fast-safe)
   (:translate %compiler-barrier)
-  (:generator 3))
+  (:generator 3
+    ;; inhibit instcombine across any barrier
+    (inst .skip 0)))
 
 (define-vop (%memory-barrier)
   (:policy :fast-safe)
@@ -458,19 +479,25 @@ number of CPU cycles elapsed as secondary value. EXPERIMENTAL."
 (define-vop (%read-barrier)
   (:policy :fast-safe)
   (:translate %read-barrier)
-  (:generator 3))
+  (:generator 3
+    ;; inhibit instcombine across any barrier
+    (inst .skip 0)))
 
 (define-vop (%write-barrier)
   (:policy :fast-safe)
   (:translate %write-barrier)
-  (:generator 3))
+  (:generator 3
+    ;; inhibit instcombine across any barrier
+    (inst .skip 0)))
 
 (define-vop (%data-dependency-barrier)
   (:policy :fast-safe)
   (:translate %data-dependency-barrier)
-  (:generator 3))
+  (:generator 3
+    ;; inhibit instcombine across any barrier
+    (inst .skip 0)))
 
-(define-vop (pause)
+(define-vop ()
   (:translate spin-loop-hint)
   (:policy :fast-safe)
   (:generator 0
@@ -509,3 +536,14 @@ number of CPU cycles elapsed as secondary value. EXPERIMENTAL."
    (move b ebx)
    (move c ecx)
    (move d edx)))
+
+(define-vop (set-fdefn-has-static-callers)
+  (:args (fdefn :scs (descriptor-reg)))
+  (:generator 1
+    ;; atomic because the immobile gen# is in the same byte
+    (inst or :byte (ea (- 1 other-pointer-lowtag) fdefn) #x80 :lock)))
+(define-vop (unset-fdefn-has-static-callers)
+  (:args (fdefn :scs (descriptor-reg)))
+  (:generator 1
+    ;; atomic because the immobile gen# is in the same byte
+    (inst and :byte (ea (- 1 other-pointer-lowtag) fdefn) #x7f :lock)))
