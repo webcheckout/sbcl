@@ -1,3 +1,14 @@
+WEBCO FORK INFO
+
+This is a fork of SBCL.  Apart from these additions to the README file, 
+the only deviation of this fork from upstream is a change in 
+src/runtime/monitor.c changing the behavior of LDB from interactive to
+a "print-stacktrace-and-exit" model.
+
+Now back to your regularly scheduled README file.
+
+=======================================================================
+
 GENERAL INFORMATION
 
 Welcome to SBCL.
